@@ -1,0 +1,251 @@
+Tu vas créer le squelette CI/CD complet du projet SealKeeper, conformément aux spécifications déjà commitées dans `docs/prd/`.
+
+CONTEXTE
+========
+
+SealKeeper est un distributeur de mots de passe ANSSI-compliant, écrit en Go (backend) + JavaScript (bundle générateur navigateur), distribué sous AGPL v3. Le PRD complet est figé en v1.0 — il est la référence canonique pour toute décision.
+
+**Objectif de cette tâche** : livrer une **stack Docker prête à déployer immédiatement**. Le résultat doit permettre à un évaluateur de cloner le repo, lire 3 lignes du QUICKSTART, lancer `docker compose up -d` ou un `docker run` one-liner, et avoir une instance fonctionnelle en moins de 5 minutes. Le CI/CD doit produire à la fois :
+- Les **binaires** signés et reproductibles
+- L'**image OCI distroless** multi-arch poussée sur ghcr.io
+- Le **bundle de déploiement complet** (docker-compose + .env.example + Caddyfile + manifests K8s + Helm chart) testé end-to-end avant publication
+
+L'image Docker seule ne suffit pas. Le smoke test de release doit valider que **le déploiement Compose complet fonctionne** avant que la release ne soit publiée.
+
+ÉTAPE 1 — LIRE LE PRD AVANT TOUTE ACTION
+=========================================
+
+Avant d'écrire le moindre fichier, lis intégralement et dans cet ordre :
+
+1. `docs/prd/L-quality-release.md` — stratégie complète tests + CI/CD + signing
+2. `docs/prd/H-deployment.md` — artefacts à produire, modes de déploiement
+3. `docs/prd/D-backend.md` (sections architecture Go et CLI) — pour comprendre la stack
+4. `docs/prd/README.md` — index général
+5. `docs/prd/00-work-plan.md` — méthodologie projet
+
+Confirme-moi en une phrase que tu as lu ces 5 fichiers avant de passer à l'étape 2.
+
+ÉTAPE 2 — LIVRABLES À PRODUIRE
+================================
+
+Crée les fichiers suivants dans cet ordre (un commit par fichier, message Conventional Commits) :
+
+A) `.github/workflows/ci.yml`
+   - Trigger : pull_request + push sur main
+   - Stages séquentiels :
+     * lint (golangci-lint, gofmt, prettier, eslint, hadolint, shellcheck, yamllint, markdownlint)
+     * build (go build multi-arch linux/amd64 + linux/arm64, bundle JS vitest build)
+     * test-go (testing + testify/require + testcontainers-go pour PostgreSQL, race detector ON)
+     * test-js (Vitest, couverture ≥ 90% sur le générateur)
+     * sast (govulncheck bloquant sur CVE haute/critique, gosec, staticcheck, semgrep)
+     * e2e-subset (Playwright happy path uniquement, Chromium seul)
+     * coverage (Codecov upload)
+   - Matrix : Go 1.22 + Go 1.23 sur ubuntu-latest
+   - Caching : modules Go, npm, Playwright browsers
+   - Cible : pipeline < 15 minutes
+   - Status checks pour branche main protégée
+
+B) `.github/workflows/release.yml`
+   - Trigger : push tag `v*.*.*`
+   - Vérification : tag annoté + signé GPG (refuser sinon)
+   - Stages :
+     * build multi-arch (linux/amd64, linux/arm64, darwin/amd64, darwin/arm64)
+     * tests complets (incluant E2E full multi-navigateurs Chromium/Firefox/WebKit + axe-core a11y)
+     * build image OCI distroless via docker buildx (multi-arch)
+     * scan Trivy bloquant sur CVE haute/critique
+     * SBOM CycloneDX 1.5 via syft (binaires + image)
+     * cosign keyless signing (image OCI, Rekor transparency log)
+     * GPG sign SHA256SUMS
+     * push image vers ghcr.io/sealkeeper/sealkeeper:<version> + :latest
+     * package Helm chart + push vers sealkeeper.eu/charts (placeholder path à documenter)
+     * provenance SLSA niveau 2 via GitHub OIDC + cosign
+     * **assemblage du bundle de déploiement clé en main** (CRITIQUE — cf. ci-dessous)
+     * **smoke test du bundle Compose complet** (CRITIQUE — cf. ci-dessous)
+     * GitHub Release avec artefacts attachés + notes de release
+     * smoke test post-release image seule (docker pull + run + check /healthz)
+   - Cible : pipeline < 30 minutes
+
+   **Bundle de déploiement clé en main** : la release produit un tarball `sealkeeper-deploy-<version>.tar.gz` (et zip équivalent) contenant :
+   - `docker-compose.yml` (Sealkeeper + PostgreSQL 16 + Caddy, conforme module H §3.3 et FR-H.20 à FR-H.27)
+   - `.env.example` avec TOUTES les variables `SK_*` documentées et valeurs placeholder sûres (master secret à générer côté utilisateur)
+   - `Caddyfile` de référence (FR-H.43)
+   - `examples/traefik/docker-compose.traefik.yml` (FR-H.44)
+   - `examples/nginx/sealkeeper.conf` (FR-H.45)
+   - Manifests Kubernetes vanilla (`k8s/deployment.yaml`, `service.yaml`, `ingress.yaml`, `configmap.yaml`, `secret.example.yaml`, `networkpolicy.yaml`, `poddisruptionbudget.yaml`) — FR-H.5
+   - Helm chart packagé (`sealkeeper-<version>.tgz`)
+   - `README-DEPLOY.md` quickstart : 3 modes (eval one-liner / Compose / K8s) avec commandes copiables
+   - `SHA256SUMS` et `SHA256SUMS.asc` (signature GPG du mainteneur)
+   - `LICENSE` (AGPL v3)
+   - `CHANGELOG-excerpt.md` (extrait des changements de cette version)
+
+   **Smoke test du bundle Compose** (stage à insérer APRÈS l'assemblage du bundle, AVANT la création de la GitHub Release) :
+   - Extraire le bundle dans un dossier temporaire CI
+   - Générer un master secret factice via `openssl rand -base64 32`
+   - Renseigner le `.env` minimal nécessaire (master secret, SK_BASE_URL=http://localhost:8443, SK_MODE=eval pour le test)
+   - Exécuter `docker compose up -d`
+   - Attendre que le healthcheck soit vert (boucle sur `/healthz` avec timeout 60s)
+   - Faire un `curl` sur la page publique `/` (vérifier 200 OK)
+   - Faire un `curl` sur `/api/v1/policy` (vérifier 200 OK avec JSON)
+   - Vérifier qu'un email de demande déclenche bien une capture (route `/__captured_mail` en mode eval)
+   - Tear down propre (`docker compose down -v`)
+   - **Si une seule de ces vérifications échoue, la release entière est annulée**
+
+   **Mode eval one-liner** documenté dans les notes de release :
+docker run --rm -p 8443:8443 -e SK_MODE=eval ghcr.io/sealkeeper/sealkeeper:<version>
+   Doit fonctionner sans aucune config additionnelle (master secret auto-généré, SQLite, bootstrap admin password en logs — conforme FR-H.11 à FR-H.19).
+
+C) `.github/workflows/nightly.yml`
+   - Trigger : cron quotidien (02:00 UTC) + workflow_dispatch
+   - Stages :
+     * E2E complet multi-navigateurs
+     * Tests de charge k6 (scripts dans tests/load/)
+     * SAST profond (semgrep avec règles étendues)
+     * Re-scan CVE des dépendances Go + npm
+   - Notification Slack ou email en cas d'échec (paramétrable via secret)
+
+D) `.github/workflows/security.yml`
+   - Trigger : cron hebdomadaire (lundi 06:00 UTC) + workflow_dispatch
+   - Re-scan complet dépendances (govulncheck + npm audit)
+   - Re-scan image latest avec Trivy mis à jour
+   - Création automatique d'issues si vulnérabilité haute/critique détectée
+
+E) `.github/workflows/docs.yml`
+   - Trigger : push sur main si changements dans `docs/**` ou `web/site/**`
+   - Build du site statique sealkeeper.eu (préciser le générateur dans le prompt si non déterminé, sinon laisser TODO)
+   - Déploiement vers le bucket / pages prévu (placeholder, mentionner TODO de configuration)
+
+F) `.github/dependabot.yml` ou `renovate.json`
+   - Configuration MAJ automatique : Go modules, npm, Docker base images, GitHub Actions
+   - PRs hebdomadaires, groupage par éco-système
+   - Décision : choisis Renovate (plus configurable) sauf contrindication
+
+G) `.github/CODEOWNERS`
+   - Owner par défaut : @sched75
+   - Owners spécifiques pour `docs/prd/` (mainteneur principal), `.github/workflows/` (lui aussi)
+
+H) `.golangci.yml`
+   - Linters activés conformément à FR-L.39 : errcheck, govet, staticcheck, gosec, gocritic, revive, unused, gosimple, ineffassign, misspell
+   - Severity et exclusions raisonnables documentées
+
+I) `.pre-commit-config.yaml`
+   - Hooks : gofmt, goimports, prettier, eslint, markdownlint, hadolint, shellcheck, yamllint
+   - Pré-condition documentée dans CONTRIBUTING.md (sera créé séparément)
+
+J) `Dockerfile`
+   - Image distroless/static base
+   - Multi-stage build (builder + runtime minimal)
+   - USER 65532 (nonroot)
+   - Pas de shell, pas de curl/wget dans le runtime
+   - Labels OCI conformes (org.opencontainers.image.*)
+   - Annotation cosign-friendly
+
+K) `docs/release-checklist.md`
+   - Checklist humaine pré-release (10 points minimum, conforme FR-L.61 et §6.3 du module L)
+
+L) `docs/security/verification.md`
+   - Documentation utilisateur pour vérifier signature GPG + SBOM + provenance cosign
+
+M) `docker-compose.yml` (à la racine du repo)
+   - SealKeeper + PostgreSQL 16 + Caddy
+   - Volumes nommés : `sealkeeper-data`, `postgres-data`, `caddy-data`
+   - Réseau Docker interne (PostgreSQL non exposé publiquement)
+   - Healthcheck sur SealKeeper (curl /healthz)
+   - `restart: unless-stopped` sur les 3 services
+   - Logs JSON, rotation `max-size: 10m`, `max-file: 3`
+   - Conforme module H §3.3 FR-H.20 à FR-H.27 dans le moindre détail
+
+N) `.env.example` (à la racine du repo)
+   - TOUTES les variables `SK_*` documentées (cf. module H §3.5)
+   - Valeurs placeholder sûres : master secret à générer (commande copiable `openssl rand -base64 32`)
+   - Commentaires explicatifs en français + anglais
+   - Marquage clair des variables MUST vs SHOULD vs optionnelles
+
+O) `examples/caddy/Caddyfile`
+   - Reverse proxy Caddy avec HTTPS automatique Let's Encrypt
+   - Compression gzip + zstd
+   - Headers de sécurité (HSTS, CSP rappel)
+   - Cache statique sur `/static/*`
+   - Logging JSON dans `/var/log/caddy/sealkeeper-access.log`
+
+P) `examples/traefik/docker-compose.traefik.yml`
+   - Exemple Docker Compose avec Traefik comme reverse proxy
+   - Labels Traefik corrects pour routing
+   - Conforme FR-H.44
+
+Q) `examples/nginx/sealkeeper.conf`
+   - Configuration Nginx reverse proxy
+   - TLS terminaison
+   - `proxy_pass` vers SealKeeper backend
+   - Headers `X-Forwarded-*` corrects
+   - Conforme FR-H.45
+
+R) `k8s/` (dossier de manifests Kubernetes vanilla)
+   - `deployment.yaml` (Deployment, pas StatefulSet, conforme FR-H.30)
+   - `service.yaml` (ClusterIP)
+   - `ingress.yaml` (avec TLS via cert-manager en TODO commenté)
+   - `configmap.yaml` (variables d'env non sensibles)
+   - `secret.example.yaml` (template, ne JAMAIS commiter de vraie clé)
+   - `networkpolicy.yaml` (ingress depuis IC, egress vers PG + SMTP + SIEM, conforme FR-H.32)
+   - `poddisruptionbudget.yaml` (`minAvailable: 1`)
+   - `serviceaccount.yaml`
+   - `README.md` du dossier expliquant comment appliquer (`kubectl apply -k .` avec kustomization optionnelle)
+
+S) `helm/sealkeeper/` (chart Helm complet)
+   - Structure conforme module H §6.1 (Chart.yaml, values.yaml, templates/*.yaml, _helpers.tpl, NOTES.txt)
+   - Valeurs par défaut conformes module H §6.1 exemple values.yaml
+   - PodSecurityContext strict (runAsNonRoot, UID 65532, readOnlyRootFilesystem, capabilities drop ALL)
+   - Probes liveness `/healthz` + readiness `/readyz`
+   - `helm lint` doit passer sans warning
+
+T) `QUICKSTART.md` (à la racine du repo)
+   - 3 modes de déploiement avec commandes copiables :
+     * **Eval** : `docker run --rm -p 8443:8443 -e SK_MODE=eval ghcr.io/sealkeeper/sealkeeper:latest` (5 secondes pour démarrer)
+     * **Production simple** : `docker compose up -d` après `cp .env.example .env && vi .env`
+     * **Kubernetes** : `helm install sealkeeper ./helm/sealkeeper --values my-values.yaml`
+   - Pour chaque mode : prérequis, commandes, vérification de fonctionnement, étapes suivantes
+   - Lien vers documentation détaillée
+
+U) `Makefile` (à la racine du repo, optionnel mais recommandé)
+   - Cibles pratiques : `make build`, `make test`, `make docker`, `make compose-up`, `make compose-down`, `make lint`, `make release-bundle`
+   - Aide auto-générée via `make help` (parsing des `## descriptions`)
+   - Compatible Linux + macOS (pas de bashism inutile)
+
+ÉTAPE 3 — RÈGLES DE CONTRIBUTION
+=================================
+
+- Format commits : Conventional Commits strict (`feat:`, `fix:`, `docs:`, `chore:`, `ci:`)
+- Sign-off DCO sur chaque commit (`git commit -s`)
+- Un fichier = un commit (sauf workflows liés où groupage logique acceptable)
+- Branche `main` directement (pas de PR pour bootstrap, exception assumée)
+- Aucune valeur secrète en clair : utiliser `secrets.*` ou marquer `# TODO: configure secret <name>`
+
+ÉTAPE 4 — VALIDATION LOCALE AVANT COMMIT
+==========================================
+
+Pour chaque workflow YAML créé :
+- Linter avec `actionlint` si disponible (sinon `yamllint`)
+- Vérifier la syntaxe Mermaid des éventuels diagrammes inclus
+- Confirmer que les chemins référencés existent ou marquer TODO clairs
+
+Pour le Dockerfile :
+- Linter avec `hadolint`
+- Confirmer build local possible (`docker build .` en mode dry-run si possible)
+
+ÉTAPE 5 — RAPPORT FINAL
+========================
+
+À la fin, produis un rapport markdown bref qui :
+- Liste les 12 fichiers créés avec leur chemin
+- Mentionne explicitement les TODO restants (secrets à configurer, chemins de déploiement à préciser, etc.)
+- Indique les commandes que je devrai exécuter en local pour valider le tout (`act` pour tester les workflows, `docker build`, `pre-commit run --all-files`)
+- Suggère le prochain prompt Claude Code logique (par exemple : bootstrap du skeleton Go, ou rédaction CONTRIBUTING.md)
+
+CONTRAINTES IMPORTANTES
+========================
+
+- N'invente AUCUNE fonctionnalité non spécifiée dans le PRD. En cas de doute, ouvre une question dans le rapport final plutôt que de deviner.
+- Respecte STRICTEMENT les versions et outils listés dans le PRD module L (testcontainers-go, Vitest, Playwright, cosign keyless, syft CycloneDX 1.5, Renovate ou Dependabot, etc.).
+- Pas de framework JS lourd. Pas de surcouche inutile.
+- Si une décision technique reste ambiguë malgré la lecture du PRD, choisis le défaut qui minimise la dette technique future et documente le choix dans un commentaire YAML inline `# DECISION: ...`.
+
+C'EST PARTI.
