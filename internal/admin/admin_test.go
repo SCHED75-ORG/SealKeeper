@@ -297,3 +297,80 @@ func TestAuthenticateSuccessResetsCounter(t *testing.T) {
 		}
 	}
 }
+
+// Regression: a valid TOTP code was accepted again for its whole ±30 s
+// window, so an observed or intercepted code could be replayed.
+func TestAuthenticateRejectsReplayedTOTP(t *testing.T) {
+	t.Parallel()
+	const email, pw = "ops@example.test", "supersecret-12chars"
+	r, secret, _ := enrolledAdmin(t, email, pw)
+	ctx := context.Background()
+	at := time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC)
+	code, err := totp.Generate(secret, at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Authenticate(ctx, email, pw, code); err != nil {
+		t.Fatalf("first use: %v", err)
+	}
+	if _, err := r.Authenticate(ctx, email, pw, code); !errors.Is(err, admin.ErrInvalidCreds) {
+		t.Fatalf("replay: err = %v, want ErrInvalidCreds", err)
+	}
+	// An earlier-step code that is still inside the drift window is refused too.
+	prev, _ := totp.Generate(secret, at.Add(-30*time.Second))
+	if _, err := r.Authenticate(ctx, email, pw, prev); !errors.Is(err, admin.ErrInvalidCreds) {
+		t.Fatalf("older step after a newer one: err = %v, want ErrInvalidCreds", err)
+	}
+	next, _ := totp.Generate(secret, at.Add(30*time.Second))
+	r2 := r.WithClock(func() time.Time { return at.Add(30 * time.Second) })
+	if _, err := r2.Authenticate(ctx, email, pw, next); err != nil {
+		t.Fatalf("next step: %v", err)
+	}
+}
+
+// Regression: recovery codes were shown at enrolment but no login path
+// accepted them. They now replace a TOTP code once each.
+func TestAuthenticateAcceptsRecoveryCodeOnce(t *testing.T) {
+	t.Parallel()
+	const email, pw = "ops@example.test", "supersecret-12chars"
+	r, _, _ := enrolledAdmin(t, email, pw)
+	ctx := context.Background()
+	a, err := r.FindByEmail(ctx, email)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.EnrollTOTP(ctx, a.ID, "JBSWY3DPEHPK3PXP", []string{"AB3K9-7M2VX", "ZZZZZ-YYYYY"}); err != nil {
+		t.Fatal(err)
+	}
+	res, err := r.Authenticate(ctx, email, pw, "ab3k9-7m2vx")
+	if err != nil || !res.UsedRecoveryCode {
+		t.Fatalf("recovery login: res=%+v err=%v", res, err)
+	}
+	if _, err := r.Authenticate(ctx, email, pw, "AB3K9-7M2VX"); !errors.Is(err, admin.ErrInvalidCreds) {
+		t.Fatalf("reused recovery code: err = %v, want ErrInvalidCreds", err)
+	}
+}
+
+// Regression: the setup wizard enrolled whatever totp_secret and
+// recovery_codes the browser posted. They now travel sealed and bound to
+// the admin and session.
+func TestSetupBlobIsBoundAndTamperProof(t *testing.T) {
+	t.Parallel()
+	r, _, _ := enrolledAdmin(t, "ops@example.test", "supersecret-12chars")
+	blob, err := r.SealSetup(7, "sess-a", "JBSWY3DPEHPK3PXP", []string{"AB3K9-7M2VX"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sec, codes, err := r.OpenSetup(7, "sess-a", blob); err != nil || sec != "JBSWY3DPEHPK3PXP" || len(codes) != 1 {
+		t.Fatalf("OpenSetup = %q %v %v", sec, codes, err)
+	}
+	if _, _, err := r.OpenSetup(7, "sess-b", blob); err == nil {
+		t.Error("blob accepted for another session")
+	}
+	if _, _, err := r.OpenSetup(8, "sess-a", blob); err == nil {
+		t.Error("blob accepted for another admin")
+	}
+	if _, _, err := r.OpenSetup(7, "sess-a", blob[:len(blob)-2]+"AA"); err == nil {
+		t.Error("tampered blob accepted")
+	}
+}

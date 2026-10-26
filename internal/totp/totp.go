@@ -62,22 +62,30 @@ func Generate(secret Secret, at time.Time) (string, error) {
 }
 
 // Verify checks `code` against `secret` at `at`, tolerating ±1 30s window.
+// Callers that must reject replays use VerifyStep and remember the step.
 func Verify(secret Secret, code string, at time.Time) (bool, error) {
+	_, ok, err := VerifyStep(secret, code, at)
+	return ok, err
+}
+
+// VerifyStep is Verify that also returns the time-step the code matched, so
+// the caller can refuse any later code for the same or an earlier step.
+func VerifyStep(secret Secret, code string, at time.Time) (int64, bool, error) {
 	raw, err := secret.Bytes()
 	if err != nil {
-		return false, fmt.Errorf("totp.Verify: decode secret: %w", err)
+		return 0, false, fmt.Errorf("totp.Verify: decode secret: %w", err)
 	}
 	want := strings.TrimSpace(code)
 	if len(want) != defaultDigits {
-		return false, nil
+		return 0, false, nil
 	}
 	step := at.UTC().Unix() / defaultPeriod
 	for delta := -driftWindows; delta <= driftWindows; delta++ {
 		if constantTimeEqual(generate(raw, step+int64(delta)), want) {
-			return true, nil
+			return step + int64(delta), true, nil
 		}
 	}
-	return false, nil
+	return 0, false, nil
 }
 
 // Otpauth returns the otpauth://totp/ URL suitable for QR-code rendering.

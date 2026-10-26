@@ -296,6 +296,9 @@ type AuthResult struct {
 	Admin               Admin
 	NeedsPasswordChange bool
 	NeedsTOTPEnrollment bool
+	// UsedRecoveryCode is set when a recovery code replaced the TOTP code;
+	// the caller should audit it (and nudge the admin to re-enrol).
+	UsedRecoveryCode bool
 }
 
 // Authenticate verifies the password and TOTP code. The contract:
@@ -363,6 +366,23 @@ func (r *Repo) Authenticate(ctx context.Context, email, password, totpCode strin
 		}, nil
 	}
 
+	if looksLikeRecoveryCode(totpCode) {
+		// A recovery code stands in for the TOTP code and is spent on use.
+		if err := r.ConsumeRecoveryCode(ctx, row.ID, totpCode); err != nil {
+			if !errors.Is(err, ErrInvalidCreds) {
+				return AuthResult{}, err
+			}
+			r.lockIfExhausted(ctx, row.ID)
+			return AuthResult{}, ErrInvalidCreds
+		}
+		r.RecordLoginSuccess(ctx, row.ID)
+		return AuthResult{
+			Admin:               row.toAdmin(),
+			NeedsPasswordChange: row.ForcePasswordChange,
+			UsedRecoveryCode:    true,
+		}, nil
+	}
+
 	if strings.TrimSpace(totpCode) == "" {
 		// The reserved attempt stays counted: interleaving blank codes
 		// must not buy extra TOTP guesses.
@@ -372,9 +392,16 @@ func (r *Repo) Authenticate(ctx context.Context, email, password, totpCode strin
 	if err != nil {
 		return AuthResult{}, err
 	}
-	ok, err := totp.Verify(secret, totpCode, r.now())
+	step, ok, err := totp.VerifyStep(secret, totpCode, r.now())
 	if err != nil {
 		return AuthResult{}, err
+	}
+	if ok {
+		// A valid code is single-use: an intercepted code replayed within its
+		// validity window fails like a wrong one.
+		if ok, err = r.UseTOTPStep(ctx, row.ID, step); err != nil {
+			return AuthResult{}, err
+		}
 	}
 	if !ok {
 		r.lockIfExhausted(ctx, row.ID)
@@ -481,7 +508,8 @@ func (r *Repo) EnrollTOTP(ctx context.Context, adminID int64, secret totp.Secret
 	now := r.now().UTC()
 	_, err = r.db.ExecContext(ctx,
 		rebind(r.db, `UPDATE admins
-			SET totp_secret_enc = ?, totp_recovery_codes_enc = ?, force_totp_enroll = ?, updated_at = ?
+			SET totp_secret_enc = ?, totp_recovery_codes_enc = ?, force_totp_enroll = ?,
+			    totp_last_step = 0, updated_at = ?
 			WHERE id = ?`),
 		secEnc, codesEnc, false, now, adminID,
 	)
@@ -517,11 +545,71 @@ func (r *Repo) ConsumeRecoveryCode(ctx context.Context, adminID int64, code stri
 		return err
 	}
 	now := r.now().UTC()
-	_, err = r.db.ExecContext(ctx,
-		rebind(r.db, `UPDATE admins SET totp_recovery_codes_enc = ?, updated_at = ? WHERE id = ?`),
-		nextEnc, now, adminID,
+	// Compare-and-swap on the ciphertext we decrypted: two concurrent logins
+	// with the same code cannot both spend it.
+	res, err := r.db.ExecContext(ctx,
+		rebind(r.db, `UPDATE admins SET totp_recovery_codes_enc = ?, updated_at = ?
+			WHERE id = ? AND totp_recovery_codes_enc = ?`),
+		nextEnc, now, adminID, row.TOTPRecoveryCodesEnc,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err != nil || n != 1 {
+		return ErrInvalidCreds
+	}
+	return nil
+}
+
+// looksLikeRecoveryCode tells a recovery code ("AB3K9-7M2VX") apart from a
+// 6-digit TOTP code.
+func looksLikeRecoveryCode(code string) bool {
+	c := strings.TrimSpace(code)
+	return len(c) == 11 && c[5] == '-'
+}
+
+// SealSetup wraps the TOTP secret and recovery codes drafted for the setup
+// wizard so they can round-trip through the browser without being chosen
+// by it. The AAD binds the blob to this admin and this session.
+func (r *Repo) SealSetup(adminID int64, sessionToken string, secret totp.Secret, codes []string) (string, error) {
+	pt, err := json.Marshal(setupDraft{Secret: string(secret), Codes: codes})
+	if err != nil {
+		return "", err
+	}
+	ct, err := r.box.Seal(pt, setupAAD(adminID, sessionToken))
+	if err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(ct), nil
+}
+
+// OpenSetup reverses SealSetup; any tampering or a blob minted for another
+// admin or session fails.
+func (r *Repo) OpenSetup(adminID int64, sessionToken, blob string) (totp.Secret, []string, error) {
+	ct, err := base64.RawURLEncoding.DecodeString(blob)
+	if err != nil {
+		return "", nil, err
+	}
+	pt, err := r.box.Open(ct, setupAAD(adminID, sessionToken))
+	if err != nil {
+		return "", nil, err
+	}
+	var d setupDraft
+	if err := json.Unmarshal(pt, &d); err != nil {
+		return "", nil, err
+	}
+	return totp.Secret(d.Secret), d.Codes, nil
+}
+
+type setupDraft struct {
+	Secret string   `json:"s"`
+	Codes  []string `json:"c"`
+}
+
+func setupAAD(adminID int64, sessionToken string) []byte {
+	h := sha256.New()
+	_, _ = fmt.Fprintf(h, "sealkeeper-admin-setup:%d:%s", adminID, sessionToken)
+	return h.Sum(nil)
 }
 
 // ----- sessions -------------------------------------------------------------
@@ -758,6 +846,22 @@ func (r *Repo) scanRow(rs rowScanner) (adminRow, error) {
 		}
 	}
 	return row, nil
+}
+
+// UseTOTPStep records step as the last TOTP time-step accepted for the
+// admin. It reports false when that step (or a later one) was already used,
+// which means the code is a replay. The check-and-set is one UPDATE, so two
+// concurrent submissions of the same code cannot both pass.
+func (r *Repo) UseTOTPStep(ctx context.Context, adminID, step int64) (bool, error) {
+	res, err := r.db.ExecContext(ctx,
+		rebind(r.db, `UPDATE admins SET totp_last_step = ?, updated_at = ? WHERE id = ? AND totp_last_step < ?`),
+		step, r.now().UTC(), adminID, step,
+	)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
 }
 
 // reserveAttempt counts one login attempt up front. It reports false when

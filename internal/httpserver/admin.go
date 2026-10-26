@@ -271,6 +271,9 @@ func (s *Server) handleAdminLoginPost(w http.ResponseWriter, r *http.Request) {
 		s.adminLoginError(w, r, "internal")
 		return
 	}
+	if res.UsedRecoveryCode {
+		s.auditAppend(r.Context(), "admin.recovery_code_used", email, "", nil)
+	}
 
 	sess, err := s.adminRepo.CreateSession(r.Context(), res.Admin.ID,
 		hashShort(s.clientIP(r)), hashShort(r.UserAgent()))
@@ -537,8 +540,17 @@ func (s *Server) handleAdminLoginWebauthnCancel(w http.ResponseWriter, r *http.R
 }
 
 func (s *Server) handleAdminSetupGet(w http.ResponseWriter, r *http.Request) {
-	a, _, _ := adminFromCtx(r)
+	a, sess, _ := adminFromCtx(r)
 	secret, otpURL, codes := s.draftSetup(r)
+	blob := ""
+	if secret != "" {
+		var err error
+		if blob, err = s.adminRepo.SealSetup(a.ID, sess.Token, secret, codes); err != nil {
+			s.logger.Error("SealSetup failed", "err", err)
+			http.Error(w, "internal", http.StatusInternalServerError)
+			return
+		}
+	}
 
 	s.renderAdmin(w, "setup", map[string]any{
 		"Admin":               a,
@@ -551,6 +563,7 @@ func (s *Server) handleAdminSetupGet(w http.ResponseWriter, r *http.Request) {
 		"OtpauthURL":          otpURL,
 		"OtpauthQR":           otpauthQRDataURL(otpURL),
 		"RecoveryCodes":       codes,
+		"SetupBlob":           blob,
 		"CSRF":                s.requireSessionCSRF(r),
 	})
 }
@@ -578,7 +591,7 @@ func otpauthQRDataURL(otpURL string) htmltemplate.URL {
 }
 
 func (s *Server) handleAdminSetupPost(w http.ResponseWriter, r *http.Request) {
-	a, _, _ := adminFromCtx(r)
+	a, sess, _ := adminFromCtx(r)
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "bad form", http.StatusBadRequest)
 		return
@@ -611,23 +624,33 @@ func (s *Server) handleAdminSetupPost(w http.ResponseWriter, r *http.Request) {
 	// Step 2 — TOTP enrollment + verify a fresh code so we know the user
 	// scanned the QR successfully.
 	if a.ForceTOTPEnroll {
-		secretStr := strings.TrimSpace(r.FormValue("totp_secret"))
+		// The secret and recovery codes come back sealed (SealSetup), never
+		// as client-chosen plaintext: a forged form could otherwise enrol a
+		// secret like "AA" and recovery codes of the attacker's choosing.
 		code := strings.TrimSpace(r.FormValue("totp_code"))
-		codesRaw := strings.TrimSpace(r.FormValue("recovery_codes"))
-		if secretStr == "" || code == "" {
+		blob := strings.TrimSpace(r.FormValue("setup_blob"))
+		if blob == "" || code == "" {
 			s.adminSetupError(w, r, "totp_required")
 			return
 		}
-		ok, err := totp.Verify(totp.Secret(secretStr), code, time.Now())
+		secret, codes, err := s.adminRepo.OpenSetup(a.ID, sess.Token, blob)
+		if err != nil {
+			s.adminSetupError(w, r, "totp_invalid")
+			return
+		}
+		step, ok, err := totp.VerifyStep(secret, code, time.Now())
 		if err != nil || !ok {
 			s.adminSetupError(w, r, "totp_invalid")
 			return
 		}
-		codes := strings.Split(codesRaw, ",")
-		if err := s.adminRepo.EnrollTOTP(r.Context(), a.ID, totp.Secret(secretStr), codes); err != nil {
+		if err := s.adminRepo.EnrollTOTP(r.Context(), a.ID, secret, codes); err != nil {
 			s.logger.Error("EnrollTOTP failed", "err", err)
 			s.adminSetupError(w, r, "internal")
 			return
+		}
+		// The enrolment code is spent: it cannot be replayed at login.
+		if _, err := s.adminRepo.UseTOTPStep(r.Context(), a.ID, step); err != nil {
+			s.logger.Error("UseTOTPStep failed", "err", err)
 		}
 		s.auditAppend(r.Context(), "admin.totp_enrolled", a.Email, "", nil)
 	}
@@ -2254,8 +2277,8 @@ const adminLoginTpl = `{{define "login.html"}}{{template "header" .}}
   <input id="email" name="email" type="email" required autofocus autocomplete="username">
   <label for="password">Password</label>
   <input id="password" name="password" type="password" required autocomplete="current-password">
-  <label for="totp">TOTP code <small>(omit on first sign-in)</small></label>
-  <input id="totp" name="totp" type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="one-time-code">
+  <label for="totp">TOTP code or recovery code <small>(omit on first sign-in)</small></label>
+  <input id="totp" name="totp" type="text" pattern="[0-9]{6}|[A-Za-z0-9]{5}-[A-Za-z0-9]{5}" autocomplete="one-time-code">
   <p style="margin-top:1rem"><button type="submit">Sign in</button></p>
 </form>
 </main>
@@ -2307,8 +2330,7 @@ const adminSetupTpl = `{{define "setup.html"}}{{template "header" .}}
     </details>
     <p><strong>Recovery codes (save these now — they will not be shown again):</strong></p>
     <ul data-testid="recovery-codes">{{ range .RecoveryCodes }}<li><code>{{ . }}</code></li>{{ end }}</ul>
-    <input type="hidden" name="totp_secret" value="{{ .Secret }}">
-    <input type="hidden" name="recovery_codes" value="{{ range $i, $c := .RecoveryCodes }}{{ if $i }},{{ end }}{{ $c }}{{ end }}">
+    <input type="hidden" name="setup_blob" value="{{ .SetupBlob }}">
     <label for="tc">Code from your authenticator</label>
     <input id="tc" name="totp_code" type="text" inputmode="numeric" pattern="[0-9]{6}" required>
   </fieldset>
