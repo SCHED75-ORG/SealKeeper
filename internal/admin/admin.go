@@ -408,11 +408,8 @@ func (r *Repo) verifyPasswordFactor(ctx context.Context, email, password string)
 	if err != nil {
 		return adminRow{}, err
 	}
-	if row.LockedUntil != nil {
-		if r.now().Before(*row.LockedUntil) {
-			return adminRow{}, ErrAccountLocked
-		}
-		r.clearExpiredLock(ctx, row.ID)
+	if err := r.checkLock(ctx, row); err != nil {
+		return adminRow{}, err
 	}
 
 	// Reserve this attempt before doing any verification. The reservation
@@ -871,6 +868,11 @@ func (r *Repo) VerifyPassword(ctx context.Context, adminID int64, password strin
 	if err != nil {
 		return err
 	}
+	// Same lock handling as the login path: without it an expired lock
+	// was never cleared here and refused every step-up until a new login.
+	if err := r.checkLock(ctx, row); err != nil {
+		return err
+	}
 	reserved, err := r.reserveAttempt(ctx, adminID)
 	if err != nil {
 		return err
@@ -1031,6 +1033,20 @@ func (r *Repo) lockIfExhausted(ctx context.Context, adminID int64) {
 			WHERE id = ? AND failed_attempts >= ? AND locked_until IS NULL`),
 		now.Add(LockoutDuration), now, adminID, MaxFailedAttempts,
 	)
+}
+
+// checkLock refuses while the row's lockout is running and opens a new
+// attempt cycle once it has elapsed. Every password check calls it before
+// reserveAttempt, which otherwise keeps refusing after the lock expires.
+func (r *Repo) checkLock(ctx context.Context, row adminRow) error {
+	if row.LockedUntil == nil {
+		return nil
+	}
+	if r.now().Before(*row.LockedUntil) {
+		return ErrAccountLocked
+	}
+	r.clearExpiredLock(ctx, row.ID)
+	return nil
 }
 
 // clearExpiredLock opens a new cycle once a lockout has elapsed. The expiry
