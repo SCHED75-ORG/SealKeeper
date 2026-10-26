@@ -67,6 +67,23 @@
 // anchor reset — so it is treated as tampering and recorded in
 // broken_seq. On an empty log the first Append or SealAnchor seals it.
 //
+// # Retention (FR-I.31, FR-I.37)
+//
+// Prune deletes the oldest rows once they exceed the retention period. The
+// hashed content of the surviving rows is never rewritten: pseudonymising
+// a row in place would change what its MAC covers and break every later
+// link. Personal data in audit details therefore lives exactly as long as
+// the row that carries it, and leaves with it (PRD D-I.23). To keep the
+// shortened chain verifiable, the anchor also records a base: base_seq and
+// base_hash of the newest deleted row (migration 0017). The oldest
+// surviving row must chain onto base_hash instead of "". The base is bound
+// by head_mac, which switches to the domain tag "sealkeeper-audit-head-v2"
+// once a base is set (an unpruned log keeps the v1 form, so anchors sealed
+// before 0017 stay valid). Deleting old rows without the key therefore
+// still breaks the chain: the next row no longer links to the base, and
+// moving the base needs a new head_mac. Prune refuses to run on a chain
+// that does not verify, so it never destroys the evidence of a break.
+//
 // Residual risk, by design of a symmetric scheme: an attacker who wipes the
 // whole log and resets the anchor to its unsealed state leaves an empty,
 // consistent log. Likewise, one who rolls the schema back to before 0014
@@ -126,12 +143,17 @@ const (
 	// records the legacy cut-over (see SealCutover).
 	HeadMigration = storage.AuditHeadMigration
 
-	entryTag = "sealkeeper-audit-entry-v2"
-	headTag  = "sealkeeper-audit-head-v1"
+	entryTag  = "sealkeeper-audit-entry-v2"
+	headTag   = "sealkeeper-audit-head-v1"
+	headTagV2 = "sealkeeper-audit-head-v2"
 )
 
 // ErrNoKey is returned when the repo was built without an audit chain key.
 var ErrNoKey = errors.New("audit: no chain key configured")
+
+// ErrChainBroken is returned by Prune when the chain does not verify:
+// deleting rows then could destroy the evidence of the break.
+var ErrChainBroken = errors.New("audit: chain does not verify")
 
 // DeriveKey derives audit_chain_key from the master secret (FR-E.3):
 // HKDF-SHA256, no salt, info="sealkeeper-audit-v1", 32 bytes.
@@ -186,6 +208,10 @@ type head struct {
 	hash        string
 	broken      int64
 	mac         string
+	// baseSeq / baseHash: the newest row deleted by Prune (0 / "" when the
+	// log was never pruned). The oldest surviving row chains onto baseHash.
+	baseSeq  int64
+	baseHash string
 }
 
 // tail is the newest audit_log row (seq 0 when the log is empty).
@@ -252,7 +278,8 @@ func (r *Repo) Append(ctx context.Context, eventType, actor, target string, deta
 		return Entry{}, fmt.Errorf("audit.Append: set hash: %w", err)
 	}
 
-	next := head{present: true, legacyUntil: h.legacyUntil, seq: seq, hash: entryHash, broken: broken}
+	next := head{present: true, legacyUntil: h.legacyUntil, seq: seq, hash: entryHash, broken: broken,
+		baseSeq: h.baseSeq, baseHash: h.baseHash}
 	if err := r.writeHead(ctx, tx, next); err != nil {
 		return Entry{}, fmt.Errorf("audit.Append: %w", err)
 	}
@@ -292,7 +319,7 @@ func (r *Repo) SealAnchor(ctx context.Context, legacyMigrated bool) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	sealed, err := r.sealTx(ctx, tx, legacyMigrated)
+	sealed, err := r.sealTx(ctx, tx, legacyMigrated, true)
 	if err != nil {
 		return fmt.Errorf("audit.SealAnchor: %w", err)
 	}
@@ -316,7 +343,7 @@ func (r *Repo) SealCutover(ctx context.Context, tx *sql.Tx) error {
 	if err := r.lockChain(ctx, tx); err != nil {
 		return fmt.Errorf("audit.SealCutover: %w", err)
 	}
-	sealed, err := r.sealTx(ctx, tx, true)
+	sealed, err := r.sealTx(ctx, tx, true, false)
 	if err != nil {
 		return fmt.Errorf("audit.SealCutover: %w", err)
 	}
@@ -329,8 +356,10 @@ func (r *Repo) SealCutover(ctx context.Context, tx *sql.Tx) error {
 
 // sealTx seals an unsealed anchor over the current tail within tx and
 // returns the sequence it sealed (0 when the anchor was already sealed).
-func (r *Repo) sealTx(ctx context.Context, tx *sql.Tx, legacyMigrated bool) (int64, error) {
-	h, err := readHead(ctx, tx)
+// withBase is false only inside migration 0014, before the retention base
+// columns exist; the base is necessarily empty then.
+func (r *Repo) sealTx(ctx context.Context, tx *sql.Tx, legacyMigrated, withBase bool) (int64, error) {
+	h, err := readHeadCols(ctx, tx, withBase)
 	if err != nil {
 		return 0, fmt.Errorf("read head: %w", err)
 	}
@@ -348,11 +377,88 @@ func (r *Repo) sealTx(ctx context.Context, tx *sql.Tx, legacyMigrated bool) (int
 		seq:         t.seq,
 		hash:        t.hash,
 		broken:      r.anchorBreak(h, t, 0, legacyMigrated),
+		baseSeq:     h.baseSeq,
+		baseHash:    h.baseHash,
 	}
-	if err := r.writeHead(ctx, tx, next); err != nil {
+	if err := r.writeHeadCols(ctx, tx, next, withBase); err != nil {
 		return 0, err
 	}
 	return t.seq, nil
+}
+
+// Prune deletes the oldest rows that occurred before cutoff (retention,
+// FR-I.31) and moves the anchor's retention base onto the newest deleted
+// row, so the shortened chain still verifies. Only a leading run of rows
+// older than cutoff is deleted, and never the newest row: the anchor
+// keeps pointing at a row that exists. Surviving rows are not modified.
+// It returns the number of rows deleted, or ErrChainBroken (deleting
+// nothing) when the chain does not verify.
+func (r *Repo) Prune(ctx context.Context, cutoff time.Time) (int64, error) {
+	if len(r.key) == 0 {
+		return 0, fmt.Errorf("audit.Prune: %w", ErrNoKey)
+	}
+	tx, err := r.lockedTx(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("audit.Prune: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	h, err := readHead(ctx, tx)
+	if err != nil {
+		return 0, fmt.Errorf("audit.Prune: read head: %w", err)
+	}
+	bad, err := r.verifyTx(ctx, tx, h, r.floor.Load())
+	if err != nil {
+		return 0, fmt.Errorf("audit.Prune: verify: %w", err)
+	}
+	if bad != 0 {
+		return 0, fmt.Errorf("audit.Prune: %w (first broken entry %d)", ErrChainBroken, bad)
+	}
+	base, err := pruneBoundary(ctx, tx, cutoff.UTC(), h.seq)
+	if err != nil || base.seq == 0 {
+		return 0, err
+	}
+	res, err := tx.ExecContext(ctx, rebind(r.db, `DELETE FROM audit_log WHERE sequence_no <= ?`), base.seq)
+	if err != nil {
+		return 0, fmt.Errorf("audit.Prune: delete: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	h.baseSeq, h.baseHash = base.seq, base.hash
+	if err := r.writeHead(ctx, tx, h); err != nil {
+		return 0, fmt.Errorf("audit.Prune: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("audit.Prune: commit: %w", err)
+	}
+	return n, nil
+}
+
+// pruneBoundary returns the newest row of the leading run of rows older
+// than cutoff, stopping before headSeq (the newest row, which must stay).
+// The zero tail means nothing is due.
+func pruneBoundary(ctx context.Context, tx *sql.Tx, cutoff time.Time, headSeq int64) (tail, error) {
+	rows, err := tx.QueryContext(ctx,
+		`SELECT sequence_no, occurred_at, entry_hash FROM audit_log ORDER BY sequence_no ASC`)
+	if err != nil {
+		return tail{}, fmt.Errorf("audit.Prune: scan: %w", err)
+	}
+	defer rows.Close()
+	var base tail
+	for rows.Next() {
+		var (
+			t        tail
+			occurred any
+		)
+		if err := rows.Scan(&t.seq, &occurred, &t.hash); err != nil {
+			return tail{}, fmt.Errorf("audit.Prune: scan: %w", err)
+		}
+		ts, err := toTime(occurred)
+		if err != nil || t.seq >= headSeq || !ts.Before(cutoff) {
+			break
+		}
+		base = t
+	}
+	return base, rows.Err()
 }
 
 // Count returns the number of rows currently in the log.
@@ -395,7 +501,13 @@ func (r *Repo) VerifyChain(ctx context.Context) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	rowBad, t, err := r.verifyRows(ctx, tx, h.legacyUntil)
+	return r.verifyTx(ctx, tx, h, floor)
+}
+
+// verifyTx is VerifyChain's check against an open transaction, the anchor
+// h read in it and the rollback high-water mark read before it began.
+func (r *Repo) verifyTx(ctx context.Context, tx *sql.Tx, h head, floor int64) (int64, error) {
+	rowBad, t, err := r.verifyRows(ctx, tx, h)
 	if err != nil {
 		return 0, err
 	}
@@ -415,8 +527,9 @@ func (r *Repo) VerifyChain(ctx context.Context) (int64, error) {
 }
 
 // verifyRows checks every row and returns the first bad sequence_no (0 if
-// none) together with the newest row.
-func (r *Repo) verifyRows(ctx context.Context, tx *sql.Tx, legacyUntil int64) (int64, tail, error) {
+// none) together with the newest row. The oldest row must chain onto the
+// retention base, which is only trusted from a valid anchor.
+func (r *Repo) verifyRows(ctx context.Context, tx *sql.Tx, h head) (int64, tail, error) {
 	const q = `SELECT sequence_no, occurred_at, event_type, COALESCE(actor, ''),
 		COALESCE(target, ''), details_json, prev_hash, entry_hash
 		FROM audit_log ORDER BY sequence_no ASC`
@@ -430,6 +543,9 @@ func (r *Repo) verifyRows(ctx context.Context, tx *sql.Tx, legacyUntil int64) (i
 		bad  int64
 		last tail
 	)
+	if r.headValid(h) {
+		last = tail{seq: h.baseSeq, hash: h.baseHash}
+	}
 	for rows.Next() {
 		var (
 			seq                                     int64
@@ -439,7 +555,7 @@ func (r *Repo) verifyRows(ctx context.Context, tx *sql.Tx, legacyUntil int64) (i
 		if err := rows.Scan(&seq, &occurred, &evt, &actor, &target, &details, &prev, &hash); err != nil {
 			return 0, tail{}, err
 		}
-		if bad == 0 && !r.rowValid(seq, occurred, evt, actor, target, details, prev, hash, last.hash, legacyUntil) {
+		if bad == 0 && !r.rowValid(seq, occurred, evt, actor, target, details, prev, hash, last.hash, h.legacyUntil) {
 			bad = seq
 		}
 		last = tail{seq: seq, hash: hash}
@@ -502,8 +618,16 @@ func (r *Repo) anchorBreak(h head, t tail, floor int64, allowUnsealedLegacy bool
 	return 0
 }
 
+// headMAC authenticates the anchor. An unpruned anchor keeps the v1 form
+// so anchors sealed before migration 0017 stay valid; once a retention
+// base is set the v2 form binds it too. The distinct tags keep a v2
+// anchor from being replayed as a v1 one with the base stripped.
 func (r *Repo) headMAC(h head) string {
-	msg, _ := json.Marshal([]any{headTag, h.legacyUntil, h.seq, h.hash, h.broken})
+	fields := []any{headTag, h.legacyUntil, h.seq, h.hash, h.broken}
+	if h.baseSeq != 0 || h.baseHash != "" {
+		fields = []any{headTagV2, h.legacyUntil, h.seq, h.hash, h.broken, h.baseSeq, h.baseHash}
+	}
+	msg, _ := json.Marshal(fields)
 	m := hmac.New(sha256.New, r.key)
 	m.Write(msg)
 	return hex.EncodeToString(m.Sum(nil))
@@ -566,10 +690,24 @@ func (r *Repo) lockChain(ctx context.Context, tx *sql.Tx) error {
 }
 
 func readHead(ctx context.Context, tx *sql.Tx) (head, error) {
+	return readHeadCols(ctx, tx, true)
+}
+
+// readHeadCols reads the anchor; withBase=false skips the retention base
+// columns, which do not exist yet while migration 0014 runs.
+func readHeadCols(ctx context.Context, tx *sql.Tx, withBase bool) (head, error) {
 	h := head{present: true}
-	err := tx.QueryRowContext(ctx,
-		`SELECT legacy_until, head_seq, head_hash, broken_seq, head_mac FROM audit_head WHERE id = 1`,
-	).Scan(&h.legacyUntil, &h.seq, &h.hash, &h.broken, &h.mac)
+	var err error
+	if withBase {
+		err = tx.QueryRowContext(ctx,
+			`SELECT legacy_until, head_seq, head_hash, broken_seq, head_mac, base_seq, base_hash
+			 FROM audit_head WHERE id = 1`,
+		).Scan(&h.legacyUntil, &h.seq, &h.hash, &h.broken, &h.mac, &h.baseSeq, &h.baseHash)
+	} else {
+		err = tx.QueryRowContext(ctx,
+			`SELECT legacy_until, head_seq, head_hash, broken_seq, head_mac FROM audit_head WHERE id = 1`,
+		).Scan(&h.legacyUntil, &h.seq, &h.hash, &h.broken, &h.mac)
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		return head{}, nil
 	}
@@ -589,10 +727,43 @@ func readTail(ctx context.Context, tx *sql.Tx) (tail, error) {
 
 // writeHead seals h and stores it, re-creating the row if it was deleted.
 func (r *Repo) writeHead(ctx context.Context, tx *sql.Tx, h head) error {
+	return r.writeHeadCols(ctx, tx, h, true)
+}
+
+// writeHeadCols is writeHead; withBase=false (migration 0014 only, base
+// necessarily empty) leaves out the retention base columns.
+func (r *Repo) writeHeadCols(ctx context.Context, tx *sql.Tx, h head, withBase bool) error {
 	mac := r.headMAC(h)
+	if !withBase {
+		return r.writeHeadV1(ctx, tx, h, mac)
+	}
 	res, err := tx.ExecContext(ctx, rebind(r.db,
-		`UPDATE audit_head SET legacy_until = ?, head_seq = ?, head_hash = ?, broken_seq = ?, head_mac = ?
-		 WHERE id = 1`), h.legacyUntil, h.seq, h.hash, h.broken, mac)
+		`UPDATE audit_head SET legacy_until = ?, head_seq = ?, head_hash = ?, broken_seq = ?, head_mac = ?,
+		 base_seq = ?, base_hash = ? WHERE id = 1`),
+		h.legacyUntil, h.seq, h.hash, h.broken, mac, h.baseSeq, h.baseHash)
+	if err != nil {
+		return fmt.Errorf("update head: %w", err)
+	}
+	if n, err := res.RowsAffected(); err == nil && n > 0 {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, rebind(r.db,
+		`INSERT INTO audit_head (id, legacy_until, head_seq, head_hash, broken_seq, head_mac, base_seq, base_hash)
+		 VALUES (1, ?, ?, ?, ?, ?, ?, ?)`),
+		h.legacyUntil, h.seq, h.hash, h.broken, mac, h.baseSeq, h.baseHash); err != nil {
+		return fmt.Errorf("insert head: %w", err)
+	}
+	return nil
+}
+
+// writeHeadV1 stores an anchor without a retention base (schema 0014).
+func (r *Repo) writeHeadV1(ctx context.Context, tx *sql.Tx, h head, mac string) error {
+	if h.baseSeq != 0 || h.baseHash != "" {
+		return errors.New("write head: retention base needs migration 0017")
+	}
+	res, err := tx.ExecContext(ctx, rebind(r.db,
+		`UPDATE audit_head SET legacy_until = ?, head_seq = ?, head_hash = ?, broken_seq = ?, head_mac = ? WHERE id = 1`),
+		h.legacyUntil, h.seq, h.hash, h.broken, mac)
 	if err != nil {
 		return fmt.Errorf("update head: %w", err)
 	}
@@ -601,7 +772,8 @@ func (r *Repo) writeHead(ctx context.Context, tx *sql.Tx, h head) error {
 	}
 	if _, err := tx.ExecContext(ctx, rebind(r.db,
 		`INSERT INTO audit_head (id, legacy_until, head_seq, head_hash, broken_seq, head_mac)
-		 VALUES (1, ?, ?, ?, ?, ?)`), h.legacyUntil, h.seq, h.hash, h.broken, mac); err != nil {
+		 VALUES (1, ?, ?, ?, ?, ?)`),
+		h.legacyUntil, h.seq, h.hash, h.broken, mac); err != nil {
 		return fmt.Errorf("insert head: %w", err)
 	}
 	return nil

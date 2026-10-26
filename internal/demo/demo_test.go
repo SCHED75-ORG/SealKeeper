@@ -184,6 +184,11 @@ func TestResetOnceLeavesAuditChainIntact(t *testing.T) {
 			t.Fatalf("Append: %v", err)
 		}
 	}
+	// A retention prune sets the anchor's base; the reset must clear it
+	// too, or the first row after the wipe fails to chain onto it.
+	if n, err := ar.Prune(ctx, time.Now().Add(time.Hour)); err != nil || n == 0 {
+		t.Fatalf("Prune = %d, %v", n, err)
+	}
 
 	if err := demo.NewResetter(s.DB(), nil, time.Hour).ResetOnce(ctx); err != nil {
 		t.Fatalf("ResetOnce: %v", err)
