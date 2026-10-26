@@ -71,8 +71,8 @@ test.describe("@csp", () => {
     const secret = (await page
       .locator('[data-testid="totp-secret"]')
       .textContent())!.trim();
-    await page.locator("#np").fill("Csp-Admin-2026-Strong!");
-    await page.locator("#np2").fill("Csp-Admin-2026-Strong!");
+    await page.locator("#np").fill("Csp#Wn4j!Rb8sQ3-yHc6");
+    await page.locator("#np2").fill("Csp#Wn4j!Rb8sQ3-yHc6");
     await page.locator("#tc").fill(totp(secret));
     await page.getByRole("button", { name: /save and continue/i }).click();
     await page.waitForURL(/\/admin\/dashboard/);
@@ -112,8 +112,8 @@ test.describe("@csp", () => {
     // Credential changes require the current password (step-up).
     await page.goto("/admin/account");
     await page.locator("#cp-password").fill("not-the-password");
-    await page.locator("#np").fill("Another-Csp-Admin-2026!");
-    await page.locator("#np2").fill("Another-Csp-Admin-2026!");
+    await page.locator("#np").fill("Another#Csp-Vt5k!Pw9xJ2");
+    await page.locator("#np2").fill("Another#Csp-Vt5k!Pw9xJ2");
     await page.getByRole("button", { name: /update password/i }).click();
     await expect(page).toHaveURL(/err=current_password/);
 

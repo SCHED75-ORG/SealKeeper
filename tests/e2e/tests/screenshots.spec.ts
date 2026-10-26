@@ -36,7 +36,7 @@ const SCREENSHOTS_DIR = path.resolve(
 );
 const ADMIN_EMAIL = "admin@localhost";
 const ADMIN_PASSWORD = process.env.SK_BOOTSTRAP_ADMIN_PASSWORD ?? "";
-const NEW_ADMIN_PASSWORD = "Demo-Admin-2026-Strong!";
+const NEW_ADMIN_PASSWORD = "Demo#Kq7v!Lx2mR9-tZw4";
 
 // ---- spec -------------------------------------------------------------------
 
