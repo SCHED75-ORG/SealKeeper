@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
@@ -322,11 +323,10 @@ type AuthResult struct {
 func (r *Repo) Authenticate(ctx context.Context, email, password, totpCode string) (AuthResult, error) {
 	row, err := r.loadByEmail(ctx, email)
 	if errors.Is(err, ErrNotFound) {
-		// Avoid leaking which factor failed: do a bcrypt comparison anyway.
-		_ = bcrypt.CompareHashAndPassword(
-			[]byte("$2a$10$abcdefghijklmnopqrstuvwxyz0123456789012345678901234"),
-			[]byte(password),
-		)
+		// Avoid leaking whether the account exists: spend the same bcrypt
+		// work as a real comparison. The previous literal was not a valid
+		// bcrypt hash, so bcrypt rejected it instantly (timing oracle).
+		_ = bcrypt.CompareHashAndPassword(dummyBcryptHash(), []byte(password))
 		return AuthResult{}, ErrInvalidCreds
 	}
 	if err != nil {
@@ -382,6 +382,17 @@ func (r *Repo) Authenticate(ctx context.Context, email, password, totpCode strin
 		NeedsPasswordChange: row.ForcePasswordChange,
 	}, nil
 }
+
+// dummyBcryptHash is a real hash at bcrypt.DefaultCost — the cost Create
+// and ChangePassword use — so comparing against it for an unknown email
+// takes as long as comparing against a stored hash.
+var dummyBcryptHash = sync.OnceValue(func() []byte {
+	h, err := bcrypt.GenerateFromPassword([]byte("sealkeeper-unknown-admin"), bcrypt.DefaultCost)
+	if err != nil {
+		panic("admin: cannot build dummy bcrypt hash: " + err.Error())
+	}
+	return h
+})
 
 // ResetForBootstrap rewrites the password and zeroes out any TOTP
 // enrolment + recovery codes so the admin is forced back through the
