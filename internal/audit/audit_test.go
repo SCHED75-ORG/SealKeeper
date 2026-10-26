@@ -2,6 +2,9 @@ package audit_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"sync"
 	"testing"
 	"time"
 
@@ -89,7 +92,8 @@ func TestVerifyChainDetectsTamper(t *testing.T) {
 		}
 	}
 	// Forge a row in the middle.
-	if _, err := s.DB().ExecContext(ctx, "UPDATE audit_log SET target = ? WHERE sequence_no = ?", "TAMPERED", 2); err != nil {
+	if _, err := s.DB().ExecContext(ctx,
+		storage.Rebind(s.DB(), "UPDATE audit_log SET target = ? WHERE sequence_no = ?"), "TAMPERED", 2); err != nil {
 		t.Fatalf("tamper: %v", err)
 	}
 	bad, err := r.VerifyChain(ctx)
@@ -114,5 +118,67 @@ func TestCountReturnsRowCount(t *testing.T) {
 	}
 	if n != 4 {
 		t.Fatalf("Count = %d, want 4", n)
+	}
+}
+
+func TestVerifyChainUnderConcurrentAppends(t *testing.T) {
+	t.Parallel()
+	r, _ := newRepo(t)
+	ctx := context.Background()
+	const n = 16
+	var wg sync.WaitGroup
+	errs := make(chan error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := r.Append(ctx, "evt", "actor", "", map[string]any{"i": i}); err != nil {
+				errs <- err
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatalf("Append: %v", err)
+	}
+	bad, err := r.VerifyChain(ctx)
+	if err != nil {
+		t.Fatalf("VerifyChain: %v", err)
+	}
+	if bad != 0 {
+		t.Fatalf("chain reported bad row at %d after concurrent appends, want 0", bad)
+	}
+}
+
+// Rows written before Append truncated occurred_at to microseconds carry
+// full nanoseconds in SQLite's TEXT column, and their hash covers them.
+// They must keep verifying alongside rows written today.
+func TestVerifyChainAcceptsLegacyNanosecondRows(t *testing.T) {
+	t.Parallel()
+	r, s := newRepo(t)
+	if storage.IsPostgres(s.DB()) {
+		t.Skip("legacy nanosecond rows only ever existed on SQLite")
+	}
+	ctx := context.Background()
+	occurred := time.Date(2026, 5, 1, 12, 0, 0, 123456789, time.UTC)
+	details := "{}"
+	canonical := occurred.Format(time.RFC3339Nano) + "\nevt\nactor\n\n" + details
+	sum := sha256.Sum256([]byte("\n" + canonical))
+	if _, err := s.DB().ExecContext(ctx,
+		`INSERT INTO audit_log (occurred_at, event_type, actor, target, details_json, prev_hash, entry_hash)
+		 VALUES (?, 'evt', 'actor', NULL, ?, '', ?)`,
+		occurred, details, hex.EncodeToString(sum[:])); err != nil {
+		t.Fatalf("seed legacy row: %v", err)
+	}
+	if _, err := r.Append(ctx, "evt", "actor", "", nil); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	bad, err := r.VerifyChain(ctx)
+	if err != nil {
+		t.Fatalf("VerifyChain: %v", err)
+	}
+	if bad != 0 {
+		t.Fatalf("chain reported bad row at %d, want 0 (legacy row + new row)", bad)
 	}
 }

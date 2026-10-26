@@ -78,13 +78,29 @@ func (r *Repo) Append(ctx context.Context, eventType, actor, target string, deta
 	if err != nil {
 		return Entry{}, fmt.Errorf("audit.Append: canonical json: %w", err)
 	}
-	now := r.now().UTC()
+	// The hash covers occurred_at, so it must be computed over exactly the
+	// value the column hands back to VerifyChain. Postgres TIMESTAMPTZ keeps
+	// microseconds (pgx truncates the rest); truncating here makes the
+	// stored and hashed instants identical on both dialects. SQLite rows
+	// written before this carry full nanoseconds in their TEXT column and
+	// were hashed over them, so they still verify unchanged.
+	now := r.now().UTC().Truncate(time.Microsecond)
 
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Entry{}, fmt.Errorf("audit.Append: begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+
+	// SQLite runs one writer at a time, so the tail read below is stable.
+	// Postgres READ COMMITTED would let two concurrent appends read the same
+	// tail and fork the chain; an EXCLUSIVE table lock (readers unaffected)
+	// serialises appenders the same way.
+	if storage.IsPostgres(r.db) {
+		if _, err := tx.ExecContext(ctx, `LOCK TABLE audit_log IN EXCLUSIVE MODE`); err != nil {
+			return Entry{}, fmt.Errorf("audit.Append: lock: %w", err)
+		}
+	}
 
 	var prevHash sql.NullString
 	const sel = `SELECT entry_hash FROM audit_log ORDER BY sequence_no DESC LIMIT 1`
