@@ -59,6 +59,9 @@ credentials/
 /cmd/sealkeeper/sealkeeper.exe
 /bin/
 /dist/
+# CI build-matrix artifacts (sealkeeper-linux-<arch>-go<version>/) unpacked
+# at the repo root — release binaries come from release.yml, never from git
+/sealkeeper-linux-*
 
 # Test artifacts
 *.test
