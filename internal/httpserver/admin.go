@@ -25,6 +25,7 @@ import (
 	"github.com/sched75/sealkeeper/internal/integrations"
 	"github.com/sched75/sealkeeper/internal/libraries"
 	"github.com/sched75/sealkeeper/internal/mail"
+	"github.com/sched75/sealkeeper/internal/mailer"
 	"github.com/sched75/sealkeeper/internal/mailtemplates"
 	"github.com/sched75/sealkeeper/internal/policies"
 	"github.com/sched75/sealkeeper/internal/smtpconfig"
@@ -4131,13 +4132,16 @@ func (s *Server) handleAdminSMTPTest(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 	if err := s.sender.Send(ctx, msg); err != nil {
+		// The full error (with the remote reply text) stays in the server
+		// log; the UI and the audit chain only get the sanitised status.
 		s.logger.Warn("smtp test failed", "to", to, "err", err)
+		status := mailer.FailureStatus(err)
 		s.auditAppend(r.Context(), "smtp.test_failed", a.Email, to, map[string]any{
 			"transport": s.sender.Name(),
-			"error":     err.Error(),
+			"status":    status,
 		})
 		http.Redirect(w, r,
-			"/admin/smtp?err=test_failed&details="+url.QueryEscape(err.Error()),
+			"/admin/smtp?err=test_failed&details="+url.QueryEscape(status),
 			http.StatusSeeOther)
 		return
 	}
