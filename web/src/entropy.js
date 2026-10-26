@@ -10,7 +10,8 @@
 // generators (params.js) and only credits what the generator really draws
 // (audit js-generation#2/#3/#4):
 //   - G2 / G3 are exact: distinct library entries, emitted separator, the
-//     single numeric group G2 uses, the alphabet G3 draws from.
+//     single numeric group G2 uses, the alphabet G3 draws from. G2 credits
+//     nothing for the words once one of them holds a separator character.
 //   - G1 is a conservative lower bound on min-entropy:
 //       log2(N / largest group of citations that may end up identical)
 //     + min over citations of the min-entropy each transform adds,
@@ -81,10 +82,15 @@ export function calculateEntropy(policy) {
 
 function entropyG2(p) {
   const breakdown = [];
-  push(breakdown, "word-selection", p.wordCount * LOG2(p.words.length));
   // The separator only shows up between words or before detached digits.
-  if (p.wordCount > 1 || (p.digits && !p.digits.attached)) {
-    push(breakdown, "separator", LOG2(p.separators.length));
+  const joined = p.wordCount > 1 || (p.digits && !p.digits.attached);
+  // A word holding a separator character lets different draws print the
+  // same text ("porte" "monnaie" vs "porte-monnaie"): neither the words
+  // nor the separator are guaranteed then, only the digits.
+  const sepChars = new Set(p.separators.flatMap((s) => Array.from(s)));
+  if (!joined || !p.words.some((w) => Array.from(w).some((ch) => sepChars.has(ch)))) {
+    push(breakdown, "word-selection", p.wordCount * LOG2(p.words.length));
+    if (joined) push(breakdown, "separator", LOG2(p.separators.length));
   }
   // generateG2 emits numericGroups[0] only; transforms are never applied.
   if (p.digits) push(breakdown, "digit-suffix", p.digits.digitsCount * LOG2(10));
@@ -216,19 +222,21 @@ function entropyG1(p) {
    * coincide after folding (union-find, so the grouping is transitive).
    */
   function citationBits() {
-    const folds = [(s) => s.replace(/\s+/gu, " ")];
+    // The generator turns whitespace into a separator, so a separator
+    // character inside a citation is indistinguishable from a word break
+    // ("w w" and "w-w" both print "w-w"). Runs of whitespace and separator
+    // characters split the text into tokens; when a joining transform may
+    // remove the breaks (or put "_" or a T08 symbol there) the tokens are
+    // glued back together.
+    const chars = (list) => list.flatMap((s) => Array.from(folded(s)));
+    const breaks = new Set(chars(p.separators));
+    let glue = " ";
     if (ts.some(joins)) {
-      const symbols = ts.find(isCode("T08"))?.parameters.symbols ?? [];
-      // Syntax characters only: "\-" is an invalid escape under the u flag.
-      const escaped = [
-        "\\s",
-        "_",
-        ...symbols.map((c) => c.replace(/[.*+?^${}()|[\]\\/]/gu, "\\$&")),
-      ];
-      const dropped = new RegExp(`(?:${escaped.join("|")})+`, "gu");
-      folds.push((s) => s.replace(dropped, ""));
+      glue = "";
+      breaks.add("_");
+      for (const ch of chars(ts.find(isCode("T08"))?.parameters.symbols ?? [])) breaks.add(ch);
     }
-    const key = (s) => folds.reduce((acc, f) => f(acc), s);
+    const key = (s) => tokens(s, breaks).join(glue);
     const parent = p.citations.map((_, i) => i);
     const find = (i) => (parent[i] === i ? i : (parent[i] = find(parent[i])));
     const owner = new Map();
@@ -362,6 +370,22 @@ function reverseWords(s) {
 
 function words(s) {
   return s.trim().split(/\s+/u).filter(Boolean);
+}
+
+/** Non-empty runs of `s` between whitespace and `breaks` characters. */
+function tokens(s, breaks) {
+  const out = [];
+  let cur = "";
+  for (const ch of s) {
+    if (/\s/u.test(ch) || breaks.has(ch)) {
+      if (cur) out.push(cur);
+      cur = "";
+    } else {
+      cur += ch;
+    }
+  }
+  if (cur) out.push(cur);
+  return out;
 }
 
 function isCased(ch) {
