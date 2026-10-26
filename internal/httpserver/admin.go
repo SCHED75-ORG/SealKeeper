@@ -28,6 +28,7 @@ import (
 	"github.com/sched75/sealkeeper/internal/mailtemplates"
 	"github.com/sched75/sealkeeper/internal/policies"
 	"github.com/sched75/sealkeeper/internal/smtpconfig"
+	"github.com/sched75/sealkeeper/internal/storage"
 	"github.com/sched75/sealkeeper/internal/totp"
 	"github.com/sched75/sealkeeper/internal/webauthn"
 	"rsc.io/qr"
@@ -672,12 +673,13 @@ func (s *Server) handleAdminAudit(w http.ResponseWriter, r *http.Request) {
 	}
 	const pageSize = 50
 
-	rows, err := s.adminRepo.DB().QueryContext(r.Context(),
+	db := s.adminRepo.DB()
+	rows, err := db.QueryContext(r.Context(), storage.Rebind(db,
 		`SELECT sequence_no, occurred_at, event_type,
 		 COALESCE(actor, ''), COALESCE(target, ''), details_json
 		 FROM audit_log
 		 ORDER BY sequence_no DESC
-		 LIMIT ? OFFSET ?`, pageSize, (page-1)*pageSize)
+		 LIMIT ? OFFSET ?`), pageSize, (page-1)*pageSize)
 	if err != nil {
 		s.logger.Error("audit query failed", "err", err)
 		http.Error(w, "internal", http.StatusInternalServerError)
