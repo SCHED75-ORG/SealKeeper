@@ -239,7 +239,9 @@ func runServe(args []string) int {
 	// every reset restores, so it is taken before any visitor gets in.
 	if cfg.IsDemo() {
 		logger.Info("demo mode active — data reset every 24h")
-		resetter := demo.NewResetter(store.DB(), logger, 24*time.Hour).WithMailStore(srv.MailStore())
+		resetter := demo.NewResetter(store.DB(), logger, 24*time.Hour).
+			WithMailStore(srv.MailStore()).
+			WithLibrariesDir(librariesRepo.Dir())
 		if err := resetter.Snapshot(ctx); err != nil {
 			logger.Error("demo snapshot failed", "err", err)
 			return 1

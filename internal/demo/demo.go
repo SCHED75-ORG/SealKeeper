@@ -17,7 +17,11 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
+	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -57,6 +61,7 @@ type Resetter struct {
 	logger   *slog.Logger
 	interval time.Duration
 	mail     *mailcapture.Store
+	libDir   string
 
 	mu       sync.Mutex
 	snapshot map[string]tableRows // nil until Snapshot succeeds
@@ -78,6 +83,15 @@ func NewResetter(db *sql.DB, logger *slog.Logger, interval time.Duration) *Reset
 // which holds the demo visitors' addresses and reveal links.
 func (r *Resetter) WithMailStore(m *mailcapture.Store) *Resetter {
 	r.mail = m
+	return r
+}
+
+// WithLibrariesDir points the reset at the on-disk library store
+// (SK_LIBRARIES_DIR). Wiping the non-system rows alone would leave their
+// files behind, so after each reset every library blob no remaining row
+// references is deleted.
+func (r *Resetter) WithLibrariesDir(dir string) *Resetter {
+	r.libDir = dir
 	return r
 }
 
@@ -168,6 +182,11 @@ func (r *Resetter) ResetOnce(ctx context.Context) error {
 	if r.mail != nil {
 		r.mail.Reset()
 	}
+	if r.libDir != "" {
+		if err := r.sweepLibraryFiles(ctx); err != nil {
+			r.logError("demo reset: library file sweep failed", err)
+		}
+	}
 	if r.logger != nil {
 		r.logger.Info("demo reset complete",
 			"wiped", len(wipedTables),
@@ -175,6 +194,57 @@ func (r *Resetter) ResetOnce(ctx context.Context) error {
 			"elapsed_ms", time.Since(start).Milliseconds())
 	}
 	return nil
+}
+
+// libraryBlob matches the content-addressed names libraries.Repo.Upload
+// writes (<sha256 hex>.txt); nothing else in the directory is touched.
+var libraryBlob = regexp.MustCompile(`^[0-9a-f]{64}\.txt$`)
+
+// sweepLibraryFiles deletes every library blob in libDir that no
+// remaining libraries row references: the files of the non-system rows
+// the reset just wiped, plus any orphan an earlier reset left behind.
+func (r *Resetter) sweepLibraryFiles(ctx context.Context) error {
+	keep, err := r.libraryFiles(ctx)
+	if err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(r.libDir)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	var errs []error
+	for _, e := range entries {
+		name := e.Name()
+		if !e.Type().IsRegular() || !libraryBlob.MatchString(name) || keep[name] {
+			continue
+		}
+		if err := os.Remove(filepath.Join(r.libDir, name)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// libraryFiles returns the base names of the files the remaining
+// libraries rows reference.
+func (r *Resetter) libraryFiles(ctx context.Context) (map[string]bool, error) {
+	rows, err := r.db.QueryContext(ctx, "SELECT file_path FROM libraries")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	keep := map[string]bool{}
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return nil, err
+		}
+		keep[filepath.Base(p)] = true
+	}
+	return keep, rows.Err()
 }
 
 // readTable copies every row of table. Values round-trip through the same
