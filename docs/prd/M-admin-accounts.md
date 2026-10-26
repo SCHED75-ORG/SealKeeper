@@ -58,9 +58,9 @@ Ce module spécifie la **gestion des comptes administrateurs** de SealKeeper en 
 
 | ID | Exigence | Niveau |
 |---|---|---|
-| FR-M.4 | Tout mot de passe d'administrateur **doit atteindre ANSSI B3** : ≥ 16 caractères et mélange d'au moins **3 des 4 classes** (minuscule, majuscule, chiffre, symbole). Le couple longueur + classes garantit un seuil d'entropie ≥ 100 bits dans tout alphabet typable | MUST |
+| FR-M.4 | Tout mot de passe d'administrateur **doit atteindre ANSSI B3** : **entropie de devinette estimée ≥ 100 bits** (`AdminPasswordMinEntropyBits`). Préalables bloquants : ≥ 16 caractères (`AdminPasswordMinLength`), mélange d'au moins **3 des 4 classes** (minuscule, majuscule, chiffre, symbole) et absence de la liste des mots de passe courants. Longueur et classes ne garantissent **pas** à elles seules le seuil (`Password1234567!` les satisfait et reste très en dessous) : le seuil est vérifié par l'estimateur `EstimatePasswordEntropy`, de type zxcvbn — découpage du mot de passe en segments au coût minimal, chaque caractère « libre » coûtant log2 de la taille de l'alphabet observé, chaque motif prévisible (mot de passe courant, mot de dictionnaire y compris variantes de casse et leetspeak, nom du produit, de l'instance ou email de l'opérateur, année, séquence, marche clavier, répétition) le prix qu'il coûte à un attaquant qui connaît le motif. Seuls les 72 premiers octets comptent (limite d'entrée bcrypt) | MUST |
 | FR-M.5 | La validation est faite côté serveur, via `internal/admin.ValidateAdminPassword`. Côté navigateur, l'attribut `minlength="16"` du `<input type="password">` offre un premier filtre, jamais une garantie | MUST |
-| FR-M.6 | Le rejet renvoie un `admin.ErrPasswordTooWeak` avec la cause détaillée (*« minimum 16 characters »* ou *« mix at least 3 of … »*) ; l'UI affiche le message tel quel à l'opérateur | MUST |
+| FR-M.6 | Le rejet renvoie un `*admin.WeakPasswordError` (`errors.Is(err, admin.ErrPasswordTooWeak)`) portant l'entropie estimée et des **codes de faiblesse** (`too_short`, `few_classes`, `common`, `dictionary`, `context`, `year`, `sequence`, `keyboard`, `repeat`, `entropy`). L'UI affiche la phrase associée à chaque code (*« minimum 16 characters »*, *« contains a dictionary word »*…) ; ni le message ni l'URL ne citent jamais un fragment du mot de passe | MUST |
 
 > **Remarque.** Les mots de passe de bootstrap (FR-M.1) et de création serveur-générée (FR-M.13) **ne sont pas soumis** au validateur B3 : leur entropie est garantie par la construction (20 caractères pseudo-aléatoires depuis un alphabet de 64+ glyphes ≥ 120 bits). Le validateur s'applique **uniquement** au moment où un humain choisit lui-même son mot de passe (setup wizard ou `/admin/account`).
 
@@ -149,3 +149,4 @@ Ce module spécifie la **gestion des comptes administrateurs** de SealKeeper en 
 | Version | Date | Auteur | Notes |
 |---|---|---|---|
 | 1.0 | 2026-05-17 | P.-L. Darmon (Daneel) | Création du module ; consolide la gestion des comptes admin extraite de C §3.2, formalise la politique B3 (FR-M.4..6) et les garde-fous last-active-admin (FR-M.19) |
+| 1.1 | 2026-10-26 | P.-L. Darmon | FR-M.4 / FR-M.6 alignés sur l'implémentation : le seuil B3 est vérifié par l'estimateur d'entropie (`EstimatePasswordEntropy`), longueur + classes ne sont que des préalables ; rejet par codes de faiblesse |

@@ -25,6 +25,7 @@ import (
 	"github.com/sched75/sealkeeper/internal/integrations"
 	"github.com/sched75/sealkeeper/internal/libraries"
 	"github.com/sched75/sealkeeper/internal/mail"
+	"github.com/sched75/sealkeeper/internal/mailer"
 	"github.com/sched75/sealkeeper/internal/mailtemplates"
 	"github.com/sched75/sealkeeper/internal/policies"
 	"github.com/sched75/sealkeeper/internal/smtpconfig"
@@ -1836,7 +1837,10 @@ func (s *Server) handleAdminIntegrationTest(w http.ResponseWriter, r *http.Reque
 		http.Redirect(w, r, "/admin/integrations?err=not_found", http.StatusSeeOther)
 		return
 	}
-	pol := integrations.NetPolicy{AllowPrivate: s.cfg.IntegrationsAllowPrivate}
+	pol := integrations.NetPolicy{
+		AllowPrivate:   s.cfg.IntegrationsAllowPrivate,
+		AllowPlainHTTP: s.cfg.IsEval(),
+	}
 	if err := integrations.TestSink(r.Context(), row, s.cfg.InstanceDomain, pol); err != nil {
 		s.auditAppend(r.Context(), "integration.test_failed", a.Email, row.Name, map[string]any{
 			"error": err.Error(),
@@ -2513,9 +2517,10 @@ const adminDashboardTpl = `{{define "dashboard.html"}}{{template "header" .}}
 {{ if ne .Mode "production" }}
 <section style="margin-top:1.5rem; background:#FBF7EE; border:1px solid var(--gold); border-radius:2px; padding:1rem 1.25rem">
   <h3 style="margin-top:0; color:var(--ink)">Switching to production mode</h3>
-  <p style="margin:0.4rem 0">The run mode is decided at startup by the <code>SK_MODE</code> environment variable. Switching requires a restart with the right env in place.</p>
+  <p style="margin:0.4rem 0">The run mode is decided at startup by the <code>SK_MODE</code> environment variable (<code>eval</code> or <code>production</code>); the public demo is the separate <code>SK_DEMO_MODE</code> toggle. Switching requires a restart with the right env in place.</p>
   <p style="margin:0.4rem 0"><strong>Minimum production envelope</strong> (set before <code>docker run</code>):</p>
   <pre style="margin:0.5rem 0">SK_MODE=production
+SK_DEMO_MODE=false
 SK_BASE_URL=https://seal.example.eu
 SK_MASTER_SECRET=$(openssl rand -base64 32)
 SK_DATABASE_URL=postgres://sk:secret@db:5432/sealkeeper?sslmode=require
@@ -4128,13 +4133,16 @@ func (s *Server) handleAdminSMTPTest(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 	if err := s.sender.Send(ctx, msg); err != nil {
+		// The full error (with the remote reply text) stays in the server
+		// log; the UI and the audit chain only get the sanitised status.
 		s.logger.Warn("smtp test failed", "to", to, "err", err)
+		status := mailer.FailureStatus(err)
 		s.auditAppend(r.Context(), "smtp.test_failed", a.Email, to, map[string]any{
 			"transport": s.sender.Name(),
-			"error":     err.Error(),
+			"status":    status,
 		})
 		http.Redirect(w, r,
-			"/admin/smtp?err=test_failed&details="+url.QueryEscape(err.Error()),
+			"/admin/smtp?err=test_failed&details="+url.QueryEscape(status),
 			http.StatusSeeOther)
 		return
 	}
