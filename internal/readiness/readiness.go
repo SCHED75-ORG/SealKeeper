@@ -9,6 +9,7 @@ package readiness
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"sync"
 	"time"
@@ -67,8 +68,11 @@ func (s *Set) Handler(perCheckTimeout time.Duration) http.HandlerFunc {
 				mu.Lock()
 				defer mu.Unlock()
 				if err != nil {
+					// The error text (DB user, host:port, database name)
+					// goes to the log, not to the unauthenticated caller.
+					slog.Warn("readiness check failed", "subsystem", c.Name(), "err", err)
 					result.Status = "degraded"
-					result.Subsystems[c.Name()] = err.Error()
+					result.Subsystems[c.Name()] = "unavailable"
 				} else {
 					result.Subsystems[c.Name()] = "ok"
 				}

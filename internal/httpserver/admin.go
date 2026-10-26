@@ -277,7 +277,7 @@ func (s *Server) handleAdminLoginPost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sess, err := s.adminRepo.CreateSession(r.Context(), res.Admin.ID,
-		hashShort(s.clientIP(r)), hashShort(r.UserAgent()))
+		s.hashShort(s.clientIP(r)), s.hashShort(r.UserAgent()))
 	if err != nil {
 		s.logger.Error("admin.CreateSession failed", "err", err)
 		s.adminLoginError(w, r, "internal")
@@ -512,7 +512,7 @@ func (s *Server) handleAdminLoginWebauthnFinish(w http.ResponseWriter, r *http.R
 	s.adminRepo.RecordLoginSuccess(r.Context(), ad.ID)
 
 	sess, err := s.adminRepo.CreateSession(r.Context(), ad.ID,
-		hashShort(s.clientIP(r)), hashShort(r.UserAgent()))
+		s.hashShort(s.clientIP(r)), s.hashShort(r.UserAgent()))
 	if err != nil {
 		s.logger.Error("admin.CreateSession failed after webauthn", "err", err)
 		http.Error(w, "internal", http.StatusInternalServerError)

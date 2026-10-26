@@ -17,7 +17,9 @@ package httpserver
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -57,6 +59,13 @@ import (
 	"github.com/sched75/sealkeeper/internal/version"
 	"github.com/sched75/sealkeeper/internal/webauthn"
 )
+
+// pseudonymKey derives the audit pseudonymisation key from the master
+// secret, domain-separated from every other use of it.
+func pseudonymKey(masterSecret string) []byte {
+	sum := sha256.Sum256([]byte("sealkeeper-pseudonym:" + masterSecret))
+	return sum[:]
+}
 
 // adminLoginPerIPWindow is the number of admin login attempts one client IP
 // may make per 15 minutes.
@@ -99,6 +108,9 @@ type Server struct {
 	// loginLimiter caps POST /admin/login per client IP. The per-account
 	// lockout alone lets one IP spray many accounts, and lock them all.
 	loginLimiter *ratelimit.Limiter
+
+	// pseudonymKey keys hashShort (derived from the master secret).
+	pseudonymKey []byte
 
 	// trustedProxies gates X-Forwarded-For (FR-H.42). Empty = never trust.
 	trustedProxies []netip.Prefix
@@ -160,6 +172,7 @@ func New(cfg config.Config, logger *slog.Logger) *Server {
 
 	return &Server{
 		trustedProxies: trusted,
+		pseudonymKey:   pseudonymKey(cfg.MasterSecret),
 		loginLimiter:   ratelimit.New(adminLoginPerIPWindow, 15*time.Minute),
 		cfg:            cfg,
 		logger:         logger,
@@ -523,8 +536,8 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ip := s.clientIP(r)
-	ipHash := hashShort(ip)
-	uaHash := hashShort(r.UserAgent())
+	ipHash := s.hashShort(ip)
+	uaHash := s.hashShort(r.UserAgent())
 
 	// FR-B.11..13 — apply rate limits BEFORE issuing anything. The hit is
 	// observable only via the audit log + Prometheus counter.
@@ -680,7 +693,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 	if err := s.sender.Send(r.Context(), msg); err != nil {
 		s.logger.Error("mail send failed", "transport", s.sender.Name(), "err", err)
-		s.auditAppend(r.Context(), "mail.send_failed", email, tok.Token, map[string]any{
+		s.auditAppend(r.Context(), "mail.send_failed", email, tokenRef(tok.Token), map[string]any{
 			"transport": s.sender.Name(),
 			"error":     err.Error(),
 		})
@@ -689,7 +702,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.auditAppend(r.Context(), audit.EventTokenIssued, email, tok.Token, map[string]any{
+	s.auditAppend(r.Context(), audit.EventTokenIssued, email, tokenRef(tok.Token), map[string]any{
 		"ip_hash":   ipHash,
 		"ua_hash":   uaHash,
 		"domain":    tok.Domain,
@@ -794,8 +807,8 @@ func (s *Server) handlePolicy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"storage_unavailable"}`, http.StatusServiceUnavailable)
 		return
 	}
-	ipHash := hashShort(s.clientIP(r))
-	uaHash := hashShort(r.UserAgent())
+	ipHash := s.hashShort(s.clientIP(r))
+	uaHash := s.hashShort(r.UserAgent())
 
 	// Resolve the policy BEFORE burning the token: if it can't be resolved
 	// (DB error, policy disabled or deleted during the TTL) the user keeps a
@@ -836,7 +849,7 @@ func (s *Server) handlePolicy(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	s.auditAppend(r.Context(), audit.EventTokenConsumed, tok.Email, tok.Token, map[string]any{
+	s.auditAppend(r.Context(), audit.EventTokenConsumed, tok.Email, tokenRef(tok.Token), map[string]any{
 		"ip_hash": ipHash,
 		"ua_hash": uaHash,
 		"domain":  tok.Domain,
@@ -922,7 +935,7 @@ func (s *Server) dispatchPostConsult(m postConsultMail) {
 	})
 	if err != nil {
 		s.logger.Error("post-consultation render failed", "err", err)
-		s.auditAppend(ctx, "mail.post_consult_failed", m.email, m.token, map[string]any{
+		s.auditAppend(ctx, "mail.post_consult_failed", m.email, tokenRef(m.token), map[string]any{
 			"stage": "render",
 			"error": err.Error(),
 		})
@@ -937,7 +950,7 @@ func (s *Server) dispatchPostConsult(m postConsultMail) {
 	})
 	if err != nil {
 		s.logger.Error("post-consultation assemble failed", "err", err)
-		s.auditAppend(ctx, "mail.post_consult_failed", m.email, m.token, map[string]any{
+		s.auditAppend(ctx, "mail.post_consult_failed", m.email, tokenRef(m.token), map[string]any{
 			"stage": "assemble",
 			"error": err.Error(),
 		})
@@ -945,14 +958,14 @@ func (s *Server) dispatchPostConsult(m postConsultMail) {
 	}
 	if err := s.sender.Send(ctx, msg); err != nil {
 		s.logger.Error("post-consultation send failed", "transport", s.sender.Name(), "err", err)
-		s.auditAppend(ctx, "mail.post_consult_failed", m.email, m.token, map[string]any{
+		s.auditAppend(ctx, "mail.post_consult_failed", m.email, tokenRef(m.token), map[string]any{
 			"stage":     "send",
 			"transport": s.sender.Name(),
 			"error":     err.Error(),
 		})
 		return
 	}
-	s.auditAppend(ctx, "mail.post_consult_sent", m.email, m.token, map[string]any{
+	s.auditAppend(ctx, "mail.post_consult_sent", m.email, tokenRef(m.token), map[string]any{
 		"transport": s.sender.Name(),
 	})
 }
@@ -1061,7 +1074,7 @@ func (s *Server) metricsHandler() http.Handler {
 	}
 	expected := "Bearer " + s.cfg.MetricsToken
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !strings.EqualFold(r.Header.Get("Authorization"), expected) {
+		if subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte(expected)) != 1 {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -1071,12 +1084,28 @@ func (s *Server) metricsHandler() http.Handler {
 
 // ----- helpers --------------------------------------------------------------
 
-func hashShort(s string) string {
-	if s == "" {
+// hashShort pseudonymises an IP or User-Agent for the audit log. It is an
+// HMAC keyed from the master secret: the unkeyed, truncated SHA-256 it
+// replaced was reversible by brute force over the IPv4 space in minutes,
+// so the "pseudonymised" IPs were personal data in clear (FR-I).
+func (s *Server) hashShort(v string) string {
+	if v == "" {
 		return ""
 	}
-	sum := sha256.Sum256([]byte(s))
-	return hex.EncodeToString(sum[:8])
+	m := hmac.New(sha256.New, s.pseudonymKey)
+	_, _ = m.Write([]byte(v))
+	return hex.EncodeToString(m.Sum(nil)[:8])
+}
+
+// tokenRef identifies a reveal token in the audit log and SIEM feeds
+// without disclosing it. The raw token is a bearer credential: anyone
+// reading audit_log or a SIEM index could open, or burn, a live link.
+func tokenRef(token string) string {
+	if token == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte("sealkeeper-token-ref:" + token))
+	return "tok:" + hex.EncodeToString(sum[:8])
 }
 
 func writeJSONError(w http.ResponseWriter, code int, slug, detail string) {
@@ -1097,9 +1126,12 @@ func (s *Server) instrumentation(next http.Handler) http.Handler {
 		start := time.Now()
 		ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
 		next.ServeHTTP(ww, r)
+		// Unmatched paths share one label: using r.URL.Path let anyone
+		// mint a new time series per request (unauthenticated memory DoS,
+		// attacker text in every scrape).
 		route := chi.RouteContext(r.Context()).RoutePattern()
 		if route == "" {
-			route = r.URL.Path
+			route = "unmatched"
 		}
 		s.reqDur.WithLabelValues(route).Observe(time.Since(start).Seconds())
 		s.reqCount.WithLabelValues(route, statusBucket(ww.Status())).Inc()
