@@ -392,7 +392,10 @@ jobs:
   # ---------------------------------------------------------------------------
   e2e-subset:
     name: E2E subset (Chromium happy path)
-    runs-on: ubuntu-latest
+    # Pinned: ubuntu-latest moved to 26.04, which the pinned Playwright
+    # cannot install Chromium on ("does not support chromium on
+    # ubuntu26.04-x64"). Move forward together with a Playwright bump.
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     needs: [build, build-js]
     steps:

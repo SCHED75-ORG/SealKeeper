@@ -2508,6 +2508,8 @@ const adminSetupTpl = `{{define "setup.html"}}{{template "header" .}}
 {{template "footer" .}}{{end}}
 `
 
+// The production how-to shows an example DSN with a placeholder password.
+// #nosec G101 -- documentation text, not a credential
 const adminDashboardTpl = `{{define "dashboard.html"}}{{template "header" .}}
 <main>
 <h2>Welcome, {{ .Admin.Email }}</h2>
@@ -2544,7 +2546,7 @@ const adminDashboardTpl = `{{define "dashboard.html"}}{{template "header" .}}
 SK_DEMO_MODE=false
 SK_BASE_URL=https://seal.example.eu
 SK_MASTER_SECRET=$(openssl rand -base64 32)
-SK_DATABASE_URL=postgres://sk:secret@db:5432/sealkeeper?sslmode=require
+SK_DATABASE_URL=postgres://sk:&lt;password&gt;@db:5432/sealkeeper?sslmode=require
 SK_INSTANCE_DOMAIN=seal.example.eu</pre>
   <p style="margin:0.4rem 0">In production the <em>Evaluation mode</em> and <em>Public demo</em> banners both disappear, the in-memory mail capture is replaced by the real SMTP relay (see <a href="/admin/smtp">SMTP</a>), and rate-limiting / lockout durations apply at full strength.</p>
   <p style="margin:0.4rem 0; color:var(--stone); font-size:0.875rem">Reference recipe: see the <em>Operator docs</em> at <a href="https://github.com/sched75/SealKeeper/blob/main/docs/prd/H-deployment.md">docs/prd/H-deployment.md</a> and the production Compose stack at <code>docker-compose.yml</code> in the repo root.</p>

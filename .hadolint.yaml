@@ -8,7 +8,8 @@ failure-threshold: warning
 # We pin via SHA in release.yml; the base image moves only via Renovate PRs.
 ignored:
   - DL3007 # using latest tag — distroless:nonroot is a moving alias by design
-  - DL3008 # explicit apk version pinning — alpine builder is intentionally floating in builder
+  - DL3018 # explicit apk version pinning — alpine builder is intentionally floating in builder
+    #          (was listed as DL3008, the apt rule, so the apk pin warning failed CI)
 
 trustedRegistries:
   - docker.io
