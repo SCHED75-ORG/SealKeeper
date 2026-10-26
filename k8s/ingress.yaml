@@ -47,6 +47,14 @@ spec:
 # line) — and any SIEM fed by it — would hold in clear. These paths get
 # their own Ingress so the access log is OFF for them alone. Keep the
 # annotations of the main Ingress above in sync.
+#
+# The controller's error log cannot be redacted either: on an upstream
+# failure (SealKeeper down — the token is then never consumed and stays
+# live) nginx writes `request: "GET /reveal/<token> ..."`. The
+# `error_log ... crit` line in the snippet below silences those lines for
+# these two paths only; SealKeeper's /readyz and the controller's other
+# locations still surface backend failures. Like the main Ingress, this
+# needs snippet annotations allowed on the controller.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -61,6 +69,7 @@ metadata:
     nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
     nginx.ingress.kubernetes.io/configuration-snippet: |
+      error_log /var/log/nginx/error.log crit;
       more_set_headers "Strict-Transport-Security: max-age=31536000; includeSubDomains; preload";
       more_set_headers "X-Content-Type-Options: nosniff";
       more_set_headers "X-Frame-Options: DENY";
