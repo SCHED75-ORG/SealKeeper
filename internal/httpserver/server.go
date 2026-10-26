@@ -21,6 +21,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	htmltemplate "html/template"
 	"log/slog"
 	"net"
@@ -795,6 +796,20 @@ func (s *Server) handlePolicy(w http.ResponseWriter, r *http.Request) {
 	}
 	ipHash := hashShort(s.clientIP(r))
 	uaHash := hashShort(r.UserAgent())
+
+	// Resolve the policy BEFORE burning the token: if it can't be resolved
+	// (DB error, policy disabled or deleted during the TTL) the user keeps a
+	// working link instead of silently getting the weaker built-in default.
+	var resolved map[string]any
+	if pending, err := s.tokens.Get(r.Context(), tokenParam); err == nil {
+		resolved, err = s.resolvedPolicy(r.Context(), pending.Email)
+		if err != nil {
+			s.logger.Error("policy resolution failed; token left unconsumed", "err", err)
+			writeJSONError(w, http.StatusServiceUnavailable, "policy_unavailable",
+				"Your password policy is temporarily unavailable. Try the link again later.")
+			return
+		}
+	}
 	tok, err := s.tokens.Consume(r.Context(), tokenParam, ipHash, uaHash)
 	switch {
 	case errors.Is(err, tokens.ErrNotFound):
@@ -812,7 +827,15 @@ func (s *Server) handlePolicy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resolved := s.resolvedPolicy(r.Context(), tok.Email)
+	if resolved == nil {
+		// Only reachable if Get failed transiently but Consume succeeded.
+		if resolved, err = s.resolvedPolicy(r.Context(), tok.Email); err != nil {
+			s.logger.Error("policy resolution failed after consume", "err", err)
+			writeJSONError(w, http.StatusServiceUnavailable, "policy_unavailable",
+				"Your password policy is temporarily unavailable. Request a new link.")
+			return
+		}
+	}
 	s.auditAppend(r.Context(), audit.EventTokenConsumed, tok.Email, tok.Token, map[string]any{
 		"ip_hash": ipHash,
 		"ua_hash": uaHash,
@@ -938,13 +961,27 @@ func (s *Server) dispatchPostConsult(m postConsultMail) {
 // built-in default when no policy is configured yet (zero-config eval).
 // The shape mirrors module A's PolicyDescriptor so the JS bundle in the
 // reveal page can consume it without translation.
-func (s *Server) resolvedPolicy(ctx context.Context, email string) map[string]any {
+//
+// The built-in default only applies to a zero-config instance (no policy
+// rows at all). Once an operator has configured policies, "none applies"
+// or any error is returned as an error — never a silent downgrade.
+func (s *Server) resolvedPolicy(ctx context.Context, email string) (map[string]any, error) {
 	if s.policies == nil {
-		return policyDefaultMap()
+		return policyDefaultMap(), nil
 	}
 	row, err := s.policies.Resolve(ctx, email)
+	if errors.Is(err, policies.ErrNoPolicy) {
+		n, cerr := s.policies.Count(ctx)
+		if cerr != nil {
+			return nil, cerr
+		}
+		if n == 0 {
+			return policyDefaultMap(), nil
+		}
+		return nil, err
+	}
 	if err != nil {
-		return policyDefaultMap()
+		return nil, err
 	}
 	out := map[string]any{
 		"id":              row.ID,
@@ -957,17 +994,17 @@ func (s *Server) resolvedPolicy(ctx context.Context, email string) map[string]an
 		"notifyOnConsult": row.NotifyOnConsult,
 	}
 	// `parameters` is admin-supplied JSON — preserve it as-is.
+	// A corrupt blob is an error, not "no parameters": empty parameters
+	// would make the generator fall back to weaker defaults.
+	out["parameters"] = map[string]any{}
 	if len(row.Params) > 0 {
 		var params any
-		if err := json.Unmarshal(row.Params, &params); err == nil {
-			out["parameters"] = params
-		} else {
-			out["parameters"] = map[string]any{}
+		if err := json.Unmarshal(row.Params, &params); err != nil {
+			return nil, fmt.Errorf("policy %d: invalid parameters JSON: %w", row.ID, err)
 		}
-	} else {
-		out["parameters"] = map[string]any{}
+		out["parameters"] = params
 	}
-	return out
+	return out, nil
 }
 
 func policyDefaultMap() map[string]any {

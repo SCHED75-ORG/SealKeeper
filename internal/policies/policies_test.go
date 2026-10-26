@@ -185,3 +185,42 @@ func TestResolveElevationButNoMatchingPolicyDenies(t *testing.T) {
 		t.Fatalf("err = %v, want ErrNoPolicy", err)
 	}
 }
+
+// Regression (SK-16): elevations were matched on the domain row Resolve
+// picked, so adding an exact row under the wildcard the elevation was
+// filed under silently dropped a B3 user to B1. A "+tag" spelling did the
+// same.
+func TestResolveElevationSurvivesDomainRowsAndSubaddress(t *testing.T) {
+	t.Parallel()
+	r := newRig(t)
+	ctx := context.Background()
+	wild, err := r.domains.Create(ctx, "*.example.com", "", true, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.elevations.Create(ctx, wild.ID, "ciso@corp.example.com", elevations.LevelB3, "", nil); err != nil {
+		t.Fatal(err)
+	}
+	exact, err := r.domains.Create(ctx, "corp.example.com", "", true, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range []int64{wild.ID, exact.ID} {
+		for _, lvl := range []elevations.Level{elevations.LevelB1, elevations.LevelB3} {
+			if _, err := r.policies.Create(ctx, policies.CreateInputs{
+				DomainID: d, ANSSILevel: lvl, Name: string(lvl), Generator: policies.GeneratorG3, Active: true,
+			}, nil); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for _, email := range []string{"ciso@corp.example.com", "CISO+x@corp.example.com"} {
+		p, err := r.policies.Resolve(ctx, email)
+		if err != nil {
+			t.Fatalf("%s: %v", email, err)
+		}
+		if p.ANSSILevel != elevations.LevelB3 {
+			t.Errorf("%s resolved to %s, want B3", email, p.ANSSILevel)
+		}
+	}
+}

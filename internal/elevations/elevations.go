@@ -118,6 +118,31 @@ func (r *Repo) Lookup(ctx context.Context, domainID int64, email string) (Level,
 	return Level(lvl), nil
 }
 
+// LookupEmail returns the highest level granted to email under any domain
+// row. Elevations used to be matched on the domain row Resolve picked, so
+// adding an exact row under an existing wildcard (or toggling one) silently
+// dropped a B3 user to B1. Sub-addresses ("ciso+x@") resolve like their
+// base address, so a different spelling cannot select a weaker policy.
+// Levels sort lexically (B1 < B2 < B3).
+func (r *Repo) LookupEmail(ctx context.Context, email string) (Level, error) {
+	email = strings.ToLower(strings.TrimSpace(email))
+	base := email
+	if at := strings.LastIndexByte(email, '@'); at > 0 {
+		if plus := strings.IndexByte(email[:at], '+'); plus > 0 {
+			base = email[:plus] + email[at:]
+		}
+	}
+	const q = `SELECT MAX(level) FROM elevations WHERE email IN (?, ?)`
+	var lvl sql.NullString
+	if err := r.db.QueryRowContext(ctx, rebind(r.db, q), email, base).Scan(&lvl); err != nil {
+		return LevelB1, err
+	}
+	if !lvl.Valid {
+		return LevelB1, ErrNotFound
+	}
+	return Level(lvl.String), nil
+}
+
 // List returns every row for the given domain, ordered by email.
 func (r *Repo) List(ctx context.Context, domainID int64) ([]Elevation, error) {
 	const q = selectQ + ` WHERE domain_id = ? ORDER BY email ASC`

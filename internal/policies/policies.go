@@ -227,14 +227,23 @@ func (r *Repo) Resolve(ctx context.Context, email string) (Policy, error) {
 		return Policy{}, ErrNoPolicy
 	}
 	dom, err := r.domains.FindMatching(ctx, emailLower[at+1:])
-	if err != nil {
+	if errors.Is(err, domains.ErrNotFound) {
 		return Policy{}, ErrNoPolicy
+	}
+	if err != nil {
+		// A database error is not "no policy": callers must not fall back
+		// to a weaker default on a transient failure.
+		return Policy{}, err
 	}
 
 	level := elevations.LevelB1
 	if r.elevations != nil {
-		if lvl, err := r.elevations.Lookup(ctx, dom.ID, emailLower); err == nil {
+		lvl, err := r.elevations.LookupEmail(ctx, emailLower)
+		switch {
+		case err == nil:
 			level = lvl
+		case !errors.Is(err, elevations.ErrNotFound):
+			return Policy{}, err // never downgrade to B1 on a lookup error
 		}
 	}
 
