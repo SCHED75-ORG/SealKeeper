@@ -361,41 +361,49 @@ func checkHTMLTokens(src, revealURL string, rendered bool) (int, error) {
 	z := html.NewTokenizer(strings.NewReader(src))
 	for {
 		tt := z.Next()
-		switch tt {
-		case html.ErrorToken:
+		if tt == html.ErrorToken {
 			if errors.Is(z.Err(), io.EOF) {
 				return links, nil
 			}
 			return 0, unsafeErr("html", "unreadable markup: %v", z.Err())
-		case html.TextToken:
-			if raw != "" {
-				if err := checkRawText(raw, string(z.Raw())); err != nil {
-					return 0, err
-				}
-			}
-		case html.CommentToken:
-			if rendered {
-				return 0, unsafeErr("html", errComment)
-			}
-		case html.DoctypeToken:
-			if !strings.EqualFold(strings.TrimSpace(string(z.Text())), "html") {
-				return 0, unsafeErr("html", "only <!doctype html> is allowed")
-			}
-		case html.EndTagToken:
-			raw = ""
-		case html.StartTagToken, html.SelfClosingTagToken:
-			tok := z.Token()
-			raw = ""
-			if tt == html.StartTagToken && rawTextElements[tok.Data] {
-				raw = tok.Data
-			}
-			n, err := checkElement(tok.Data, tok.Attr, revealURL)
-			if err != nil {
-				return 0, err
-			}
-			links += n
 		}
+		n, err := checkHTMLToken(z, tt, &raw, revealURL, rendered)
+		if err != nil {
+			return 0, err
+		}
+		links += n
 	}
+}
+
+// checkHTMLToken vets the token the tokenizer just read (anything but
+// ErrorToken) and returns 1 when it is a link whose whole href is the reveal
+// URL. raw tracks the raw-text element we are inside, if any: every tag
+// resets it, and a start tag of a raw-text element sets it.
+func checkHTMLToken(z *html.Tokenizer, tt html.TokenType, raw *string, revealURL string, rendered bool) (int, error) {
+	switch tt {
+	case html.TextToken:
+		if *raw != "" {
+			return 0, checkRawText(*raw, string(z.Raw()))
+		}
+	case html.CommentToken:
+		if rendered {
+			return 0, unsafeErr("html", errComment)
+		}
+	case html.DoctypeToken:
+		if !strings.EqualFold(strings.TrimSpace(string(z.Text())), "html") {
+			return 0, unsafeErr("html", "only <!doctype html> is allowed")
+		}
+	case html.EndTagToken:
+		*raw = ""
+	case html.StartTagToken, html.SelfClosingTagToken:
+		tok := z.Token()
+		*raw = ""
+		if tt == html.StartTagToken && rawTextElements[tok.Data] {
+			*raw = tok.Data
+		}
+		return checkElement(tok.Data, tok.Attr, revealURL)
+	}
+	return 0, nil
 }
 
 // checkHTMLTree parses the body the way an HTML5 client with scripting
@@ -407,39 +415,52 @@ func checkHTMLTree(src string, rendered bool) error {
 	if err != nil {
 		return unsafeErr("html", "unreadable markup: %v", err)
 	}
-	var walk func(*html.Node) error
-	walk = func(n *html.Node) error {
-		switch n.Type {
-		case html.ElementNode:
-			if n.Namespace != "" {
-				return unsafeErr("html", "<%s:%s> foreign content is not allowed", n.Namespace, n.Data)
-			}
-			if _, err := checkElement(n.Data, n.Attr, ""); err != nil {
-				return err
-			}
-			if rawTextElements[n.Data] {
-				for c := n.FirstChild; c != nil; c = c.NextSibling {
-					if c.Type != html.TextNode {
-						return unsafeErr("html", "<%s> may only contain text", n.Data)
-					}
-					if err := checkRawText(n.Data, c.Data); err != nil {
-						return err
-					}
-				}
-			}
-		case html.CommentNode:
-			if rendered {
-				return unsafeErr("html", errComment)
-			}
+	return checkTreeNode(doc, rendered)
+}
+
+// checkTreeNode vets one node of the parsed tree, then its children in
+// document order.
+func checkTreeNode(n *html.Node, rendered bool) error {
+	switch n.Type {
+	case html.ElementNode:
+		if err := checkTreeElement(n); err != nil {
+			return err
 		}
-		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			if err := walk(c); err != nil {
-				return err
-			}
+	case html.CommentNode:
+		if rendered {
+			return unsafeErr("html", errComment)
 		}
+	}
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		if err := checkTreeNode(c, rendered); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// checkTreeElement holds one element of the parsed tree to the allowlist:
+// no foreign (SVG/MathML) namespace, an allowed element with allowed
+// attributes, and raw-text elements holding nothing but safe text.
+func checkTreeElement(n *html.Node) error {
+	if n.Namespace != "" {
+		return unsafeErr("html", "<%s:%s> foreign content is not allowed", n.Namespace, n.Data)
+	}
+	if _, err := checkElement(n.Data, n.Attr, ""); err != nil {
+		return err
+	}
+	if !rawTextElements[n.Data] {
 		return nil
 	}
-	return walk(doc)
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		if c.Type != html.TextNode {
+			return unsafeErr("html", "<%s> may only contain text", n.Data)
+		}
+		if err := checkRawText(n.Data, c.Data); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // checkRawText vets the content of an allowed raw-text element.
@@ -463,31 +484,50 @@ func checkElement(name string, attrs []html.Attribute, revealURL string) (int, e
 	}
 	links := 0
 	for _, a := range attrs {
-		key := strings.ToLower(a.Key)
-		if a.Namespace != "" || (!globalAttrs[key] && !elementAttrs[name][key] && !strings.HasPrefix(key, "aria-")) {
-			return 0, unsafeErr("html", "attribute %q is not allowed on <%s>", key, name)
+		n, err := checkAttr(name, a, revealURL)
+		if err != nil {
+			return 0, err
 		}
-		val := strings.TrimSpace(a.Val)
-		switch {
-		case key == "style":
-			if cssUnsafe(val) {
-				return 0, unsafeErr("html", errCSS)
-			}
-		case name == "a" && key == "href":
-			if revealURL != "" && val == revealURL {
-				links++
-				continue
-			}
-			if !linkURL(val) {
-				return 0, unsafeErr("html", "href=%q: links may only use https:, http:, mailto: or #", val)
-			}
-		case name == "img" && key == "src":
-			if !inlineImage(val) {
-				return 0, unsafeErr("html", "src=%q would load remote content; only data:image/{png,gif,jpeg,webp} and cid: are allowed", val)
-			}
-		}
+		links += n
 	}
 	return links, nil
+}
+
+// attrAllowed says whether the (lower-cased) attribute key may appear on
+// element name: a non-namespaced global, per-element or aria-* attribute.
+func attrAllowed(name, key, namespace string) bool {
+	if namespace != "" {
+		return false
+	}
+	return globalAttrs[key] || elementAttrs[name][key] || strings.HasPrefix(key, "aria-")
+}
+
+// checkAttr vets one attribute of an allowed element and returns 1 when it
+// is an <a href> whose whole (trimmed) value is the reveal URL.
+func checkAttr(name string, a html.Attribute, revealURL string) (int, error) {
+	key := strings.ToLower(a.Key)
+	if !attrAllowed(name, key, a.Namespace) {
+		return 0, unsafeErr("html", "attribute %q is not allowed on <%s>", key, name)
+	}
+	val := strings.TrimSpace(a.Val)
+	switch {
+	case key == "style":
+		if cssUnsafe(val) {
+			return 0, unsafeErr("html", errCSS)
+		}
+	case name == "a" && key == "href":
+		if revealURL != "" && val == revealURL {
+			return 1, nil
+		}
+		if !linkURL(val) {
+			return 0, unsafeErr("html", "href=%q: links may only use https:, http:, mailto: or #", val)
+		}
+	case name == "img" && key == "src":
+		if !inlineImage(val) {
+			return 0, unsafeErr("html", "src=%q would load remote content; only data:image/{png,gif,jpeg,webp} and cid: are allowed", val)
+		}
+	}
+	return 0, nil
 }
 
 // linkURL accepts the click-only link targets a mail may carry. An empty
