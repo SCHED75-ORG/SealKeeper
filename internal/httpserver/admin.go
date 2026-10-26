@@ -1358,8 +1358,6 @@ func (s *Server) handleAdminLibraries(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-const adminMaxLibraryBytes = 32 * 1024 * 1024 // 32 MB hard ceiling
-
 func (s *Server) handleAdminLibraryUpload(w http.ResponseWriter, r *http.Request) {
 	a, _, _ := adminFromCtx(r)
 	if s.libraries == nil {
@@ -1372,8 +1370,10 @@ func (s *Server) handleAdminLibraryUpload(w http.ResponseWriter, r *http.Request
 		http.Redirect(w, r, "/admin/libraries?err=demo_readonly", http.StatusSeeOther)
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, adminMaxLibraryBytes)
-	if err := r.ParseMultipartForm(adminMaxLibraryBytes); err != nil {
+	// SK_MAX_LIBRARY_SIZE_MB (D-D.22), plus slack for the form fields.
+	maxLibraryBytes := int64(s.cfg.MaxLibrarySizeMB) << 20
+	r.Body = http.MaxBytesReader(w, r.Body, maxLibraryBytes+64*1024)
+	if err := r.ParseMultipartForm(maxLibraryBytes); err != nil {
 		http.Redirect(w, r, "/admin/libraries?err=too_large", http.StatusSeeOther)
 		return
 	}

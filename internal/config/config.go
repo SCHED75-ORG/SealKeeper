@@ -6,10 +6,12 @@
 package config
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"net/netip"
 	"net/url"
 	"os"
@@ -45,15 +47,28 @@ type Config struct {
 
 	MetricsToken string `yaml:"metrics_token"`
 
-	MaxLibrarySizeMB        int           `yaml:"max_library_size_mb"`
-	MaxActiveSessions       int           `yaml:"max_active_sessions"`
-	SessionTTL              time.Duration `yaml:"session_ttl"`
+	// MaxLibrarySizeMB caps one /admin/libraries upload (D-D.22).
+	MaxLibrarySizeMB int `yaml:"max_library_size_mb"`
+	// AdminSessionTTL and AdminSessionIdleTimeout are the absolute and
+	// idle lifetimes of an admin console session (FR-C.6..10).
 	AdminSessionTTL         time.Duration `yaml:"admin_session_ttl"`
 	AdminSessionIdleTimeout time.Duration `yaml:"admin_session_idle_timeout"`
 
+	// Deprecated: not implemented. A non-default value only produces a
+	// startup warning (see Warnings). User session lifetime is set per
+	// policy in /admin/policies.
+	MaxActiveSessions int           `yaml:"max_active_sessions"`
+	SessionTTL        time.Duration `yaml:"session_ttl"`
+	// Deprecated: maintenance mode is not implemented; true is refused at
+	// startup rather than silently ignored.
+	MaintenanceMode bool `yaml:"maintenance_mode"`
+
 	SwaggerUIEnabled bool `yaml:"swagger_ui_enabled"`
 	DemoMode         bool `yaml:"demo_mode"`
-	MaintenanceMode  bool `yaml:"maintenance_mode"`
+
+	// Warnings lists non-fatal configuration problems (ignored knobs) for
+	// the caller to log at startup.
+	Warnings []string `yaml:"-"`
 
 	// IntegrationsAllowPrivate lets outbound SIEM sinks (webhook, Splunk,
 	// Sentinel, Elastic, syslog) dial RFC 1918 / ULA / CGNAT addresses.
@@ -125,7 +140,9 @@ func Load() (Config, error) {
 		}
 	}
 
-	applyEnv(&cfg)
+	if err := applyEnv(&cfg); err != nil {
+		return cfg, err
+	}
 
 	if cfg.Mode == ModeEval {
 		if cfg.MasterSecret == "" {
@@ -156,10 +173,35 @@ func Load() (Config, error) {
 	if err := cfg.validate(); err != nil {
 		return cfg, err
 	}
+	cfg.Warnings = cfg.deprecationWarnings()
 	return cfg, nil
 }
 
-func applyEnv(cfg *Config) {
+// deprecationWarnings reports knobs that are accepted for compatibility
+// but have no effect, when they are set away from their default.
+func (c Config) deprecationWarnings() []string {
+	d := Defaults()
+	var out []string
+	if c.MaxActiveSessions != d.MaxActiveSessions {
+		out = append(out, "SK_MAX_ACTIVE_SESSIONS / max_active_sessions is not implemented and is ignored")
+	}
+	if c.SessionTTL != d.SessionTTL {
+		out = append(out, "SK_SESSION_TTL_SECONDS / session_ttl is ignored: the user session lifetime is set per policy in /admin/policies")
+	}
+	return out
+}
+
+// applyEnv overlays SK_* environment variables. A malformed number,
+// boolean or duration is an error: falling back to the default would
+// silently run with a setting the operator did not choose.
+func applyEnv(cfg *Config) error {
+	var errs []error
+	getInt := func(dst *int, key string) { errs = append(errs, parseIntEnv(dst, key)) }
+	getBool := func(dst *bool, key string) { errs = append(errs, parseBoolEnv(dst, key)) }
+	getDurationFromSeconds := func(dst *time.Duration, key string) {
+		errs = append(errs, parseSecondsEnv(dst, key))
+	}
+
 	if v, ok := os.LookupEnv("SK_MODE"); ok {
 		cfg.Mode = Mode(strings.ToLower(strings.TrimSpace(v)))
 	}
@@ -200,14 +242,23 @@ func applyEnv(cfg *Config) {
 	getDurationFromSeconds(&cfg.SMTPTimeout, "SK_SMTP_TIMEOUT_SECONDS")
 	getBool(&cfg.SMTPInsecureTLS, "SK_SMTP_INSECURE_TLS")
 	getString(&cfg.SMTPServerName, "SK_SMTP_SERVER_NAME")
+	return errors.Join(errs...)
 }
 
+// mergeYAMLFile overlays the YAML file onto cfg. Unknown keys are an
+// error, so a typo such as `metric_token:` cannot silently leave the
+// setting at its default.
 func mergeYAMLFile(cfg *Config, path string) error {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return err
 	}
-	return yaml.Unmarshal(b, cfg)
+	dec := yaml.NewDecoder(bytes.NewReader(b))
+	dec.KnownFields(true)
+	if err := dec.Decode(cfg); err != nil && !errors.Is(err, io.EOF) {
+		return err
+	}
+	return nil
 }
 
 func (c Config) validate() error {
@@ -248,6 +299,41 @@ func (c Config) validate() error {
 	}
 	if _, err := c.TrustedProxyPrefixes(); err != nil {
 		return err
+	}
+	return c.validateLimits()
+}
+
+// validateLimits checks the numeric knobs. Durations have a one-minute
+// floor, which also catches a YAML duration written as a bare integer
+// (read as nanoseconds).
+func (c Config) validateLimits() error {
+	if c.AdminSessionTTL < time.Minute {
+		return fmt.Errorf("admin session TTL (SK_ADMIN_SESSION_TTL_SECONDS) must be at least 60s, got %s", c.AdminSessionTTL)
+	}
+	if c.AdminSessionIdleTimeout < time.Minute || c.AdminSessionIdleTimeout > c.AdminSessionTTL {
+		return fmt.Errorf("admin idle timeout (SK_ADMIN_SESSION_IDLE_SECONDS) must be between 60s and the session TTL (%s), got %s",
+			c.AdminSessionTTL, c.AdminSessionIdleTimeout)
+	}
+	if c.MaxLibrarySizeMB < 1 || c.MaxLibrarySizeMB > 1024 {
+		return fmt.Errorf("SK_MAX_LIBRARY_SIZE_MB must be between 1 and 1024, got %d", c.MaxLibrarySizeMB)
+	}
+	if c.MaintenanceMode {
+		return errors.New("SK_MAINTENANCE_MODE=true is not implemented; unset it (the instance would otherwise keep serving)")
+	}
+	for key, v := range map[string]int{
+		"SK_RATE_LIMIT_EMAIL_PER_HOUR": c.RateLimitEmailPerHour,
+		"SK_RATE_LIMIT_IP_PER_HOUR":    c.RateLimitIPPerHour,
+		"SK_MAX_ACTIVE_SESSIONS":       c.MaxActiveSessions,
+	} {
+		if v < 0 {
+			return fmt.Errorf("%s must not be negative, got %d", key, v)
+		}
+	}
+	if c.SMTPPort < 0 || c.SMTPPort > 65535 {
+		return fmt.Errorf("SK_SMTP_PORT must be a TCP port, got %d", c.SMTPPort)
+	}
+	if c.SMTPTimeout < 0 {
+		return fmt.Errorf("SK_SMTP_TIMEOUT_SECONDS must not be negative, got %s", c.SMTPTimeout)
 	}
 	return nil
 }
@@ -319,39 +405,47 @@ func getString(dst *string, key string) {
 	}
 }
 
-func getInt(dst *int, key string) {
+func parseIntEnv(dst *int, key string) error {
+	// An empty value counts as unset (e.g. `SK_SMTP_PORT=` in a .env file).
 	v, ok := os.LookupEnv(key)
-	if !ok {
-		return
+	if !ok || strings.TrimSpace(v) == "" {
+		return nil
 	}
 	n, err := strconv.Atoi(strings.TrimSpace(v))
-	if err == nil {
-		*dst = n
+	if err != nil {
+		return fmt.Errorf("%s=%q is not an integer", key, v)
 	}
+	*dst = n
+	return nil
 }
 
-func getBool(dst *bool, key string) {
+func parseBoolEnv(dst *bool, key string) error {
 	v, ok := os.LookupEnv(key)
-	if !ok {
-		return
+	if !ok || strings.TrimSpace(v) == "" {
+		return nil
 	}
 	switch strings.ToLower(strings.TrimSpace(v)) {
 	case "1", "true", "yes", "on":
 		*dst = true
 	case "0", "false", "no", "off":
 		*dst = false
+	default:
+		return fmt.Errorf("%s=%q is not a boolean (true/false, 1/0, yes/no, on/off)", key, v)
 	}
+	return nil
 }
 
-func getDurationFromSeconds(dst *time.Duration, key string) {
+func parseSecondsEnv(dst *time.Duration, key string) error {
 	v, ok := os.LookupEnv(key)
-	if !ok {
-		return
+	if !ok || strings.TrimSpace(v) == "" {
+		return nil
 	}
 	n, err := strconv.Atoi(strings.TrimSpace(v))
-	if err == nil {
-		*dst = time.Duration(n) * time.Second
+	if err != nil || n < 0 {
+		return fmt.Errorf("%s=%q is not a non-negative number of seconds", key, v)
 	}
+	*dst = time.Duration(n) * time.Second
+	return nil
 }
 
 // autodetectWebDir picks the first existing path among the common locations

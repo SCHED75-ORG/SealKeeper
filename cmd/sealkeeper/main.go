@@ -114,6 +114,9 @@ func runServe(args []string) int {
 		"commit", version.Commit,
 		"mode", string(cfg.Mode),
 	)
+	for _, w := range cfg.Warnings {
+		logger.Warn("configuration: " + w)
+	}
 
 	if cfg.IsEval() {
 		// FR-H.11..19 — surface the eval-mode warnings prominently.
@@ -169,6 +172,9 @@ func runServe(args []string) int {
 		logger.Error("cryptobox init failed", "err", err)
 		return 1
 	}
+	// FR-C.6..10: admin session lifetimes come from SK_ADMIN_SESSION_*.
+	admin.SessionTTL = cfg.AdminSessionTTL
+	admin.SessionIdleTTL = cfg.AdminSessionIdleTimeout
 	adminRepo := admin.NewRepo(store.DB(), box).WithPasswordContext(cfg.InstanceDomain)
 	if err := bootstrapAdminIfNeeded(ctx, adminRepo, logger, cfg.IsEval()); err != nil {
 		logger.Error("admin bootstrap failed", "err", err)
