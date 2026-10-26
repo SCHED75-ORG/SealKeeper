@@ -1,10 +1,15 @@
 // Package mailcapture stores outgoing mail in memory when SealKeeper runs in
-// evaluation mode (FR-H.17). It backs the /__captured_mail debug endpoint
-// that the smoke tests exercise and that the admin console exposes when
-// SK_MODE=eval.
+// evaluation mode (FR-H.17) or as a public demo (FR-H.79). It backs the
+// /__captured_mail debug endpoint that the smoke tests exercise and the
+// admin console's captured-mail page.
+//
+// In eval mode the whole queue is visible: the evaluator is the only user.
+// A public demo is shared by strangers, so each mail is tagged with an
+// opaque owner handle (one per browser) and only ever shown to that owner.
 package mailcapture
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"net/http"
 	"sync"
@@ -18,6 +23,10 @@ type Mail struct {
 	Subject   string    `json:"subject"`
 	Body      string    `json:"body"`
 	Timestamp time.Time `json:"timestamp"`
+
+	// Owner is the opaque handle of the browser that caused this mail
+	// (public demo). Never serialised; empty when the mail is unowned.
+	Owner string `json:"-"`
 }
 
 // Store is a small thread-safe ring buffer holding the most recent N mails.
@@ -36,8 +45,14 @@ func NewStore(max int) *Store {
 	return &Store{max: max, items: make([]Mail, 0, max)}
 }
 
-// Capture records a mail and returns its assigned id.
+// Capture records an unowned mail and returns its assigned id.
 func (s *Store) Capture(to, subject, body string) string {
+	return s.CaptureFor("", to, subject, body)
+}
+
+// CaptureFor records a mail tagged with owner and returns its assigned id.
+// Only SnapshotFor(owner) hands it to a public-demo visitor.
+func (s *Store) CaptureFor(owner, to, subject, body string) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.nextID++
@@ -47,6 +62,7 @@ func (s *Store) Capture(to, subject, body string) string {
 		Subject:   subject,
 		Body:      body,
 		Timestamp: time.Now().UTC(),
+		Owner:     owner,
 	}
 	if len(s.items) >= s.max {
 		copy(s.items, s.items[1:])
@@ -66,15 +82,52 @@ func (s *Store) Snapshot() []Mail {
 	return out
 }
 
-// Handler serves the captured queue as JSON.
-func (s *Store) Handler() http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		w.Header().Set("Cache-Control", "no-store")
-		_ = json.NewEncoder(w).Encode(struct {
-			Items []Mail `json:"items"`
-		}{Items: s.Snapshot()})
+// SnapshotFor returns a copy of the mails tagged with owner. An empty
+// owner matches nothing: unowned mail is never handed to a demo visitor.
+func (s *Store) SnapshotFor(owner string) []Mail {
+	out := []Mail{}
+	if owner == "" {
+		return out
 	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, m := range s.items {
+		if subtle.ConstantTimeCompare([]byte(m.Owner), []byte(owner)) == 1 {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// Reset drops every captured mail (public-demo daily purge, FR-H.79).
+func (s *Store) Reset() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	clear(s.items)
+	s.items = s.items[:0]
+}
+
+// Handler serves the whole captured queue as JSON (eval mode only).
+func (s *Store) Handler() http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		writeItems(w, s.Snapshot())
+	}
+}
+
+// ScopedHandler serves only the mails owned by the caller, as resolved by
+// owner (public demo). A caller without a handle gets an empty list.
+func (s *Store) ScopedHandler(owner func(*http.Request) string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		writeItems(w, s.SnapshotFor(owner(r)))
+	}
+}
+
+func writeItems(w http.ResponseWriter, items []Mail) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(struct {
+		Items []Mail `json:"items"`
+	}{Items: items})
 }
 
 func formatID(n int) string {
