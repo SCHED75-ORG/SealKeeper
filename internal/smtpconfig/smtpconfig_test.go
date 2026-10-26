@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"testing"
-	"time"
 
 	"github.com/sched75/sealkeeper/internal/cryptobox"
 	"github.com/sched75/sealkeeper/internal/smtpconfig"
@@ -14,7 +13,7 @@ import (
 
 func newRepo(t *testing.T) *smtpconfig.Repo {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), storagetest.SetupTimeout)
 	defer cancel()
 	s, err := storage.Open(ctx, storage.Options{DSN: storagetest.DSN(t)})
 	if err != nil {

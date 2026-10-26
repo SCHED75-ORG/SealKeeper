@@ -21,7 +21,7 @@ import (
 // newAdminServer wires a Server to a fresh database with one admin.
 func newAdminServer(t *testing.T) (*Server, *admin.Repo) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), storagetest.SetupTimeout)
 	defer cancel()
 	st, err := storage.Open(ctx, storage.Options{DSN: storagetest.DSN(t)})
 	if err != nil {

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"strings"
 	"testing"
-	"time"
 
 	"encoding/json"
 	"github.com/sched75/sealkeeper/internal/domains"
@@ -26,7 +25,7 @@ type rigs struct {
 func newRig(t *testing.T) rigs {
 	t.Helper()
 	dsn := storagetest.DSN(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), storagetest.SetupTimeout)
 	defer cancel()
 	s, err := storage.Open(ctx, storage.Options{DSN: dsn})
 	if err != nil {

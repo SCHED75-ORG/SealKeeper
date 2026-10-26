@@ -13,7 +13,6 @@ import (
 	"net/url"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/sched75/sealkeeper/internal/admin"
 	"github.com/sched75/sealkeeper/internal/audit"
@@ -29,7 +28,7 @@ import (
 // newModeServer builds a fully wired server for the given run mode.
 func newModeServer(t *testing.T, mode config.Mode, demo bool) (*Server, *admin.Repo, *sql.DB) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), storagetest.SetupTimeout)
 	defer cancel()
 	st, err := storage.Open(ctx, storage.Options{DSN: storagetest.DSN(t)})
 	if err != nil {

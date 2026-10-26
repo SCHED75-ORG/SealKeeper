@@ -6,7 +6,6 @@ import (
 	"errors"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/sched75/sealkeeper/internal/mailtemplates"
 	"github.com/sched75/sealkeeper/internal/storage"
@@ -22,7 +21,7 @@ func newRepo(t *testing.T) *mailtemplates.Repo {
 func newRepoDB(t *testing.T) (*mailtemplates.Repo, *sql.DB) {
 	t.Helper()
 	dsn := storagetest.DSN(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), storagetest.SetupTimeout)
 	defer cancel()
 	s, err := storage.Open(ctx, storage.Options{DSN: dsn})
 	if err != nil {

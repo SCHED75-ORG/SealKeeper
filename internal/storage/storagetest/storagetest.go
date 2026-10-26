@@ -22,6 +22,11 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib" // "pgx" driver for the admin connection
 )
 
+// SetupTimeout bounds opening and migrating a test database. Generous on
+// purpose: a 5 s budget made suites flaky under load ("MigrateUp ...
+// context deadline exceeded") with no bug behind it.
+const SetupTimeout = 60 * time.Second
+
 // DSN returns a storage.Open DSN pointing at a fresh, empty database.
 func DSN(t testing.TB) string {
 	t.Helper()
@@ -44,7 +49,7 @@ func DSN(t testing.TB) string {
 	if err != nil {
 		t.Fatalf("storagetest: open admin connection: %v", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), SetupTimeout)
 	defer cancel()
 	// name is hex-only, so interpolating it is safe.
 	if _, err := db.ExecContext(ctx, "CREATE DATABASE "+name); err != nil {
@@ -52,7 +57,7 @@ func DSN(t testing.TB) string {
 		t.Fatalf("storagetest: create database: %v", err)
 	}
 	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), SetupTimeout)
 		defer cancel()
 		_, _ = db.ExecContext(ctx, "DROP DATABASE IF EXISTS "+name+" WITH (FORCE)")
 		_ = db.Close()

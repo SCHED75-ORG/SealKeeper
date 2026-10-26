@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/sched75/sealkeeper/internal/libraries"
 	"github.com/sched75/sealkeeper/internal/storage"
@@ -135,7 +134,7 @@ func newRepo(t *testing.T) *libraries.Repo {
 	dir := t.TempDir()
 	dbDSN := storagetest.DSN(t)
 	storeDir := filepath.Join(dir, "store")
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), storagetest.SetupTimeout)
 	defer cancel()
 	s, err := storage.Open(ctx, storage.Options{DSN: dbDSN})
 	if err != nil {

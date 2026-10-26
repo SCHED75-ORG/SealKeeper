@@ -109,7 +109,7 @@ func (k softKey) assertionWithFlags(t *testing.T, challenge string, counter uint
 
 func newRepoWithDB(t *testing.T) (*webauthn.Repo, *sql.DB) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), storagetest.SetupTimeout)
 	defer cancel()
 	s, err := storage.Open(ctx, storage.Options{DSN: storagetest.DSN(t)})
 	if err != nil {

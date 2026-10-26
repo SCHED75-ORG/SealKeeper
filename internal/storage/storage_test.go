@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sched75/sealkeeper/internal/storage"
+	"github.com/sched75/sealkeeper/internal/storage/storagetest"
 )
 
 // withSQLite returns a Store backed by a fresh on-disk SQLite database. We
@@ -21,7 +22,7 @@ func withSQLite(t *testing.T) storage.Store {
 	dir := t.TempDir()
 	dsn := "sqlite://" + filepath.ToSlash(filepath.Join(dir, "sk.db"))
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), storagetest.SetupTimeout)
 	defer cancel()
 
 	s, err := storage.Open(ctx, storage.Options{DSN: dsn})
@@ -46,7 +47,7 @@ func TestParseDSNDialects(t *testing.T) {
 		{"file:sk.db?cache=shared", storage.DialectSQLite},
 	}
 	for _, c := range cases {
-		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), storagetest.SetupTimeout)
 		_, err := storage.Open(ctx, storage.Options{DSN: c.dsn})
 		cancel()
 		// We don't expect Open to succeed for non-existent Postgres servers;
@@ -222,7 +223,7 @@ func TestPostgresIntegration(t *testing.T) {
 		t.Skip("TEST_PG_DSN not set — skipping Postgres integration test")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), storagetest.SetupTimeout)
 	defer cancel()
 
 	s, err := storage.Open(ctx, storage.Options{DSN: dsn})
