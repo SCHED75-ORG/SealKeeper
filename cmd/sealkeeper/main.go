@@ -149,7 +149,12 @@ func runServe(args []string) int {
 	srv := httpserver.New(cfg, logger)
 	srv.Readiness().Add(storage.NewReadinessCheck("database", store))
 	srv.SetTokens(tokens.NewRepo(store.DB()))
-	srv.SetAudit(audit.NewRepo(store.DB()))
+	auditRepo, err := openAuditRepo(ctx, cfg, store.DB(), logger)
+	if err != nil {
+		logger.Error("audit init failed", "err", err)
+		return 1
+	}
+	srv.SetAudit(auditRepo)
 	if sender, err := buildSender(cfg, logger); err != nil {
 		logger.Error("mailer setup failed", "err", err)
 		return 1
@@ -264,6 +269,15 @@ func runMigrate(args []string) int {
 		if err := store.MigrateUp(ctx); err != nil {
 			logger.Error("migrate up failed", "err", err)
 			return 1
+		}
+		// Seal the audit head anchor right after migration 0014 so a
+		// migrated legacy log is anchored before anything else runs. Eval
+		// mode may run on a throw-away secret; its serve step seals instead.
+		if !cfg.IsEval() && cfg.MasterSecret != "" {
+			if _, err := openAuditRepo(ctx, cfg, store.DB(), logger); err != nil {
+				logger.Error("audit init failed", "err", err)
+				return 1
+			}
 		}
 		v, _ := store.SchemaVersion(ctx)
 		logger.Info("migrate up complete",
@@ -430,6 +444,22 @@ func runAdmin(args []string) int {
 		fmt.Fprintln(os.Stderr, "usage: sealkeeper admin <reset-password|list>")
 		return 2
 	}
+}
+
+// openAuditRepo binds the audit log to the HKDF-derived chain key
+// (FR-E.3) and seals the head anchor. A seal failure (e.g. migrations not
+// applied yet) is logged, not fatal: VerifyChain reports the chain as
+// unanchored until it succeeds.
+func openAuditRepo(ctx context.Context, cfg config.Config, db *sql.DB, logger *slog.Logger) (*audit.Repo, error) {
+	key, err := audit.DeriveKey(cfg.MasterSecret)
+	if err != nil {
+		return nil, err
+	}
+	repo := audit.NewRepo(db, key)
+	if err := repo.SealAnchor(ctx); err != nil {
+		logger.Warn("audit anchor seal failed", "err", err)
+	}
+	return repo, nil
 }
 
 // openAdminRepo loads config, opens the database, runs migrations and

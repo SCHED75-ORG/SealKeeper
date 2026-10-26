@@ -39,7 +39,7 @@ func TestAuditNeverStoresRawRevealToken(t *testing.T) {
 	t.Parallel()
 	s, repo := newAdminServer(t)
 	db := repo.DB()
-	ar := audit.NewRepo(db)
+	ar := audit.NewRepo(db, make([]byte, audit.KeySize))
 	tr := tokens.NewRepo(db)
 	s.SetAudit(ar)
 	s.cfg.InstanceDomain = "sk.test"

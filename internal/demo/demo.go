@@ -60,6 +60,9 @@ func (r *Resetter) ResetOnce(ctx context.Context) {
 		"DELETE FROM request_tokens",
 		"DELETE FROM user_sessions",
 		"DELETE FROM audit_log",
+		// Back to the unsealed, empty state so the wiped log verifies as
+		// intact instead of as a truncated tail; the next append re-seals.
+		"UPDATE audit_head SET legacy_until = 0, head_seq = 0, head_hash = '', broken_seq = 0, head_mac = ''",
 		"DELETE FROM captured_mail",
 		"DELETE FROM integrations",
 		"DELETE FROM email_templates",

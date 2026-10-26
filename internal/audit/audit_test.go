@@ -13,6 +13,9 @@ import (
 	"github.com/sched75/sealkeeper/internal/storage/storagetest"
 )
 
+// testKey stands in for the HKDF-derived audit chain key.
+var testKey = []byte("0123456789abcdef0123456789abcdef")
+
 func newRepo(t *testing.T) (*audit.Repo, storage.Store) {
 	t.Helper()
 	dsn := storagetest.DSN(t)
@@ -27,7 +30,7 @@ func newRepo(t *testing.T) (*audit.Repo, storage.Store) {
 		t.Fatalf("MigrateUp: %v", err)
 	}
 	t.Cleanup(func() { _ = s.Close() })
-	return audit.NewRepo(s.DB()), s
+	return audit.NewRepo(s.DB(), testKey), s
 }
 
 func TestAppendChainsFromEmptyRoot(t *testing.T) {
@@ -170,6 +173,15 @@ func TestVerifyChainAcceptsLegacyNanosecondRows(t *testing.T) {
 		 VALUES (?, 'evt', 'actor', NULL, ?, '', ?)`,
 		occurred, details, hex.EncodeToString(sum[:])); err != nil {
 		t.Fatalf("seed legacy row: %v", err)
+	}
+	// Migration 0014 records the pre-existing rows as legacy; the server
+	// then seals the anchor at startup.
+	if _, err := s.DB().ExecContext(ctx,
+		`UPDATE audit_head SET legacy_until = (SELECT MAX(sequence_no) FROM audit_log)`); err != nil {
+		t.Fatalf("set legacy_until: %v", err)
+	}
+	if err := r.SealAnchor(ctx); err != nil {
+		t.Fatalf("SealAnchor: %v", err)
 	}
 	if _, err := r.Append(ctx, "evt", "actor", "", nil); err != nil {
 		t.Fatalf("Append: %v", err)

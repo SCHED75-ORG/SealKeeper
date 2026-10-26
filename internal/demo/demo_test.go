@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sched75/sealkeeper/internal/audit"
 	"github.com/sched75/sealkeeper/internal/demo"
 	"github.com/sched75/sealkeeper/internal/storage"
 	"github.com/sched75/sealkeeper/internal/storage/storagetest"
@@ -53,6 +54,31 @@ func TestResetOnceWipesAdminState(t *testing.T) {
 		if n != 0 {
 			t.Errorf("%s left with %d rows after reset", table, n)
 		}
+	}
+}
+
+// The reset wipes audit_log; the head anchor must be reset with it, or the
+// next integrity check reports the wipe as a truncated tail.
+func TestResetOnceLeavesAuditChainIntact(t *testing.T) {
+	t.Parallel()
+	s := openStore(t)
+	ctx := context.Background()
+	ar := audit.NewRepo(s.DB(), make([]byte, audit.KeySize))
+	for i := 0; i < 3; i++ {
+		if _, err := ar.Append(ctx, "domain.created", "admin@localhost", "", nil); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+	}
+
+	demo.NewResetter(s.DB(), nil, time.Hour).ResetOnce(ctx)
+	if bad, err := ar.VerifyChain(ctx); err != nil || bad != 0 {
+		t.Fatalf("after reset: VerifyChain = %d, %v; want intact", bad, err)
+	}
+	if _, err := ar.Append(ctx, "admin.login", "admin@localhost", "", nil); err != nil {
+		t.Fatalf("Append after reset: %v", err)
+	}
+	if bad, err := ar.VerifyChain(ctx); err != nil || bad != 0 {
+		t.Fatalf("after reset + append: VerifyChain = %d, %v; want intact", bad, err)
 	}
 }
 
