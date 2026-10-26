@@ -26,8 +26,13 @@ var ErrDestinationBlocked = errors.New("integrations: destination address blocke
 // well-known metadata endpoints that live in otherwise "private" ranges
 // (fd00:ec2::254, 100.100.100.200). Refused unless AllowPrivate: RFC 1918,
 // ULA fc00::/7 and CGNAT 100.64.0.0/10 (SK_INTEGRATIONS_ALLOW_PRIVATE).
+//
+// HTTP sinks must use https unless AllowPlainHTTP (set in eval mode only):
+// a plain http sink would carry audit events and its own credentials in
+// clear.
 type NetPolicy struct {
-	AllowPrivate bool
+	AllowPrivate   bool
+	AllowPlainHTTP bool
 
 	// allowLoopback is a test-only escape hatch so httptest servers on
 	// 127.0.0.1 stay reachable. Unexported: production code cannot set it.

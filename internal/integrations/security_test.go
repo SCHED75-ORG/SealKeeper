@@ -307,7 +307,7 @@ func TestWebhookRefusesLoopbackByDefault(t *testing.T) {
 		sink, err := integrations.BuildSink(integrations.Integration{
 			Name: "ssrf", Kind: integrations.KindWebhook,
 			ConfigJSON: json.RawMessage(`{"url":"` + u + `"}`),
-		}, integrations.NetPolicy{AllowPrivate: true})
+		}, integrations.NetPolicy{AllowPrivate: true, AllowPlainHTTP: true})
 		if err != nil {
 			t.Fatalf("BuildSink: %v", err)
 		}
@@ -520,5 +520,64 @@ func TestSealLegacyConfigsAndAADBinding(t *testing.T) {
 	}
 	if _, err := integrations.BuildSink(got, integrations.NetPolicy{}); !errors.Is(err, integrations.ErrInvalidConfig) {
 		t.Fatalf("BuildSink on undecryptable row err = %v, want ErrInvalidConfig", err)
+	}
+}
+
+// ----- residuals: transport security of HTTP sinks ---------------------------
+
+// Regression: a Splunk sink accepted `insecure_tls: true` and silently
+// ignored it (certificates were verified anyway), so the operator believed
+// verification was off. The option is refused instead of ignored.
+func TestSplunkInsecureTLSIsRefused(t *testing.T) {
+	t.Parallel()
+	r := newRepo(t)
+	const cfg = `{"url":"https://hec.example.test/services/collector","token":"t","insecure_tls":true}`
+	if _, err := r.Create(context.Background(), integrations.CreateInputs{
+		Name: "hec", Kind: integrations.KindSplunk, ConfigJSON: cfg,
+	}, nil); !errors.Is(err, integrations.ErrInvalidConfig) {
+		t.Fatalf("Create(insecure_tls=true) err = %v, want ErrInvalidConfig", err)
+	}
+	if _, err := integrations.BuildSink(integrations.Integration{
+		Name: "hec", Kind: integrations.KindSplunk, ConfigJSON: json.RawMessage(cfg),
+	}, integrations.TestPolicy); !errors.Is(err, integrations.ErrInvalidConfig) {
+		t.Fatalf("BuildSink(insecure_tls=true) err = %v, want ErrInvalidConfig", err)
+	}
+}
+
+// Regression: HTTP sinks accepted plain http:// URLs in production, so
+// audit events and the sink credentials (bearer token, HEC token, API key)
+// crossed the network in clear. Outside eval mode https is required, at
+// Create and again at BuildSink for rows stored before the check.
+func TestHTTPSinksRequireHTTPSOutsideEval(t *testing.T) {
+	t.Parallel()
+	strict := newRepo(t).WithNetPolicy(integrations.NetPolicy{})
+	cases := []struct {
+		kind integrations.Kind
+		cfg  string
+	}{
+		{integrations.KindWebhook, `{"url":"http://siem.example.test/in"}`},
+		{integrations.KindSplunk, `{"url":"http://hec.example.test/services/collector","token":"t"}`},
+		{integrations.KindElastic, `{"url":"http://es.example.test","index":"x"}`},
+	}
+	for _, c := range cases {
+		if _, err := strict.Create(context.Background(), integrations.CreateInputs{
+			Name: "plain-" + string(c.kind), Kind: c.kind, ConfigJSON: c.cfg,
+		}, nil); !errors.Is(err, integrations.ErrInvalidConfig) {
+			t.Errorf("%s: Create(http://) err = %v, want ErrInvalidConfig", c.kind, err)
+		}
+		row := integrations.Integration{Name: "p", Kind: c.kind, ConfigJSON: json.RawMessage(c.cfg)}
+		if _, err := integrations.BuildSink(row, integrations.NetPolicy{AllowPrivate: true}); !errors.Is(err, integrations.ErrInvalidConfig) {
+			t.Errorf("%s: BuildSink(http://) err = %v, want ErrInvalidConfig", c.kind, err)
+		}
+		// Eval mode keeps plain http for local test receivers.
+		if _, err := integrations.BuildSink(row, integrations.NetPolicy{AllowPlainHTTP: true}); err != nil {
+			t.Errorf("%s: BuildSink(http://, eval) err = %v, want nil", c.kind, err)
+		}
+		https := strings.Replace(c.cfg, "http://", "https://", 1)
+		if _, err := integrations.BuildSink(integrations.Integration{
+			Name: "s", Kind: c.kind, ConfigJSON: json.RawMessage(https),
+		}, integrations.NetPolicy{}); err != nil {
+			t.Errorf("%s: BuildSink(https://) err = %v, want nil", c.kind, err)
+		}
 	}
 }

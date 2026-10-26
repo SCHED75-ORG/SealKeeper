@@ -195,7 +195,12 @@ func runServe(args []string) int {
 	srv.SetLibraries(librariesRepo)
 	srv.SetMailTemplates(mailtemplates.NewRepo(store.DB()))
 
-	integrationsRepo := integrations.NewRepo(store.DB(), box)
+	// SSRF guard + https requirement (plain http sinks only in eval mode).
+	sinkPolicy := integrations.NetPolicy{
+		AllowPrivate:   cfg.IntegrationsAllowPrivate,
+		AllowPlainHTTP: cfg.IsEval(),
+	}
+	integrationsRepo := integrations.NewRepo(store.DB(), box).WithNetPolicy(sinkPolicy)
 	// Seal integration credentials still stored in clear (pre-0015 rows).
 	if n, err := integrationsRepo.SealLegacyConfigs(ctx); err != nil {
 		logger.Error("sealing legacy integration configs failed", "err", err)
@@ -204,7 +209,7 @@ func runServe(args []string) int {
 		logger.Info("sealed legacy integration configs", "rows", n)
 	}
 	dispatcher := integrations.NewDispatcher(integrationsRepo, logger, 256, 10*time.Second).
-		WithNetPolicy(integrations.NetPolicy{AllowPrivate: cfg.IntegrationsAllowPrivate})
+		WithNetPolicy(sinkPolicy)
 	dispatcher.Start(ctx)
 	defer dispatcher.Stop()
 	srv.SetIntegrations(integrationsRepo, dispatcher)

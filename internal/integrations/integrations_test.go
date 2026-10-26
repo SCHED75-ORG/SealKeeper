@@ -75,7 +75,7 @@ func newRepoDB(t *testing.T) (*integrations.Repo, *sql.DB) {
 	if err != nil {
 		t.Fatalf("cryptobox.New: %v", err)
 	}
-	return integrations.NewRepo(s.DB(), box), s.DB()
+	return integrations.NewRepo(s.DB(), box).WithNetPolicy(integrations.TestPolicy), s.DB()
 }
 
 func TestCreateRejectsBadKind(t *testing.T) {

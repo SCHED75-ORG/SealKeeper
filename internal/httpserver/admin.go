@@ -1836,7 +1836,10 @@ func (s *Server) handleAdminIntegrationTest(w http.ResponseWriter, r *http.Reque
 		http.Redirect(w, r, "/admin/integrations?err=not_found", http.StatusSeeOther)
 		return
 	}
-	pol := integrations.NetPolicy{AllowPrivate: s.cfg.IntegrationsAllowPrivate}
+	pol := integrations.NetPolicy{
+		AllowPrivate:   s.cfg.IntegrationsAllowPrivate,
+		AllowPlainHTTP: s.cfg.IsEval(),
+	}
 	if err := integrations.TestSink(r.Context(), row, s.cfg.InstanceDomain, pol); err != nil {
 		s.auditAppend(r.Context(), "integration.test_failed", a.Email, row.Name, map[string]any{
 			"error": err.Error(),

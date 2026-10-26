@@ -71,13 +71,15 @@ func (s *webhookSink) Send(ctx context.Context, ev Event) error {
 // SplunkConfig stores the HEC endpoint + token. URL must point to the
 // /services/collector path of the HEC instance.
 type SplunkConfig struct {
-	URL         string `json:"url"`
-	Token       string `json:"token"`
-	Index       string `json:"index,omitempty"`
-	Sourcetype  string `json:"sourcetype,omitempty"`
-	Source      string `json:"source,omitempty"`
-	TimeoutSec  int    `json:"timeout_sec,omitempty"`
-	InsecureTLS bool   `json:"insecure_tls,omitempty"`
+	URL        string `json:"url"`
+	Token      string `json:"token"`
+	Index      string `json:"index,omitempty"`
+	Sourcetype string `json:"sourcetype,omitempty"`
+	Source     string `json:"source,omitempty"`
+	TimeoutSec int    `json:"timeout_sec,omitempty"`
+	// InsecureTLS is parsed only to be refused by validateKindConfig:
+	// certificate verification cannot be turned off for a sink.
+	InsecureTLS bool `json:"insecure_tls,omitempty"`
 }
 
 type splunkSink struct {
@@ -304,14 +306,18 @@ func (s *elasticSink) closeIdle()  { closeIdle(s.c) }
 var sentinelWorkspaceRe = regexp.MustCompile(
 	`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
-// validateHTTPURL accepts absolute http(s) URLs with a host and no userinfo.
-func validateHTTPURL(raw, label string) error {
+// validateHTTPURL accepts absolute https URLs (http too when allowPlain,
+// i.e. eval mode) with a host and no userinfo.
+func validateHTTPURL(raw, label string, allowPlain bool) error {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil {
 		return fmt.Errorf("%w: %s: url: %s", ErrInvalidConfig, label, err.Error())
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return fmt.Errorf("%w: %s: url scheme must be http or https", ErrInvalidConfig, label)
+	}
+	if u.Scheme == "http" && !allowPlain {
+		return fmt.Errorf("%w: %s: url must use https (plain http is only accepted in eval mode)", ErrInvalidConfig, label)
 	}
 	if u.Hostname() == "" {
 		return fmt.Errorf("%w: %s: url has no host", ErrInvalidConfig, label)
