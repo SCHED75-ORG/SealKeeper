@@ -316,7 +316,7 @@ sequenceDiagram
     participant Gen as SealKeeper.Generation
     participant Crypto as crypto.getRandomValues
 
-    JS->>Server: GET /api/v1/policy?token=...
+    JS->>Server: POST /api/v1/policy {token}
     activate Server
     Server-->>JS: PolicyDescriptor (generator G2, lang FR, ...)
     deactivate Server

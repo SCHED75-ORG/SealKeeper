@@ -87,7 +87,7 @@ https://sealkeeper.entreprise.com/reveal/9f2a1b8e3c4d5f67
 |---|---|---|
 | FR-B.21 | À l'ouverture, la page affiche un message d'accueil et un **bouton *« Décoder »*** explicite, en indiquant que **5 propositions** (configurable par policy) attendent l'utilisateur | MUST |
 | FR-B.22 | Tant que l'utilisateur n'a pas cliqué *Décoder*, aucune génération n'a lieu (protection contre prévisualisation, capture d'écran inopinée par antivirus) | MUST |
-| FR-B.23 | Au clic *Décoder*, le JS appelle `GET /api/v1/policy?token=<token>` pour récupérer la policy descriptor | MUST |
+| FR-B.23 | Au clic *Décoder*, le JS appelle `POST /api/v1/policy` avec le token dans le corps JSON (`{"token": "<token>"}`, jamais dans l'URL, qui finit dans les logs d'accès) pour récupérer la policy descriptor | MUST |
 | FR-B.24 | Le JS invoque ensuite `window.SealKeeper.Generation.generate(policy)` pour produire les N propositions localement | MUST |
 | FR-B.25 | Les propositions sont affichées dans des cartes, chacune avec : le mot de passe, sa force visualisée (jauge + badge ANSSI), un bouton *« Copier »* | MUST |
 | FR-B.26 | L'utilisateur peut afficher/masquer chaque proposition (icône œil) sans rafraîchir | SHOULD |
@@ -270,7 +270,7 @@ sequenceDiagram
     Reveal-->>User: Affiche le bouton « Décoder » + compte à rebours
 
     User->>Reveal: Clique « Décoder »
-    Reveal->>Server: GET /api/v1/policy?token=...
+    Reveal->>Server: POST /api/v1/policy {token}
     activate Server
     Server->>Server: Valide token, marque consommé, charge policy
     Server-->>Reveal: PolicyDescriptor

@@ -451,7 +451,7 @@ sequenceDiagram
 
     API->>Mail: Email avec lien /reveal/{token}
 
-    Reveal->>API: GET /api/v1/policy?token=...
+    Reveal->>API: POST /api/v1/policy {token}
     activate API
     Note over API: Consomme le token<br/>marque consumed_at, ip, user_agent
     API-->>Reveal: 200 OK + PolicyDescriptor
