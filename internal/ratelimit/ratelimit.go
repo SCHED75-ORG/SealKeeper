@@ -173,27 +173,37 @@ type Decision struct {
 	Reason  string // "email" | "ip" | "" when Allowed
 }
 
-// Composite layers two limiters: a per-email cap and a per-IP cap. The check
-// is short-circuit — IF the email is over its cap, we never consume a slot
-// against the IP. This matches operator intuition and keeps the audit log
-// clear about which dimension tripped.
+// Composite layers two limiters: a per-email cap and a per-IP cap. A request
+// that is rejected on either dimension consumes NO slot on the other: when
+// the email was charged before the IP check, one IP over its own cap could
+// still burn every victim's per-email quota and silently block delivery.
+// The IP is tested first so the audit log names the attacker's dimension.
 type Composite struct {
 	Email *Limiter
 	IP    *Limiter
 }
 
-// Check tests both limiters and records ONE event in the limiter that wins
-// (or in both when the request is allowed). It never charges twice.
+// Check peeks at both limiters and records the event in both only when the
+// request is allowed.
 func (c Composite) Check(email, ip string) Decision {
-	if c.Email != nil && email != "" {
-		if !c.Email.Allow(email) {
+	ipOn := c.IP != nil && ip != "" && c.IP.Limit() > 0
+	emailOn := c.Email != nil && email != "" && c.Email.Limit() > 0
+	if ipOn {
+		if _, remaining, _ := c.IP.Inspect(ip); remaining == 0 {
+			return Decision{Allowed: false, Reason: "ip"}
+		}
+	}
+	if emailOn {
+		if _, remaining, _ := c.Email.Inspect(email); remaining == 0 {
 			return Decision{Allowed: false, Reason: "email"}
 		}
 	}
-	if c.IP != nil && ip != "" {
-		if !c.IP.Allow(ip) {
-			return Decision{Allowed: false, Reason: "ip"}
-		}
+	// A concurrent request may have taken the last slot since the peek.
+	if ipOn && !c.IP.Allow(ip) {
+		return Decision{Allowed: false, Reason: "ip"}
+	}
+	if emailOn && !c.Email.Allow(email) {
+		return Decision{Allowed: false, Reason: "email"}
 	}
 	return Decision{Allowed: true}
 }

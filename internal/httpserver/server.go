@@ -57,6 +57,10 @@ import (
 	"github.com/sched75/sealkeeper/internal/webauthn"
 )
 
+// adminLoginPerIPWindow is the number of admin login attempts one client IP
+// may make per 15 minutes.
+const adminLoginPerIPWindow = 20
+
 // Server is the HTTP service.
 type Server struct {
 	cfg      config.Config
@@ -90,6 +94,10 @@ type Server struct {
 	webauthn     *webauthn.Repo
 	smtpConfig   *smtpconfig.Repo
 	loginPending *loginPendingStore
+
+	// loginLimiter caps POST /admin/login per client IP. The per-account
+	// lockout alone lets one IP spray many accounts, and lock them all.
+	loginLimiter *ratelimit.Limiter
 
 	// trustedProxies gates X-Forwarded-For (FR-H.42). Empty = never trust.
 	trustedProxies []netip.Prefix
@@ -151,6 +159,7 @@ func New(cfg config.Config, logger *slog.Logger) *Server {
 
 	return &Server{
 		trustedProxies: trusted,
+		loginLimiter:   ratelimit.New(adminLoginPerIPWindow, 15*time.Minute),
 		cfg:            cfg,
 		logger:         logger,
 		readyz:         readiness.New(),
@@ -396,6 +405,16 @@ func (s *Server) Run(ctx context.Context) error {
 		IdleTimeout:       120 * time.Second,
 	}
 
+	// Sweep expired limiter keys; without it every e-mail / IP ever seen
+	// stays in memory for the life of the process.
+	stopJanitors := make(chan struct{})
+	defer close(stopJanitors)
+	for _, l := range []*ratelimit.Limiter{s.limiter.Email, s.limiter.IP, s.loginLimiter} {
+		if l != nil {
+			go l.RunJanitor(stopJanitors, 5*time.Minute)
+		}
+	}
+
 	errCh := make(chan error, 1)
 	go func() {
 		s.logger.Info("http server starting", "addr", s.cfg.Listen, "mode", string(s.cfg.Mode))
@@ -508,7 +527,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 	// FR-B.11..13 — apply rate limits BEFORE issuing anything. The hit is
 	// observable only via the audit log + Prometheus counter.
-	decision := s.limiter.Check(email, ip)
+	decision := s.limiter.Check(rateLimitKey(email), ip)
 	if !decision.Allowed {
 		s.rateHits.WithLabelValues(decision.Reason).Inc()
 		s.auditAppend(r.Context(), audit.EventRateLimited, email, decision.Reason, map[string]any{
@@ -1273,3 +1292,17 @@ async function submitRequest(ev){
 document.getElementById('request-form').addEventListener('submit', submitRequest);
 </script>
 </body></html>`
+
+// rateLimitKey folds sub-addressing ("user+tag@example.org") so the per-email
+// cap cannot be dodged — nor a victim's inbox flooded — by varying the tag.
+func rateLimitKey(email string) string {
+	at := strings.LastIndexByte(email, '@')
+	if at <= 0 {
+		return email
+	}
+	local, domain := email[:at], email[at:]
+	if plus := strings.IndexByte(local, '+'); plus > 0 {
+		local = local[:plus]
+	}
+	return local + domain
+}

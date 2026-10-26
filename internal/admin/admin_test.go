@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -204,16 +205,73 @@ func TestAuthenticateBlankTOTPDoesNotResetCounter(t *testing.T) {
 	const email, pw = "ops@example.test", "supersecret-12chars"
 	r, _, bad := enrolledAdmin(t, email, pw)
 	ctx := context.Background()
+	codes := []string{"", bad}
+	for i := 0; i < 2*admin.MaxFailedAttempts; i++ {
+		_, err := r.Authenticate(ctx, email, pw, codes[i%2])
+		if errors.Is(err, admin.ErrAccountLocked) {
+			if i < admin.MaxFailedAttempts {
+				t.Fatalf("locked after only %d attempts", i)
+			}
+			return
+		}
+	}
+	t.Fatal("interleaving blank and wrong TOTP codes never locked the account")
+}
+
+// Regression: the lock was checked on a snapshot and the counter bumped
+// after verification, so a concurrent burst got ~57 guesses evaluated
+// instead of MaxFailedAttempts.
+func TestAuthenticateConcurrentBurstEvaluatesAtMostMax(t *testing.T) {
+	t.Parallel()
+	const email, pw = "ops@example.test", "supersecret-12chars"
+	r, _, bad := enrolledAdmin(t, email, pw)
+	ctx := context.Background()
+	const burst = 40
+	errs := make(chan error, burst)
+	var wg sync.WaitGroup
+	for i := 0; i < burst; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := r.Authenticate(ctx, email, pw, bad)
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	evaluated := 0
+	for err := range errs {
+		if errors.Is(err, admin.ErrInvalidCreds) {
+			evaluated++
+		}
+	}
+	if evaluated > admin.MaxFailedAttempts {
+		t.Fatalf("%d guesses evaluated in a burst, want <= %d", evaluated, admin.MaxFailedAttempts)
+	}
+	if _, err := r.Authenticate(ctx, email, pw, bad); !errors.Is(err, admin.ErrAccountLocked) {
+		t.Fatalf("after the burst: err = %v, want ErrAccountLocked", err)
+	}
+}
+
+func TestAuthenticateLockExpires(t *testing.T) {
+	t.Parallel()
+	const email, pw = "ops@example.test", "supersecret-12chars"
+	r, secret, bad := enrolledAdmin(t, email, pw)
+	ctx := context.Background()
 	for i := 0; i < admin.MaxFailedAttempts; i++ {
-		if _, err := r.Authenticate(ctx, email, pw, ""); !errors.Is(err, admin.ErrTOTPRequired) {
-			t.Fatalf("blank attempt: err = %v, want ErrTOTPRequired", err)
-		}
-		if _, err := r.Authenticate(ctx, email, pw, bad); err != nil && !errors.Is(err, admin.ErrInvalidCreds) && !errors.Is(err, admin.ErrAccountLocked) {
-			t.Fatalf("attempt %d: unexpected err %v", i+1, err)
-		}
+		_, _ = r.Authenticate(ctx, email, pw, bad)
 	}
 	if _, err := r.Authenticate(ctx, email, pw, bad); !errors.Is(err, admin.ErrAccountLocked) {
 		t.Fatalf("err = %v, want ErrAccountLocked", err)
+	}
+	later := time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC).Add(admin.LockoutDuration + time.Minute)
+	r2 := r.WithClock(func() time.Time { return later })
+	good, err := totp.Generate(secret, later)
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if _, err := r2.Authenticate(ctx, email, pw, good); err != nil {
+		t.Fatalf("login after lock expiry: %v", err)
 	}
 }
 

@@ -230,6 +230,11 @@ func (s *Server) handleAdminLoginPost(w http.ResponseWriter, r *http.Request) {
 
 	email := strings.TrimSpace(r.FormValue("email"))
 	password := r.FormValue("password")
+	if !s.loginLimiter.Allow(s.clientIP(r)) {
+		s.auditAppend(r.Context(), "admin.login_failed", email, "", map[string]any{"reason": "rate_limited"})
+		s.adminLoginError(w, r, "rate_limited")
+		return
+	}
 	totpCode := strings.TrimSpace(r.FormValue("totp"))
 
 	res, err := s.adminRepo.Authenticate(r.Context(), email, password, totpCode)
@@ -2056,7 +2061,7 @@ func (s *Server) draftSetup(r *http.Request) (totp.Secret, string, []string) {
 func (s *Server) adminLoginError(w http.ResponseWriter, r *http.Request, slug string) {
 	q := "?err=" + slug
 	if email := strings.TrimSpace(r.FormValue("email")); email != "" {
-		q += "&email=" + email
+		q += "&email=" + url.QueryEscape(email)
 	}
 	http.Redirect(w, r, "/admin/login"+q, http.StatusSeeOther)
 }
@@ -2232,6 +2237,8 @@ const adminLoginTpl = `{{define "login.html"}}{{template "header" .}}
     Email, password or authenticator code is incorrect.
   {{ else if eq .Error "locked" }}
     Too many failed attempts — this account is locked for the next 15 minutes.
+  {{ else if eq .Error "rate_limited" }}
+    Too many sign-in attempts from your network. Try again in a few minutes.
   {{ else if eq .Error "disabled" }}
     This account has been disabled by another administrator.
   {{ else if eq .Error "totp_required" }}

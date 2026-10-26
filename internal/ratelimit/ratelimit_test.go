@@ -173,3 +173,28 @@ func TestCompositeWithNilLimitersAlwaysAllows(t *testing.T) {
 		}
 	}
 }
+
+// Regression: Check charged the email bucket before testing the IP, so an
+// IP that was already over its cap still burned every victim's per-email
+// quota and blocked their real requests for the window.
+func TestCompositeIPRejectionDoesNotChargeEmail(t *testing.T) {
+	t.Parallel()
+	c := ratelimit.Composite{
+		Email: ratelimit.New(3, time.Hour),
+		IP:    ratelimit.New(1, time.Hour),
+	}
+	if d := c.Check("seed@example.test", "6.6.6.6"); !d.Allowed {
+		t.Fatalf("first request denied: %+v", d)
+	}
+	for i := 0; i < 10; i++ {
+		if d := c.Check("victim@example.test", "6.6.6.6"); d.Allowed || d.Reason != "ip" {
+			t.Fatalf("attacker request %d: %+v, want denied by ip", i, d)
+		}
+	}
+	if count, _, _ := c.Email.Inspect("victim@example.test"); count != 0 {
+		t.Fatalf("victim email bucket charged %d times by IP-rejected requests", count)
+	}
+	if d := c.Check("victim@example.test", "10.0.0.1"); !d.Allowed {
+		t.Fatalf("victim's own request denied: %+v", d)
+	}
+}

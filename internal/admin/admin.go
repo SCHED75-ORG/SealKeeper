@@ -300,7 +300,7 @@ type AuthResult struct {
 
 // Authenticate verifies the password and TOTP code. The contract:
 //   - if the account is missing or password is wrong, ErrInvalidCreds (and
-//     the failure counter increments — see incrementFailedAttempts);
+//     the failure counter increments — see reserveAttempt);
 //   - if the account is locked, ErrAccountLocked is returned without
 //     verifying the password (constant time still — see handlers);
 //   - if force_totp_enroll is true, TOTP is not checked yet; the caller
@@ -322,12 +322,29 @@ func (r *Repo) Authenticate(ctx context.Context, email, password, totpCode strin
 	if row.DisabledAt != nil {
 		return AuthResult{}, ErrAccountDisabled
 	}
-	if row.LockedUntil != nil && r.now().Before(*row.LockedUntil) {
+	if row.LockedUntil != nil {
+		if r.now().Before(*row.LockedUntil) {
+			return AuthResult{}, ErrAccountLocked
+		}
+		r.clearExpiredLock(ctx, row.ID)
+	}
+
+	// Reserve this attempt before doing any verification. The reservation
+	// is a single conditional UPDATE, so however many requests race, at
+	// most MaxFailedAttempts of them get to run bcrypt / TOTP per lock
+	// cycle. A snapshot check followed by a later increment let a burst of
+	// 100 requests evaluate ~57 guesses.
+	reserved, err := r.reserveAttempt(ctx, row.ID)
+	if err != nil {
+		return AuthResult{}, err
+	}
+	if !reserved {
+		r.lockIfExhausted(ctx, row.ID)
 		return AuthResult{}, ErrAccountLocked
 	}
 
 	if err := bcrypt.CompareHashAndPassword([]byte(row.PasswordHash), []byte(password)); err != nil {
-		_ = r.incrementFailedAttempts(ctx, row.ID)
+		r.lockIfExhausted(ctx, row.ID)
 		return AuthResult{}, ErrInvalidCreds
 	}
 
@@ -347,6 +364,8 @@ func (r *Repo) Authenticate(ctx context.Context, email, password, totpCode strin
 	}
 
 	if strings.TrimSpace(totpCode) == "" {
+		// The reserved attempt stays counted: interleaving blank codes
+		// must not buy extra TOTP guesses.
 		return AuthResult{Admin: row.toAdmin()}, ErrTOTPRequired
 	}
 	secret, err := r.openTOTPSecret(row)
@@ -358,7 +377,7 @@ func (r *Repo) Authenticate(ctx context.Context, email, password, totpCode strin
 		return AuthResult{}, err
 	}
 	if !ok {
-		_ = r.incrementFailedAttempts(ctx, row.ID)
+		r.lockIfExhausted(ctx, row.ID)
 		return AuthResult{}, ErrInvalidCreds
 	}
 
@@ -741,22 +760,44 @@ func (r *Repo) scanRow(rs rowScanner) (adminRow, error) {
 	return row, nil
 }
 
-func (r *Repo) incrementFailedAttempts(ctx context.Context, adminID int64) error {
-	now := r.now().UTC()
-	// Increment in SQL rather than read-modify-write: concurrent guesses
-	// must each count, or parallel requests could slip past the threshold.
-	if _, err := r.db.ExecContext(ctx,
-		rebind(r.db, `UPDATE admins SET failed_attempts = failed_attempts + 1, updated_at = ? WHERE id = ?`),
-		now, adminID,
-	); err != nil {
-		return err
+// reserveAttempt counts one login attempt up front. It reports false when
+// the account has already used MaxFailedAttempts in the current cycle.
+// Successful logins give the attempt back via RecordLoginSuccess.
+func (r *Repo) reserveAttempt(ctx context.Context, adminID int64) (bool, error) {
+	res, err := r.db.ExecContext(ctx,
+		rebind(r.db, `UPDATE admins SET failed_attempts = failed_attempts + 1, updated_at = ?
+			WHERE id = ? AND failed_attempts < ?`),
+		r.now().UTC(), adminID, MaxFailedAttempts,
+	)
+	if err != nil {
+		return false, err
 	}
-	_, err := r.db.ExecContext(ctx,
-		rebind(r.db, `UPDATE admins SET failed_attempts = 0, locked_until = ?, updated_at = ?
-			WHERE id = ? AND failed_attempts >= ?`),
+	n, err := res.RowsAffected()
+	return n == 1, err
+}
+
+// lockIfExhausted starts a lockout once the reserved attempts reach the
+// limit. failed_attempts stays at the limit while locked, so reserveAttempt
+// keeps refusing until clearExpiredLock runs after LockoutDuration.
+func (r *Repo) lockIfExhausted(ctx context.Context, adminID int64) {
+	now := r.now().UTC()
+	_, _ = r.db.ExecContext(ctx,
+		rebind(r.db, `UPDATE admins SET locked_until = ?, updated_at = ?
+			WHERE id = ? AND failed_attempts >= ? AND locked_until IS NULL`),
 		now.Add(LockoutDuration), now, adminID, MaxFailedAttempts,
 	)
-	return err
+}
+
+// clearExpiredLock opens a new cycle once a lockout has elapsed. The expiry
+// is re-checked in SQL so a request holding a stale snapshot can never
+// clear a lock that another request has just set.
+func (r *Repo) clearExpiredLock(ctx context.Context, adminID int64) {
+	now := r.now().UTC()
+	_, _ = r.db.ExecContext(ctx,
+		rebind(r.db, `UPDATE admins SET failed_attempts = 0, locked_until = NULL, updated_at = ?
+			WHERE id = ? AND locked_until IS NOT NULL AND locked_until <= ?`),
+		now, adminID, now,
+	)
 }
 
 // RecordLoginSuccess clears the failure counter and stamps last_login_at.
