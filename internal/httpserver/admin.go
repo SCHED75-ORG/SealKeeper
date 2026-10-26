@@ -2,9 +2,12 @@ package httpserver
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -318,11 +321,10 @@ func (s *Server) handleAdminLogout(w http.ResponseWriter, r *http.Request) {
 // assertion exchange. SameSite=Strict and a 5-minute TTL.
 const cookieAdminLoginStep = "sk_admin_login_step"
 
-// cookieAdminLoginAssertion carries the (encrypted-on-disk-only because
-// it's just a JSON blob signed by the WebAuthn library's own challenge)
-// session data from /begin to /finish so the server can stay stateless
-// about the in-flight assertion. Mirrors how the registration path uses
-// cookieWebauthnSession.
+// cookieAdminLoginAssertion carries the assertion session data from
+// /begin to /finish, authenticated and bound to the pending-login token by
+// sealCeremony, so the server can stay stateless about the in-flight
+// assertion. Mirrors how the registration path uses cookieWebauthnSession.
 const cookieAdminLoginAssertion = "sk_admin_login_assertion"
 
 // tryWebauthnStepUp checks whether the admin has registered any WebAuthn
@@ -421,7 +423,7 @@ func (s *Server) handleAdminLoginWebauthnBegin(w http.ResponseWriter, r *http.Re
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	ad, _, ok := s.loadPendingLogin(r)
+	ad, pendingToken, ok := s.loadPendingLogin(r)
 	if !ok {
 		http.Error(w, "session expired", http.StatusGone)
 		return
@@ -434,7 +436,7 @@ func (s *Server) handleAdminLoginWebauthnBegin(w http.ResponseWriter, r *http.Re
 	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     cookieAdminLoginAssertion,
-		Value:    base64.RawURLEncoding.EncodeToString(session),
+		Value:    s.sealCeremony(session, "login", pendingToken),
 		Path:     "/admin/login/webauthn",
 		HttpOnly: true,
 		SameSite: http.SameSiteStrictMode,
@@ -473,12 +475,8 @@ func (s *Server) handleAdminLoginWebauthnFinish(w http.ResponseWriter, r *http.R
 		http.Error(w, "no assertion session", http.StatusBadRequest)
 		return
 	}
-	if len(sessionCookie.Value) > adminMaxWebauthnSessionBytes {
-		http.Error(w, "session too large", http.StatusBadRequest)
-		return
-	}
-	sessionBytes, err := base64.RawURLEncoding.DecodeString(sessionCookie.Value)
-	if err != nil {
+	sessionBytes, ok := s.openCeremony(sessionCookie.Value, "login", pendingToken)
+	if !ok {
 		http.Error(w, "bad session", http.StatusBadRequest)
 		return
 	}
@@ -3440,14 +3438,57 @@ func (s *Server) handleAdminAdminDelete(w http.ResponseWriter, r *http.Request) 
 
 // ----- webauthn enrollment -------------------------------------------------
 
-// cookieWebauthnSession holds the opaque ceremony state between
-// /admin/security/begin and /admin/security/finish. It is set with
+// cookieWebauthnSession holds the ceremony state between
+// /admin/security/begin and /admin/security/finish, sealed to the admin
+// session and friendly name by sealCeremony. It is set with
 // SameSite=Strict + HttpOnly and lives only for a few minutes.
 const cookieWebauthnSession = "sk_webauthn_enroll"
 
 // adminMaxWebauthnSessionBytes caps the size of the cookie we accept back —
 // keeps a malicious client from filling memory with arbitrary blobs.
 const adminMaxWebauthnSessionBytes = 4 * 1024
+
+// sealCeremony authenticates a WebAuthn ceremony session blob for the
+// trip through the browser and binds it to its context (purpose, then the
+// admin session or pending-login token, ...). The blob decides the
+// challenge, user handle, expiry and UV requirement go-webauthn checks
+// against, so the client must not be able to mint or alter one: an
+// unauthenticated blob let a hijacked admin session skip the
+// current-password step-up of /admin/security/begin entirely.
+func (s *Server) sealCeremony(session []byte, binding ...string) string {
+	return base64.RawURLEncoding.EncodeToString(session) + "." +
+		base64.RawURLEncoding.EncodeToString(s.ceremonyMAC(session, binding))
+}
+
+// openCeremony verifies a value produced by sealCeremony for the same
+// binding and returns the session blob.
+func (s *Server) openCeremony(value string, binding ...string) ([]byte, bool) {
+	if len(value) > adminMaxWebauthnSessionBytes {
+		return nil, false
+	}
+	body, tag, ok := strings.Cut(value, ".")
+	if !ok {
+		return nil, false
+	}
+	session, err := base64.RawURLEncoding.DecodeString(body)
+	if err != nil {
+		return nil, false
+	}
+	mac, err := base64.RawURLEncoding.DecodeString(tag)
+	if err != nil || !hmac.Equal(mac, s.ceremonyMAC(session, binding)) {
+		return nil, false
+	}
+	return session, true
+}
+
+func (s *Server) ceremonyMAC(session []byte, binding []string) []byte {
+	m := hmac.New(sha256.New, s.ceremonyKey)
+	for _, part := range append(binding, string(session)) {
+		_, _ = m.Write(binary.BigEndian.AppendUint32(nil, uint32(len(part))))
+		_, _ = m.Write([]byte(part))
+	}
+	return m.Sum(nil)
+}
 
 func (s *Server) handleAdminSecurity(w http.ResponseWriter, r *http.Request) {
 	a, sess, _ := adminFromCtx(r)
@@ -3477,7 +3518,7 @@ func (s *Server) handleAdminSecurity(w http.ResponseWriter, r *http.Request) {
 // stashes the opaque ceremony session in a short-lived cookie. The browser
 // posts the cookie back along with the credential response in /finish.
 func (s *Server) handleAdminWebauthnBegin(w http.ResponseWriter, r *http.Request) {
-	a, _, _ := adminFromCtx(r)
+	a, sess, _ := adminFromCtx(r)
 	if s.webauthn == nil {
 		http.Error(w, "webauthn not configured", http.StatusServiceUnavailable)
 		return
@@ -3504,7 +3545,7 @@ func (s *Server) handleAdminWebauthnBegin(w http.ResponseWriter, r *http.Request
 	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     cookieWebauthnSession,
-		Value:    base64.RawURLEncoding.EncodeToString(session),
+		Value:    s.sealCeremony(session, "enrol", sess.Token, name),
 		Path:     "/admin/security",
 		HttpOnly: true,
 		SameSite: http.SameSiteStrictMode,
@@ -3528,7 +3569,7 @@ func (s *Server) handleAdminWebauthnBegin(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) handleAdminWebauthnFinish(w http.ResponseWriter, r *http.Request) {
-	a, _, _ := adminFromCtx(r)
+	a, sess, _ := adminFromCtx(r)
 	if s.webauthn == nil {
 		http.Error(w, "webauthn not configured", http.StatusServiceUnavailable)
 		return
@@ -3542,15 +3583,6 @@ func (s *Server) handleAdminWebauthnFinish(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "no enrollment session", http.StatusBadRequest)
 		return
 	}
-	if len(sessionCookie.Value) > adminMaxWebauthnSessionBytes {
-		http.Error(w, "session too large", http.StatusBadRequest)
-		return
-	}
-	sessionBytes, err := base64.RawURLEncoding.DecodeString(sessionCookie.Value)
-	if err != nil {
-		http.Error(w, "bad session", http.StatusBadRequest)
-		return
-	}
 	nameCookie, err := r.Cookie(cookieWebauthnSession + "_name")
 	if err != nil {
 		http.Error(w, "no friendly name", http.StatusBadRequest)
@@ -3559,6 +3591,13 @@ func (s *Server) handleAdminWebauthnFinish(w http.ResponseWriter, r *http.Reques
 	nameBytes, err := base64.RawURLEncoding.DecodeString(nameCookie.Value)
 	if err != nil {
 		http.Error(w, "bad name", http.StatusBadRequest)
+		return
+	}
+	// Only a ceremony issued by /begin, after the current-password
+	// step-up, to this admin session and for this name, is accepted.
+	sessionBytes, ok := s.openCeremony(sessionCookie.Value, "enrol", sess.Token, string(nameBytes))
+	if !ok {
+		http.Error(w, "bad session", http.StatusBadRequest)
 		return
 	}
 	cred, err := s.webauthn.FinishRegistration(r.Context(),

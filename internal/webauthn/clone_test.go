@@ -66,6 +66,12 @@ func (k softKey) coseKey() []byte {
 // signed with the given signature counter.
 func (k softKey) assertion(t *testing.T, challenge string, counter uint32) []byte {
 	t.Helper()
+	return k.assertionWithFlags(t, challenge, counter, 0x05) // user present + user verified
+}
+
+// assertionWithFlags is assertion with explicit authenticator-data flags.
+func (k softKey) assertionWithFlags(t *testing.T, challenge string, counter uint32, flags byte) []byte {
+	t.Helper()
 	clientData, err := json.Marshal(map[string]any{
 		"type":      "webauthn.get",
 		"challenge": challenge,
@@ -76,7 +82,7 @@ func (k softKey) assertion(t *testing.T, challenge string, counter uint32) []byt
 	}
 	rpHash := sha256.Sum256([]byte(testRPID))
 	authData := append([]byte{}, rpHash[:]...)
-	authData = append(authData, 0x05) // user present + user verified
+	authData = append(authData, flags)
 	authData = binary.BigEndian.AppendUint32(authData, counter)
 	cdHash := sha256.Sum256(clientData)
 	digest := sha256.Sum256(append(append([]byte{}, authData...), cdHash[:]...))

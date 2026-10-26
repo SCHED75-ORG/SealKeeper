@@ -23,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-webauthn/webauthn/protocol"
 	gowebauthn "github.com/go-webauthn/webauthn/webauthn"
 
 	"github.com/sched75/sealkeeper/internal/storage"
@@ -38,6 +39,10 @@ var (
 	// its signature counter did not move forward from the stored value:
 	// the WebAuthn signal (§6.1.1) that the authenticator may be cloned.
 	ErrCloneDetected = errors.New("webauthn: signature counter did not increase, authenticator may be cloned")
+	// ErrUserNotVerified means the authenticator did not report user
+	// verification (PIN, biometric). A key used in place of TOTP must prove
+	// both possession and the user, or a stolen key is enough on its own.
+	ErrUserNotVerified = errors.New("webauthn: authenticator did not verify the user")
 )
 
 // Credential is the row view used by the admin UI.
@@ -87,6 +92,10 @@ type Config struct {
 	Origins       []string
 }
 
+// ceremonyTimeout bounds a registration or login ceremony; the session
+// blob carries the matching expiry, checked server-side.
+const ceremonyTimeout = 5 * time.Minute
+
 // NewRepo binds a Repo. It returns an error when the relying-party config
 // is invalid (missing RPID / origin), which lets main.go fail fast at
 // startup rather than at the first registration attempt.
@@ -97,10 +106,27 @@ func NewRepo(db *sql.DB, cfg Config) (*Repo, error) {
 	if len(cfg.Origins) == 0 {
 		return nil, errors.New("webauthn: at least one origin required")
 	}
+	// Keys are a second factor standing in for TOTP, so both ceremonies
+	// require user verification (FR-C.19). Resident keys are discouraged:
+	// the step-up always names the allowed credentials after the password,
+	// so a discoverable credential would only burn a slot on the key.
+	// Attestation is "none": there is no authenticator allow-list (AAGUID
+	// or MDS policy) to check a statement against, and asking for one
+	// would only collect device-identifying data.
 	wa, err := gowebauthn.New(&gowebauthn.Config{
 		RPID:          cfg.RPID,
 		RPDisplayName: cfg.RPDisplayName,
 		RPOrigins:     cfg.Origins,
+		AuthenticatorSelection: protocol.AuthenticatorSelection{
+			ResidentKey:        protocol.ResidentKeyRequirementDiscouraged,
+			RequireResidentKey: protocol.ResidentKeyNotRequired(),
+			UserVerification:   protocol.VerificationRequired,
+		},
+		AttestationPreference: protocol.PreferNoAttestation,
+		Timeouts: gowebauthn.TimeoutsConfig{
+			Login:        gowebauthn.TimeoutConfig{Enforce: true, Timeout: ceremonyTimeout, TimeoutUVD: ceremonyTimeout},
+			Registration: gowebauthn.TimeoutConfig{Enforce: true, Timeout: ceremonyTimeout, TimeoutUVD: ceremonyTimeout},
+		},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("webauthn: %w", err)
@@ -155,9 +181,9 @@ func (r *Repo) FinishRegistration(ctx context.Context, who AdminIdentity, friend
 	if len(sessionJSON) == 0 {
 		return Credential{}, ErrSessionMissing
 	}
-	var sd gowebauthn.SessionData
-	if err := json.Unmarshal(sessionJSON, &sd); err != nil {
-		return Credential{}, fmt.Errorf("webauthn: parse session: %w", err)
+	sd, err := parseSession(sessionJSON)
+	if err != nil {
+		return Credential{}, err
 	}
 	user, err := r.loadUser(ctx, who, false)
 	if err != nil {
@@ -166,6 +192,9 @@ func (r *Repo) FinishRegistration(ctx context.Context, who AdminIdentity, friend
 	cred, err := r.wa.FinishRegistration(user, sd, req)
 	if err != nil {
 		return Credential{}, fmt.Errorf("webauthn.FinishRegistration: %w", err)
+	}
+	if !cred.Flags.UserVerified {
+		return Credential{}, ErrUserNotVerified
 	}
 	row, err := r.persist(ctx, who.ID, friendlyName, cred)
 	if err != nil {
@@ -304,9 +333,9 @@ func (r *Repo) FinishLogin(ctx context.Context, who AdminIdentity, sessionJSON [
 	if len(sessionJSON) == 0 {
 		return Credential{}, ErrSessionMissing
 	}
-	var sd gowebauthn.SessionData
-	if err := json.Unmarshal(sessionJSON, &sd); err != nil {
-		return Credential{}, fmt.Errorf("webauthn: parse session: %w", err)
+	sd, err := parseSession(sessionJSON)
+	if err != nil {
+		return Credential{}, err
 	}
 	user, err := r.loadUser(ctx, who, true)
 	if err != nil {
@@ -317,6 +346,9 @@ func (r *Repo) FinishLogin(ctx context.Context, who AdminIdentity, sessionJSON [
 		return Credential{}, fmt.Errorf("webauthn.FinishLogin: %w", err)
 	}
 	id := base64.RawURLEncoding.EncodeToString(cred.ID)
+	if !cred.Flags.UserVerified {
+		return Credential{CredentialID: id, AdminID: who.ID}, ErrUserNotVerified
+	}
 	if cred.Authenticator.CloneWarning {
 		return Credential{CredentialID: id, AdminID: who.ID}, ErrCloneDetected
 	}
@@ -342,6 +374,19 @@ func (r *Repo) FinishLogin(ctx context.Context, who AdminIdentity, sessionJSON [
 	t := now
 	row.LastUsedAt = &t
 	return row, nil
+}
+
+// parseSession decodes the ceremony session blob. The blob travels through
+// the browser, so the user-verification requirement is pinned here rather
+// than trusted from it: go-webauthn only checks the UV flag when the
+// session says "required".
+func parseSession(sessionJSON []byte) (gowebauthn.SessionData, error) {
+	var sd gowebauthn.SessionData
+	if err := json.Unmarshal(sessionJSON, &sd); err != nil {
+		return sd, fmt.Errorf("webauthn: parse session: %w", err)
+	}
+	sd.UserVerification = protocol.VerificationRequired
+	return sd, nil
 }
 
 // ----- gowebauthn.User adapter ---------------------------------------------
