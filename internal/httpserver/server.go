@@ -132,6 +132,10 @@ type Server struct {
 	// tokenLookupPerIPWindow).
 	tokenLimiter *ratelimit.Limiter
 
+	// probeLimiter caps the token.unknown_attempt rows per client
+	// (see unknownAttemptAuditPerIPWindow).
+	probeLimiter *ratelimit.Limiter
+
 	// pseudonymKey keys hashShort (derived from the master secret).
 	pseudonymKey []byte
 
@@ -219,6 +223,7 @@ func New(cfg config.Config, logger *slog.Logger) *Server {
 		ceremonyKey:    ceremonyKey(cfg.MasterSecret),
 		loginLimiter:   ratelimit.New(adminLoginPerIPWindow, 15*time.Minute),
 		tokenLimiter:   ratelimit.New(tokenLookupPerIPWindow, 15*time.Minute),
+		probeLimiter:   ratelimit.New(unknownAttemptAuditPerIPWindow, 15*time.Minute),
 		cfg:            cfg,
 		logger:         logger,
 		readyz:         readiness.New(),
@@ -518,7 +523,7 @@ func (s *Server) Run(ctx context.Context) error {
 	// stays in memory for the life of the process.
 	stopJanitors := make(chan struct{})
 	defer close(stopJanitors)
-	for _, l := range []*ratelimit.Limiter{s.limiter.Email, s.limiter.IP, s.loginLimiter, s.tokenLimiter} {
+	for _, l := range []*ratelimit.Limiter{s.limiter.Email, s.limiter.IP, s.loginLimiter, s.tokenLimiter, s.probeLimiter} {
 		if l != nil {
 			go l.RunJanitor(stopJanitors, 5*time.Minute)
 		}
@@ -800,6 +805,7 @@ func (s *Server) handlePolicyConsume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tok, err := s.tokens.Consume(r.Context(), tokenParam, ipHash, uaHash)
+	s.auditOpenAttempt(r, surfacePolicyAPI, tokenParam, tok, err)
 	if s.writeConsumeError(w, err) {
 		return
 	}
@@ -1050,20 +1056,9 @@ func policyDefaultMap() map[string]any {
 // "expired" page instead of revealing nothing.
 func (s *Server) handleRevealPage(w http.ResponseWriter, r *http.Request) {
 	token := chi.URLParam(r, "token")
-	state := "ready"
-	status := http.StatusOK
-	if !s.allowTokenLookup(w, s.clientIP(r)) {
-		state, status = "rate_limited", http.StatusTooManyRequests
-	} else if s.tokens != nil {
-		if tok, err := s.tokens.Get(r.Context(), token); err == nil {
-			if tok.ConsumedAt != nil {
-				state = "consumed"
-			} else if !time.Now().Before(tok.ExpiresAt) {
-				state = "expired"
-			}
-		} else if errors.Is(err, tokens.ErrNotFound) {
-			state = "unknown"
-		}
+	state, status := "rate_limited", http.StatusTooManyRequests
+	if s.allowTokenLookup(w, s.clientIP(r)) {
+		state, status = s.previewRevealToken(r, token), http.StatusOK
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")

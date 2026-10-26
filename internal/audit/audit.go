@@ -109,6 +109,11 @@ const (
 	EventRequestAccepted = "request.accepted"
 	EventAdminLogin      = "admin.login"
 	EventAdminLogout     = "admin.logout"
+
+	// FR-B.38: refused opening attempts of a reveal link.
+	EventTokenReuseAttempt   = "token.reuse_attempt"
+	EventTokenExpiredAttempt = "token.expired_attempt"
+	EventTokenUnknownAttempt = "token.unknown_attempt"
 )
 
 const (
