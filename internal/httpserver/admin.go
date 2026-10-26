@@ -244,40 +244,8 @@ func (s *Server) handleAdminLoginPost(w http.ResponseWriter, r *http.Request) {
 	totpCode := strings.TrimSpace(r.FormValue("totp"))
 
 	res, err := s.adminRepo.Authenticate(r.Context(), email, password, totpCode)
-	switch {
-	case errors.Is(err, admin.ErrInvalidCreds):
-		s.auditAppend(r.Context(), "admin.login_failed", email, "", map[string]any{"reason": "credentials"})
-		s.adminLoginError(w, r, "bad_creds")
-		return
-	case errors.Is(err, admin.ErrAccountLocked):
-		// Same slug as a wrong password: unknown emails never lock, so a
-		// distinct "locked" answer would confirm the email is an admin. The
-		// audit log keeps the real reason.
-		s.auditAppend(r.Context(), "admin.login_failed", email, "", map[string]any{"reason": "locked"})
-		s.adminLoginError(w, r, "bad_creds")
-		return
-	case errors.Is(err, admin.ErrAccountDisabled):
-		s.auditAppend(r.Context(), "admin.login_failed", email, "", map[string]any{"reason": "disabled"})
-		s.adminLoginError(w, r, "disabled")
-		return
-	case errors.Is(err, admin.ErrTOTPUnrecoverable):
-		s.logger.Error("admin.Authenticate: TOTP secret unrecoverable", "err", err, "email", email)
-		s.auditAppend(r.Context(), "admin.login_failed", email, "", map[string]any{"reason": "totp_unrecoverable"})
-		s.adminLoginError(w, r, "totp_unrecoverable")
-		return
-	case errors.Is(err, admin.ErrTOTPRequired):
-		// Password OK, but the second factor still needs to be supplied.
-		// Branch to the WebAuthn step-up flow when the admin has at least
-		// one registered key — otherwise re-render the form asking for
-		// the TOTP code on top of the existing inputs.
-		if s.tryWebauthnStepUp(w, r, res.Admin) {
-			return
-		}
-		s.adminLoginError(w, r, "totp_required")
-		return
-	case err != nil:
-		s.logger.Error("admin.Authenticate failed", "err", err)
-		s.adminLoginError(w, r, "internal")
+	if err != nil {
+		s.respondAdminLoginFailure(w, r, email, res.Admin, err)
 		return
 	}
 	if res.UsedRecoveryCode {
@@ -300,6 +268,42 @@ func (s *Server) handleAdminLoginPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.Redirect(w, r, "/admin/dashboard", http.StatusFound)
+}
+
+// respondAdminLoginFailure maps a non-nil Authenticate error to its audit
+// event and login error slug. Every credential failure answers bad_creds;
+// ErrTOTPRequired branches to the WebAuthn step-up when the admin has keys.
+func (s *Server) respondAdminLoginFailure(w http.ResponseWriter, r *http.Request, email string, ad admin.Admin, err error) {
+	switch {
+	case errors.Is(err, admin.ErrInvalidCreds):
+		s.auditAppend(r.Context(), "admin.login_failed", email, "", map[string]any{"reason": "credentials"})
+		s.adminLoginError(w, r, "bad_creds")
+	case errors.Is(err, admin.ErrAccountLocked):
+		// Same slug as a wrong password: unknown emails never lock, so a
+		// distinct "locked" answer would confirm the email is an admin. The
+		// audit log keeps the real reason.
+		s.auditAppend(r.Context(), "admin.login_failed", email, "", map[string]any{"reason": "locked"})
+		s.adminLoginError(w, r, "bad_creds")
+	case errors.Is(err, admin.ErrAccountDisabled):
+		s.auditAppend(r.Context(), "admin.login_failed", email, "", map[string]any{"reason": "disabled"})
+		s.adminLoginError(w, r, "disabled")
+	case errors.Is(err, admin.ErrTOTPUnrecoverable):
+		s.logger.Error("admin.Authenticate: TOTP secret unrecoverable", "err", err, "email", email)
+		s.auditAppend(r.Context(), "admin.login_failed", email, "", map[string]any{"reason": "totp_unrecoverable"})
+		s.adminLoginError(w, r, "totp_unrecoverable")
+	case errors.Is(err, admin.ErrTOTPRequired):
+		// Password OK, but the second factor still needs to be supplied.
+		// Branch to the WebAuthn step-up flow when the admin has at least
+		// one registered key — otherwise re-render the form asking for
+		// the TOTP code on top of the existing inputs.
+		if s.tryWebauthnStepUp(w, r, ad) {
+			return
+		}
+		s.adminLoginError(w, r, "totp_required")
+	default:
+		s.logger.Error("admin.Authenticate failed", "err", err)
+		s.adminLoginError(w, r, "internal")
+	}
 }
 
 func (s *Server) handleAdminLogout(w http.ResponseWriter, r *http.Request) {
@@ -620,64 +624,78 @@ func (s *Server) handleAdminSetupPost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Step 1 — password change.
-	if a.ForcePasswordChange {
-		np := r.FormValue("new_password")
-		conf := r.FormValue("new_password_confirm")
-		if np == "" || np != conf {
-			s.adminSetupError(w, r, "passwords_mismatch")
-			return
-		}
-		if err := s.adminRepo.ChangePassword(r.Context(), a.ID, np); err != nil {
-			if errors.Is(err, admin.ErrPasswordTooWeak) {
-				s.adminSetupError(w, r, "password_too_weak&why="+url.QueryEscape(admin.PasswordWeaknessCodes(err)))
-				return
-			}
-			s.logger.Error("ChangePassword failed", "err", err)
-			s.adminSetupError(w, r, "password_invalid")
-			return
-		}
-		_ = s.adminRepo.RevokeOtherSessions(r.Context(), a.ID, sess.Token)
-		s.auditAppend(r.Context(), "admin.password_changed", a.Email, "", nil)
+	if a.ForcePasswordChange && !s.setupChangePassword(w, r, a, sess) {
+		return
 	}
 
 	// Step 2 — TOTP enrollment + verify a fresh code so we know the user
 	// scanned the QR successfully.
-	if a.ForceTOTPEnroll {
-		// The secret and recovery codes come back sealed (SealSetup), never
-		// as client-chosen plaintext: a forged form could otherwise enrol a
-		// secret like "AA" and recovery codes of the attacker's choosing.
-		code := strings.TrimSpace(r.FormValue("totp_code"))
-		blob := strings.TrimSpace(r.FormValue("setup_blob"))
-		if blob == "" || code == "" {
-			s.adminSetupError(w, r, "totp_required")
-			return
-		}
-		secret, codes, err := s.adminRepo.OpenSetup(a.ID, sess.Token, blob)
-		if err != nil {
-			s.adminSetupError(w, r, "totp_invalid")
-			return
-		}
-		step, ok, err := totp.VerifyStep(secret, code, time.Now())
-		if err != nil || !ok {
-			s.adminSetupError(w, r, "totp_invalid")
-			return
-		}
-		if err := s.adminRepo.EnrollTOTP(r.Context(), a.ID, secret, codes); err != nil {
-			s.logger.Error("EnrollTOTP failed", "err", err)
-			s.adminSetupError(w, r, "internal")
-			return
-		}
-		// The enrolment code is spent: it cannot be replayed at login.
-		if _, err := s.adminRepo.UseTOTPStep(r.Context(), a.ID, step); err != nil {
-			s.logger.Error("UseTOTPStep failed", "err", err)
-		}
-		s.auditAppend(r.Context(), "admin.totp_enrolled", a.Email, "", nil)
+	if a.ForceTOTPEnroll && !s.setupEnrollTOTP(w, r, a, sess) {
+		return
 	}
 	// /admin (handleAdminRoot) inspects the session and lands the user
 	// on /admin/dashboard or back on /admin/login as appropriate. Sending
 	// the user there instead of /admin/dashboard means a stale
 	// force_password_change bit can't sneak the admin past the gate.
 	http.Redirect(w, r, "/admin", http.StatusFound)
+}
+
+// setupChangePassword runs setup step 1. It returns false once it has
+// written an error response, in which case the caller must stop.
+func (s *Server) setupChangePassword(w http.ResponseWriter, r *http.Request, a admin.Admin, sess admin.Session) bool {
+	np := r.FormValue("new_password")
+	conf := r.FormValue("new_password_confirm")
+	if np == "" || np != conf {
+		s.adminSetupError(w, r, "passwords_mismatch")
+		return false
+	}
+	if err := s.adminRepo.ChangePassword(r.Context(), a.ID, np); err != nil {
+		if errors.Is(err, admin.ErrPasswordTooWeak) {
+			s.adminSetupError(w, r, "password_too_weak&why="+url.QueryEscape(admin.PasswordWeaknessCodes(err)))
+			return false
+		}
+		s.logger.Error("ChangePassword failed", "err", err)
+		s.adminSetupError(w, r, "password_invalid")
+		return false
+	}
+	_ = s.adminRepo.RevokeOtherSessions(r.Context(), a.ID, sess.Token)
+	s.auditAppend(r.Context(), "admin.password_changed", a.Email, "", nil)
+	return true
+}
+
+// setupEnrollTOTP runs setup step 2. It returns false once it has written
+// an error response, in which case the caller must stop.
+func (s *Server) setupEnrollTOTP(w http.ResponseWriter, r *http.Request, a admin.Admin, sess admin.Session) bool {
+	// The secret and recovery codes come back sealed (SealSetup), never
+	// as client-chosen plaintext: a forged form could otherwise enrol a
+	// secret like "AA" and recovery codes of the attacker's choosing.
+	code := strings.TrimSpace(r.FormValue("totp_code"))
+	blob := strings.TrimSpace(r.FormValue("setup_blob"))
+	if blob == "" || code == "" {
+		s.adminSetupError(w, r, "totp_required")
+		return false
+	}
+	secret, codes, err := s.adminRepo.OpenSetup(a.ID, sess.Token, blob)
+	if err != nil {
+		s.adminSetupError(w, r, "totp_invalid")
+		return false
+	}
+	step, ok, err := totp.VerifyStep(secret, code, time.Now())
+	if err != nil || !ok {
+		s.adminSetupError(w, r, "totp_invalid")
+		return false
+	}
+	if err := s.adminRepo.EnrollTOTP(r.Context(), a.ID, secret, codes); err != nil {
+		s.logger.Error("EnrollTOTP failed", "err", err)
+		s.adminSetupError(w, r, "internal")
+		return false
+	}
+	// The enrolment code is spent: it cannot be replayed at login.
+	if _, err := s.adminRepo.UseTOTPStep(r.Context(), a.ID, step); err != nil {
+		s.logger.Error("UseTOTPStep failed", "err", err)
+	}
+	s.auditAppend(r.Context(), "admin.totp_enrolled", a.Email, "", nil)
+	return true
 }
 
 func (s *Server) handleAdminDashboard(w http.ResponseWriter, r *http.Request) {
