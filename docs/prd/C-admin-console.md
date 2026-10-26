@@ -529,4 +529,4 @@ Les décisions suivantes sont prises et liantes pour cette version :
 
 ---
 
-*Document maintenu dans le repo `sched75/sealkeeper` sous `docs/prd/C-admin-console.md`. Toute proposition de modification passe par PR sur `main`.*
+*Document maintenu dans le repo `SCHED75-ORG/SealKeeper` sous `docs/prd/C-admin-console.md`. Toute proposition de modification passe par PR sur `main`.*

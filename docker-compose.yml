@@ -46,7 +46,7 @@ services:
       - no-new-privileges:true
 
   sealkeeper:
-    image: ${SK_IMAGE:-ghcr.io/sealkeeper/sealkeeper:latest} # FR-H.3
+    image: ${SK_IMAGE:-ghcr.io/sched75-org/sealkeeper:latest} # FR-H.3
     container_name: sealkeeper
     restart: unless-stopped # FR-H.25
     depends_on:

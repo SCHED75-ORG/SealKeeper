@@ -33,7 +33,7 @@ commonLabels:
   app.kubernetes.io/part-of: sealkeeper
 
 # Bump this when rolling out a new release. Kustomize will inject
-# `image: ghcr.io/sealkeeper/sealkeeper:vX.Y.Z` into the deployment.
+# `image: ghcr.io/sched75-org/sealkeeper:vX.Y.Z` into the deployment.
 images:
-  - name: ghcr.io/sealkeeper/sealkeeper
+  - name: ghcr.io/sched75-org/sealkeeper
     newTag: latest

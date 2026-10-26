@@ -3,7 +3,7 @@
 # PRD: module H §6.1.
 
 image:
-  repository: ghcr.io/sealkeeper/sealkeeper
+  repository: ghcr.io/sched75-org/sealkeeper
   tag: ""               # falls back to .Chart.AppVersion when empty
   pullPolicy: IfNotPresent
   pullSecrets: []       # [{ name: regcred }]

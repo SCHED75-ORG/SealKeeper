@@ -372,4 +372,4 @@ Une question (l'ancienne 9.6, *mode démo en production*) a été renvoyée au m
 
 ---
 
-*Document maintenu dans le repo `sched75/sealkeeper` sous `docs/prd/B-user-workflow.md`. Toute proposition de modification passe par PR sur `main`.*
+*Document maintenu dans le repo `SCHED75-ORG/SealKeeper` sous `docs/prd/B-user-workflow.md`. Toute proposition de modification passe par PR sur `main`.*

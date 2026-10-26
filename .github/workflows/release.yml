@@ -15,7 +15,7 @@
 #   - FR-L.27-28 (E2E full multi-browser + axe-core a11y)
 #   - FR-L.52  (target < 30 min for release)
 #   - FR-L.69  (verification doc references this pipeline)
-#   - FR-H.3   (image ghcr.io/sealkeeper/sealkeeper:<version> + :latest)
+#   - FR-H.3   (image ghcr.io/sched75-org/sealkeeper:<version> + :latest)
 #   - FR-H.16  (multi-arch linux/amd64 + linux/arm64)
 #   - FR-H.18-19 (distroless/static, UID 65532)
 #   - FR-H.20-27 (Compose bundle reference)

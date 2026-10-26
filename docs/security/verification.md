@@ -5,7 +5,7 @@
 >
 > PRD: FR-L.64 (GPG-signed checksums), FR-L.65 (cosign keyless), FR-L.66
 > (CycloneDX 1.5 SBOM via syft), FR-L.67 (SLSA L2 provenance), FR-L.69 (this
-> page itself), FR-H.3 (image at `ghcr.io/sealkeeper/sealkeeper`).
+> page itself), FR-H.3 (image at `ghcr.io/sched75-org/sealkeeper`).
 
 ## TL;DR — verify everything
 
@@ -19,20 +19,20 @@ sha256sum -c SHA256SUMS
 
 # 2. Cosign keyless signature on the OCI image
 cosign verify \
-  --certificate-identity "https://github.com/sched75/SealKeeper/.github/workflows/release.yml@refs/tags/${TAG}" \
+  --certificate-identity "https://github.com/SCHED75-ORG/SealKeeper/.github/workflows/release.yml@refs/tags/${TAG}" \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  ghcr.io/sealkeeper/sealkeeper:${TAG}
+  ghcr.io/sched75-org/sealkeeper:${TAG}
 
 # 3. SLSA provenance attestation
-gh attestation verify oci://ghcr.io/sealkeeper/sealkeeper:${TAG} \
-  --repo sched75/SealKeeper \
-  --signer-workflow sched75/SealKeeper/.github/workflows/release.yml \
+gh attestation verify oci://ghcr.io/sched75-org/sealkeeper:${TAG} \
+  --repo SCHED75-ORG/SealKeeper \
+  --signer-workflow SCHED75-ORG/SealKeeper/.github/workflows/release.yml \
   --source-ref "refs/tags/${TAG}"
 
 # 4. SBOM (CycloneDX 1.5) for the image
 cosign download attestation \
   --predicate-type https://cyclonedx.org/bom/v1.5 \
-  ghcr.io/sealkeeper/sealkeeper:${TAG} > image.sbom.intoto.jsonl
+  ghcr.io/sched75-org/sealkeeper:${TAG} > image.sbom.intoto.jsonl
 ```
 
 If every command exits with status 0 and no warning, the release is intact and
@@ -79,16 +79,16 @@ Install cosign ≥ v2.4 (`brew install cosign` or
 
 ```bash
 cosign verify \
-  --certificate-identity 'https://github.com/sched75/SealKeeper/.github/workflows/release.yml@refs/tags/v0.1.0' \
+  --certificate-identity 'https://github.com/SCHED75-ORG/SealKeeper/.github/workflows/release.yml@refs/tags/v0.1.0' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  ghcr.io/sealkeeper/sealkeeper:v0.1.0
+  ghcr.io/sched75-org/sealkeeper:v0.1.0
 ```
 
-Expected: `Verification for ghcr.io/sealkeeper/sealkeeper:v0.1.0 — The
+Expected: `Verification for ghcr.io/sched75-org/sealkeeper:v0.1.0 — The
 following checks were performed: …`. Key fields to eyeball:
 
 - `Issuer: https://token.actions.githubusercontent.com`
-- `Subject: https://github.com/sched75/SealKeeper/.github/workflows/release.yml@refs/tags/vX.Y.Z`
+- `Subject: https://github.com/SCHED75-ORG/SealKeeper/.github/workflows/release.yml@refs/tags/vX.Y.Z`
 
 The signature is also recorded in the public Rekor transparency log; cosign
 checks Rekor inclusion automatically.
@@ -102,9 +102,9 @@ SLSA Level 2 provenance attestation to the image. The GitHub CLI can verify
 it natively:
 
 ```bash
-gh attestation verify oci://ghcr.io/sealkeeper/sealkeeper:v0.1.0 \
-  --repo sched75/SealKeeper \
-  --signer-workflow sched75/SealKeeper/.github/workflows/release.yml \
+gh attestation verify oci://ghcr.io/sched75-org/sealkeeper:v0.1.0 \
+  --repo SCHED75-ORG/SealKeeper \
+  --signer-workflow SCHED75-ORG/SealKeeper/.github/workflows/release.yml \
   --source-ref refs/tags/v0.1.0
 ```
 
@@ -128,7 +128,7 @@ SBOMs are produced by `syft` (FR-L.66) and attached two ways:
   ```bash
   cosign download attestation \
     --predicate-type https://cyclonedx.org/bom/v1.5 \
-    ghcr.io/sealkeeper/sealkeeper:v0.1.0 \
+    ghcr.io/sched75-org/sealkeeper:v0.1.0 \
     | jq -r '.payload | @base64d | fromjson | .predicate' \
     > image.sbom.cdx.json
 

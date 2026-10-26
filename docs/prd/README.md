@@ -193,7 +193,7 @@ Le PRD est **versionné avec le code** dans le repo. Toute modification suit le 
 
 - [Plan de travail détaillé](./00-work-plan.md) — méthode, ordre, calendrier
 - [Site SealKeeper](https://sealkeeper.eu) — présentation publique
-- [Repo GitHub](https://github.com/sched75/sealkeeper) — code source
+- [Repo GitHub](https://github.com/SCHED75-ORG/SealKeeper) — code source
 - [SECURITY.md](../../SECURITY.md) — politique de divulgation responsable
 - [CONTRIBUTING.md](../../CONTRIBUTING.md) — guide contributeur
 - [CHANGELOG.md](../../CHANGELOG.md) — historique des releases

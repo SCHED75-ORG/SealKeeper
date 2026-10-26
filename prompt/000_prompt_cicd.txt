@@ -56,7 +56,7 @@ B) `.github/workflows/release.yml`
      * SBOM CycloneDX 1.5 via syft (binaires + image)
      * cosign keyless signing (image OCI, Rekor transparency log)
      * GPG sign SHA256SUMS
-     * push image vers ghcr.io/sealkeeper/sealkeeper:<version> + :latest
+     * push image vers ghcr.io/sched75-org/sealkeeper:<version> + :latest
      * package Helm chart + push vers sealkeeper.eu/charts (placeholder path à documenter)
      * provenance SLSA niveau 2 via GitHub OIDC + cosign
      * **assemblage du bundle de déploiement clé en main** (CRITIQUE — cf. ci-dessous)
@@ -91,7 +91,7 @@ B) `.github/workflows/release.yml`
    - **Si une seule de ces vérifications échoue, la release entière est annulée**
 
    **Mode eval one-liner** documenté dans les notes de release :
-docker run --rm -p 8443:8443 -e SK_MODE=eval ghcr.io/sealkeeper/sealkeeper:<version>
+docker run --rm -p 8443:8443 -e SK_MODE=eval ghcr.io/sched75-org/sealkeeper:<version>
    Doit fonctionner sans aucune config additionnelle (master secret auto-généré, SQLite, bootstrap admin password en logs — conforme FR-H.11 à FR-H.19).
 
 C) `.github/workflows/nightly.yml`
@@ -199,7 +199,7 @@ S) `helm/sealkeeper/` (chart Helm complet)
 
 T) `QUICKSTART.md` (à la racine du repo)
    - 3 modes de déploiement avec commandes copiables :
-     * **Eval** : `docker run --rm -p 8443:8443 -e SK_MODE=eval ghcr.io/sealkeeper/sealkeeper:latest` (5 secondes pour démarrer)
+     * **Eval** : `docker run --rm -p 8443:8443 -e SK_MODE=eval ghcr.io/sched75-org/sealkeeper:latest` (5 secondes pour démarrer)
      * **Production simple** : `docker compose up -d` après `cp .env.example .env && vi .env`
      * **Kubernetes** : `helm install sealkeeper ./helm/sealkeeper --values my-values.yaml`
    - Pour chaque mode : prérequis, commandes, vérification de fonctionnement, étapes suivantes

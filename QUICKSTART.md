@@ -6,7 +6,7 @@ Three ways to get SealKeeper running. Pick one.
 
 ```bash
 docker run --rm -p 8443:8443 -e SK_MODE=eval \
-  ghcr.io/sealkeeper/sealkeeper:latest
+  ghcr.io/sched75-org/sealkeeper:latest
 ```
 
 Open <http://localhost:8443/>.
@@ -29,7 +29,7 @@ Open <http://localhost:8443/>.
 Prerequisites: Docker ≥ 24 and Docker Compose v2.
 
 ```bash
-git clone https://github.com/sched75/SealKeeper.git
+git clone https://github.com/SCHED75-ORG/SealKeeper.git
 cd SealKeeper
 
 cp .env.example .env
@@ -81,7 +81,7 @@ docker compose down -v   # -v drops volumes — keep them off in production
 Prerequisites: Kubernetes ≥ 1.27, Helm ≥ 3.14, an ingress controller, and a PostgreSQL 16 instance reachable from the cluster.
 
 ```bash
-git clone https://github.com/sched75/SealKeeper.git
+git clone https://github.com/SCHED75-ORG/SealKeeper.git
 cd SealKeeper
 
 # 1. Create the namespace (PSA-restricted)
@@ -138,12 +138,12 @@ We sign everything. Before running a binary, verify the GPG signature on `SHA256
 ```bash
 TAG=v0.1.0
 cosign verify \
-  --certificate-identity "https://github.com/sched75/SealKeeper/.github/workflows/release.yml@refs/tags/${TAG}" \
+  --certificate-identity "https://github.com/SCHED75-ORG/SealKeeper/.github/workflows/release.yml@refs/tags/${TAG}" \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  ghcr.io/sealkeeper/sealkeeper:${TAG}
+  ghcr.io/sched75-org/sealkeeper:${TAG}
 
-gh attestation verify oci://ghcr.io/sealkeeper/sealkeeper:${TAG} --repo sched75/SealKeeper \
-  --signer-workflow sched75/SealKeeper/.github/workflows/release.yml --source-ref "refs/tags/${TAG}"
+gh attestation verify oci://ghcr.io/sched75-org/sealkeeper:${TAG} --repo SCHED75-ORG/SealKeeper \
+  --signer-workflow SCHED75-ORG/SealKeeper/.github/workflows/release.yml --source-ref "refs/tags/${TAG}"
 ```
 
 ---
@@ -153,4 +153,4 @@ gh attestation verify oci://ghcr.io/sealkeeper/sealkeeper:${TAG} --repo sched75/
 - [Release verification guide](docs/security/verification.md)
 - [Release checklist (maintainers)](docs/release-checklist.md)
 - [Product Requirements Document (PRD)](docs/prd/README.md)
-- Issues and questions: <https://github.com/sched75/SealKeeper/issues>
+- Issues and questions: <https://github.com/SCHED75-ORG/SealKeeper/issues>

@@ -547,4 +547,4 @@ Disponible dans `docs/prd/_template.md` (à créer en début de Phase 1).
 
 ---
 
-*Document maintenu dans le repo `sched75/sealkeeper`. Toute proposition de modification passe par PR sur `main`.*
+*Document maintenu dans le repo `SCHED75-ORG/SealKeeper`. Toute proposition de modification passe par PR sur `main`.*

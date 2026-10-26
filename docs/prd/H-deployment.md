@@ -40,7 +40,7 @@ Trois modes de déploiement sont supportés :
 |---|---|---|
 | FR-H.1 | Une release publie systématiquement les artefacts suivants : | MUST |
 | FR-H.2 | **Binaire Go statique** pour `linux/amd64`, `linux/arm64`, `darwin/amd64`, `darwin/arm64` | MUST |
-| FR-H.3 | **Image OCI** publiée sur le registry GitHub (`ghcr.io/sealkeeper/sealkeeper:<version>` et `:latest`) | MUST |
+| FR-H.3 | **Image OCI** publiée sur le registry GitHub (`ghcr.io/sched75-org/sealkeeper:<version>` et `:latest`) | MUST |
 | FR-H.4 | **Helm chart** publié sur le repo Helm (`https://sealkeeper.eu/charts`) | MUST |
 | FR-H.5 | **Manifests Kubernetes vanilla** (Deployment, Service, Ingress, ConfigMap, Secret de référence) téléchargeables en tarball | SHOULD |
 | FR-H.6 | **docker-compose.yml de référence** dans le repo et téléchargeable | MUST |
@@ -53,7 +53,7 @@ Trois modes de déploiement sont supportés :
 
 | ID | Exigence | Niveau |
 |---|---|---|
-| FR-H.11 | L'image OCI permet un démarrage en une commande : `docker run --rm -p 8443:8443 -e SK_MODE=eval ghcr.io/sealkeeper/sealkeeper:latest` | MUST |
+| FR-H.11 | L'image OCI permet un démarrage en une commande : `docker run --rm -p 8443:8443 -e SK_MODE=eval ghcr.io/sched75-org/sealkeeper:latest` | MUST |
 | FR-H.12 | Le mode `SK_MODE=eval` active : SQLite embarqué (fichier `/data/sealkeeper.db`), SMTP capture (table `captured_mail` + UI), TLS auto-généré (certificat self-signed à la volée), bootstrap admin avec mot de passe dans les logs | MUST |
 | FR-H.13 | Un volume Docker `data` est monté sur `/data` (DB + bibliothèques) pour persister entre runs | MUST |
 | FR-H.14 | Le master secret (`SK_MASTER_SECRET`) est auto-généré au premier démarrage et écrit dans `/data/.master_secret` avec warning visible | MUST |
@@ -345,7 +345,7 @@ Le chart Helm `sealkeeper` est organisé ainsi :
 
 ```yaml
 image:
-  repository: ghcr.io/sealkeeper/sealkeeper
+  repository: ghcr.io/sched75-org/sealkeeper
   tag: 0.1.0
   pullPolicy: IfNotPresent
 
@@ -505,4 +505,4 @@ Trois fonctionnalités sont reportées sous condition de demande : chart OpenShi
 
 ---
 
-*Document maintenu dans le repo `sched75/sealkeeper` sous `docs/prd/H-deployment.md`.*
+*Document maintenu dans le repo `SCHED75-ORG/SealKeeper` sous `docs/prd/H-deployment.md`.*

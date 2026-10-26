@@ -435,4 +435,4 @@ Cinq fonctionnalités sont reportées (exclusion individuelle v0.2, page transpa
 
 ---
 
-*Document maintenu dans le repo `sched75/sealkeeper` sous `docs/prd/I-rgpd-compliance.md`.*
+*Document maintenu dans le repo `SCHED75-ORG/SealKeeper` sous `docs/prd/I-rgpd-compliance.md`.*

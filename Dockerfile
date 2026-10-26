@@ -95,7 +95,7 @@ LABEL org.opencontainers.image.title="SealKeeper" \
       org.opencontainers.image.description="ANSSI-compliant password distributor" \
       org.opencontainers.image.licenses="AGPL-3.0-or-later" \
       org.opencontainers.image.vendor="SealKeeper" \
-      org.opencontainers.image.source="https://github.com/sched75/SealKeeper" \
+      org.opencontainers.image.source="https://github.com/SCHED75-ORG/SealKeeper" \
       org.opencontainers.image.documentation="https://sealkeeper.eu" \
       org.opencontainers.image.base.name="gcr.io/distroless/static:nonroot"
 

@@ -391,4 +391,4 @@ Trois fonctionnalités sont reportées : Weblate v0.2, audio description page d'
 
 ---
 
-*Document maintenu dans le repo `sched75/sealkeeper` sous `docs/prd/J-i18n-accessibility.md`.*
+*Document maintenu dans le repo `SCHED75-ORG/SealKeeper` sous `docs/prd/J-i18n-accessibility.md`.*

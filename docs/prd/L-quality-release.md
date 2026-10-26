@@ -394,4 +394,4 @@ Trois fonctionnalités sont reportées (monitoring CI flake en v0.3 sous budget,
 
 ---
 
-*Document maintenu dans le repo `sched75/sealkeeper` sous `docs/prd/L-quality-release.md`.*
+*Document maintenu dans le repo `SCHED75-ORG/SealKeeper` sous `docs/prd/L-quality-release.md`.*

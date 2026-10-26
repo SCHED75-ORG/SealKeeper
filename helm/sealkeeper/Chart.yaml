@@ -9,7 +9,7 @@ appVersion: "0.1.0"
 kubeVersion: ">=1.27.0-0"
 home: https://sealkeeper.eu
 sources:
-  - https://github.com/sched75/SealKeeper
+  - https://github.com/SCHED75-ORG/SealKeeper
 keywords:
   - password
   - security

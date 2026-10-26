@@ -418,4 +418,4 @@ Quatre fonctionnalités sont reportées (Datadog v0.3+, CloudWatch v0.3+, webhoo
 
 ---
 
-*Document maintenu dans le repo `sched75/sealkeeper` sous `docs/prd/F-integrations.md`.*
+*Document maintenu dans le repo `SCHED75-ORG/SealKeeper` sous `docs/prd/F-integrations.md`.*
