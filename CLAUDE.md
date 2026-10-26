@@ -122,7 +122,7 @@ Twelve migrations under `internal/storage/migrations/{postgres,sqlite}/`. Each m
 | GET    | `/`                             | Landing + request form                                     |
 | POST   | `/api/v1/request`               | Issue reveal token, send email (always 202 — FR-B.13). `application/json` only (415 otherwise) and cross-origin browsers refused (403, `sameOriginPOST`) |
 | GET    | `/api/v1/policy`                | Returns default policy. With `?token=X` it **consumes** the token atomically and returns the typed policy. |
-| GET    | `/reveal/{token}`               | Reveal page HTML; the JS bundle does the actual consumption |
+| GET    | `/reveal/{token}`               | Reveal page HTML; the JS bundle does the actual consumption. Token lookups (this + `/api/v1/policy?token=`) share a 60 / 15 min per-IP cap → 429 + `Retry-After` |
 | GET    | `/static/*`                     | JS bundle + assets (origin: `cfg.WebDir`)                  |
 | GET    | `/static/branding/logo`         | Inline logo blob streamed from the branding repo           |
 | GET    | `/__captured_mail`              | In-memory mail viewer (eval + demo only)                   |

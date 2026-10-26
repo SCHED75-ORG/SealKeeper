@@ -26,10 +26,12 @@ import (
 	"fmt"
 	htmltemplate "html/template"
 	"log/slog"
+	"math"
 	"mime"
 	"net"
 	"net/http"
 	"net/netip"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -73,6 +75,12 @@ func pseudonymKey(masterSecret string) []byte {
 // may make per 15 minutes.
 const adminLoginPerIPWindow = 20
 
+// tokenLookupPerIPWindow is the number of reveal-token lookups (GET
+// /reveal/{token} and /api/v1/policy?token=) one client IP may make per 15
+// minutes. Both answer unknown / expired / consumed differently, so they
+// are a token-state oracle; an honest reveal costs two lookups.
+const tokenLookupPerIPWindow = 60
+
 // Server is the HTTP service.
 type Server struct {
 	cfg      config.Config
@@ -111,6 +119,10 @@ type Server struct {
 	// lockout alone lets one IP spray many accounts, and lock them all.
 	loginLimiter *ratelimit.Limiter
 
+	// tokenLimiter caps reveal-token lookups per client IP (see
+	// tokenLookupPerIPWindow).
+	tokenLimiter *ratelimit.Limiter
+
 	// pseudonymKey keys hashShort (derived from the master secret).
 	pseudonymKey []byte
 
@@ -140,7 +152,7 @@ func New(cfg config.Config, logger *slog.Logger) *Server {
 	}, []string{"route"})
 	rateHits := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "sealkeeper_rate_limit_hits_total",
-		Help: "Number of rate-limited POST /api/v1/request hits.",
+		Help: "Number of rate-limited public requests (POST /api/v1/request by email/ip, reveal-token lookups by token_lookup).",
 	}, []string{"dimension"})
 	reg.MustRegister(reqCount, reqDur, rateHits)
 
@@ -181,6 +193,7 @@ func New(cfg config.Config, logger *slog.Logger) *Server {
 		trustedProxies: trusted,
 		pseudonymKey:   pseudonymKey(cfg.MasterSecret),
 		loginLimiter:   ratelimit.New(adminLoginPerIPWindow, 15*time.Minute),
+		tokenLimiter:   ratelimit.New(tokenLookupPerIPWindow, 15*time.Minute),
 		cfg:            cfg,
 		logger:         logger,
 		readyz:         readiness.New(),
@@ -442,7 +455,7 @@ func (s *Server) Run(ctx context.Context) error {
 	// stays in memory for the life of the process.
 	stopJanitors := make(chan struct{})
 	defer close(stopJanitors)
-	for _, l := range []*ratelimit.Limiter{s.limiter.Email, s.limiter.IP, s.loginLimiter} {
+	for _, l := range []*ratelimit.Limiter{s.limiter.Email, s.limiter.IP, s.loginLimiter, s.tokenLimiter} {
 		if l != nil {
 			go l.RunJanitor(stopJanitors, 5*time.Minute)
 		}
@@ -836,7 +849,14 @@ func (s *Server) handlePolicy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"storage_unavailable"}`, http.StatusServiceUnavailable)
 		return
 	}
-	ipHash := s.hashShort(s.clientIP(r))
+	ip := s.clientIP(r)
+	// Before any lookup: a refused fetch must neither probe nor burn a token.
+	if !s.allowTokenLookup(w, ip) {
+		writeJSONError(w, http.StatusTooManyRequests, "rate_limited",
+			"Too many attempts from your network. Try again in a few minutes.")
+		return
+	}
+	ipHash := s.hashShort(ip)
 	uaHash := s.hashShort(r.UserAgent())
 
 	// Resolve the policy BEFORE burning the token: if it can't be resolved
@@ -1069,7 +1089,10 @@ func policyDefaultMap() map[string]any {
 func (s *Server) handleRevealPage(w http.ResponseWriter, r *http.Request) {
 	token := chi.URLParam(r, "token")
 	state := "ready"
-	if s.tokens != nil {
+	status := http.StatusOK
+	if !s.allowTokenLookup(w, s.clientIP(r)) {
+		state, status = "rate_limited", http.StatusTooManyRequests
+	} else if s.tokens != nil {
 		if tok, err := s.tokens.Get(r.Context(), token); err == nil {
 			if tok.ConsumedAt != nil {
 				state = "consumed"
@@ -1085,7 +1108,7 @@ func (s *Server) handleRevealPage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Frame-Options", "DENY")
 	w.Header().Set("Referrer-Policy", "no-referrer")
-	_ = s.revealTpl.Execute(w, map[string]any{
+	data := map[string]any{
 		"CSPNonce":   scriptNonce(w),
 		"Token":      token,
 		"State":      state,
@@ -1093,7 +1116,21 @@ func (s *Server) handleRevealPage(w http.ResponseWriter, r *http.Request) {
 		"EvalBanner": s.cfg.IsEval(),
 		"DemoBanner": s.cfg.IsDemo(),
 		"Branding":   s.resolveBranding(r.Context()),
-	})
+	}
+	w.WriteHeader(status)
+	_ = s.revealTpl.Execute(w, data)
+}
+
+// allowTokenLookup charges one reveal-token lookup to ip and reports
+// whether it is under the cap; when it is not, Retry-After is set.
+func (s *Server) allowTokenLookup(w http.ResponseWriter, ip string) bool {
+	if s.tokenLimiter == nil || s.tokenLimiter.Allow(ip) {
+		return true
+	}
+	s.rateHits.WithLabelValues("token_lookup").Inc()
+	_, _, resetAt := s.tokenLimiter.Inspect(ip)
+	w.Header().Set("Retry-After", strconv.Itoa(max(1, int(math.Ceil(time.Until(resetAt).Seconds())))))
+	return false
 }
 
 func (s *Server) metricsHandler() http.Handler {
@@ -1241,7 +1278,9 @@ const revealHTML = `<!doctype html>
   <h1>{{ .Branding.InstanceName }} <small style="font-weight:400;color:var(--stone);font-family:var(--font-body);font-size:0.95rem">{{ .Version }}</small></h1>
 </header>
 
-{{ if eq .State "expired" }}
+{{ if eq .State "rate_limited" }}
+  <p class="err">Too many attempts from your network. Try again in a few minutes.</p>
+{{ else if eq .State "expired" }}
   <p class="err">This reveal link has expired. Please request a new one.</p>
 {{ else if eq .State "consumed" }}
   <p class="err">This reveal link has already been used. Request a new one if necessary.</p>
