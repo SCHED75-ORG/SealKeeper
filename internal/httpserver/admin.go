@@ -246,8 +246,11 @@ func (s *Server) handleAdminLoginPost(w http.ResponseWriter, r *http.Request) {
 		s.adminLoginError(w, r, "bad_creds")
 		return
 	case errors.Is(err, admin.ErrAccountLocked):
+		// Same slug as a wrong password: unknown emails never lock, so a
+		// distinct "locked" answer would confirm the email is an admin. The
+		// audit log keeps the real reason.
 		s.auditAppend(r.Context(), "admin.login_failed", email, "", map[string]any{"reason": "locked"})
-		s.adminLoginError(w, r, "locked")
+		s.adminLoginError(w, r, "bad_creds")
 		return
 	case errors.Is(err, admin.ErrAccountDisabled):
 		s.auditAppend(r.Context(), "admin.login_failed", email, "", map[string]any{"reason": "disabled"})
@@ -2346,7 +2349,8 @@ const adminLoginTpl = `{{define "login.html"}}{{template "header" .}}
     <code>sealkeeper admin reset-password --email &lt;your-email&gt;</code>
     so you can re-enrol from scratch.
   {{ else if eq .Error "bad_creds" }}
-    Email, password or authenticator code is incorrect.
+    Email, password or authenticator code is incorrect. After repeated
+    failures an account is locked for 15 minutes.
   {{ else if eq .Error "locked" }}
     Too many failed attempts — this account is locked for the next 15 minutes.
   {{ else if eq .Error "rate_limited" }}
