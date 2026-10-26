@@ -34,6 +34,10 @@ var (
 	ErrInvalidName    = errors.New("webauthn: friendly name required")
 	ErrSessionMissing = errors.New("webauthn: no enrollment session")
 	ErrAlreadyExists  = errors.New("webauthn: credential id already registered")
+	// ErrCloneDetected means the assertion was cryptographically valid but
+	// its signature counter did not move forward from the stored value:
+	// the WebAuthn signal (§6.1.1) that the authenticator may be cloned.
+	ErrCloneDetected = errors.New("webauthn: signature counter did not increase, authenticator may be cloned")
 )
 
 // Credential is the row view used by the admin UI.
@@ -287,8 +291,15 @@ func (r *Repo) BeginLogin(ctx context.Context, who AdminIdentity) (options, sess
 
 // FinishLogin validates the assertion response, bumps sign_count +
 // last_used_at on the matching credential, and returns the row that was
-// used. go-webauthn itself rejects sign-count rollbacks (cloned key
-// detection) so we just persist whatever counter the library hands back.
+// used.
+//
+// Clone detection is the relying party's job: go-webauthn only sets
+// Authenticator.CloneWarning when the counter fails to increase (and is
+// not 0 on both sides, as with passkeys that never count) and still
+// returns the credential without error. We refuse such an assertion with
+// ErrCloneDetected and leave the stored counter untouched; the returned
+// Credential then carries only CredentialID and AdminID, for the audit
+// trail.
 func (r *Repo) FinishLogin(ctx context.Context, who AdminIdentity, sessionJSON []byte, req *http.Request) (Credential, error) {
 	if len(sessionJSON) == 0 {
 		return Credential{}, ErrSessionMissing
@@ -306,6 +317,9 @@ func (r *Repo) FinishLogin(ctx context.Context, who AdminIdentity, sessionJSON [
 		return Credential{}, fmt.Errorf("webauthn.FinishLogin: %w", err)
 	}
 	id := base64.RawURLEncoding.EncodeToString(cred.ID)
+	if cred.Authenticator.CloneWarning {
+		return Credential{CredentialID: id, AdminID: who.ID}, ErrCloneDetected
+	}
 	now := r.now().UTC()
 	if _, err := r.db.ExecContext(ctx,
 		rebind(r.db, `UPDATE admin_webauthn_credentials
@@ -465,7 +479,7 @@ func scanCredential(s rowScanner) (Credential, error) {
 		transports     string
 		aaguid         []byte
 		publicKey      []byte
-		lastUsed       sql.NullTime
+		lastUsed       any // SQLite hands TEXT timestamps back as strings
 		created        any
 		signCount      int64
 		userVerified   bool
@@ -489,9 +503,10 @@ func scanCredential(s rowScanner) (Credential, error) {
 	if t, err := toTime(created); err == nil {
 		c.CreatedAt = t
 	}
-	if lastUsed.Valid {
-		t := lastUsed.Time.UTC()
-		c.LastUsedAt = &t
+	if lastUsed != nil {
+		if t, err := toTime(lastUsed); err == nil {
+			c.LastUsedAt = &t
+		}
 	}
 	return c, nil
 }

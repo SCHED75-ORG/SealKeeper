@@ -492,9 +492,11 @@ func (s *Server) handleAdminLoginWebauthnFinish(w http.ResponseWriter, r *http.R
 	cred, err := s.webauthn.FinishLogin(r.Context(), webauthnIdentityFromAdmin(ad), sessionBytes, r)
 	if err != nil {
 		s.logger.Warn("webauthn.FinishLogin failed", "err", err, "admin_id", ad.ID)
-		s.auditAppend(r.Context(), "admin.webauthn_login_failed", ad.Email, "", map[string]any{
-			"reason": err.Error(),
-		})
+		event, details := "admin.webauthn_login_failed", map[string]any{"reason": err.Error()}
+		if errors.Is(err, webauthn.ErrCloneDetected) {
+			event, details["credential_id"] = "admin.webauthn_clone_detected", cred.CredentialID
+		}
+		s.auditAppend(r.Context(), event, ad.Email, "", details)
 		http.Error(w, "assertion failed", http.StatusUnauthorized)
 		return
 	}
