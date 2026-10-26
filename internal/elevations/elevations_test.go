@@ -165,3 +165,72 @@ func TestImportRequiresResolver(t *testing.T) {
 		t.Fatal("Import without resolver must error")
 	}
 }
+
+// TestCreateRefusesMisfiledEmail pins FR-C.39 and FR-C.24: an elevation
+// must belong to its domain row (so the domain's cascade removes it) and
+// an address sits on at most one list across every domain row.
+func TestCreateRefusesMisfiledEmail(t *testing.T) {
+	t.Parallel()
+	er, dr := newRepos(t)
+	ctx := context.Background()
+	corp, _ := dr.Create(ctx, "corp.test", "", true, nil)
+	other, _ := dr.Create(ctx, "other.test", "", true, nil)
+	wild, _ := dr.Create(ctx, "*.corp.test", "", true, nil)
+
+	if _, err := er.Create(ctx, other.ID, "alice@corp.test", elevations.LevelB3, "", nil); !errors.Is(err, elevations.ErrDomainMismatch) {
+		t.Fatalf("cross-domain Create: err = %v, want ErrDomainMismatch", err)
+	}
+	if _, err := er.Create(ctx, wild.ID, "alice@corp.test", elevations.LevelB3, "", nil); !errors.Is(err, elevations.ErrDomainMismatch) {
+		t.Fatalf("wildcard must not cover the bare domain: err = %v", err)
+	}
+	if _, err := er.Create(ctx, corp.ID, "not-an-email", elevations.LevelB2, "", nil); !errors.Is(err, elevations.ErrInvalidEmail) {
+		t.Fatalf("malformed email: err = %v, want ErrInvalidEmail", err)
+	}
+	if _, err := er.Create(ctx, corp.ID, "Bob <bob@corp.test>", elevations.LevelB2, "", nil); !errors.Is(err, elevations.ErrInvalidEmail) {
+		t.Fatalf("display-name email: err = %v, want ErrInvalidEmail", err)
+	}
+	if _, err := er.Create(ctx, wild.ID, "dev@paris.corp.test", elevations.LevelB2, "", nil); err != nil {
+		t.Fatalf("wildcard descendant: %v", err)
+	}
+	if _, err := er.Create(ctx, corp.ID, " Alice@Corp.test ", elevations.LevelB2, "", nil); err != nil {
+		t.Fatalf("legit Create: %v", err)
+	}
+
+	// Same address on a second list via another covering row: refused.
+	paris, _ := dr.Create(ctx, "paris.corp.test", "", true, nil)
+	if _, err := er.Create(ctx, paris.ID, "dev@paris.corp.test", elevations.LevelB3, "", nil); !errors.Is(err, elevations.ErrAlreadyExists) {
+		t.Fatalf("second list for same email: err = %v, want ErrAlreadyExists", err)
+	}
+
+	if lvl, err := er.LookupEmail(ctx, "alice@corp.test"); err != nil || lvl != elevations.LevelB2 {
+		t.Fatalf("LookupEmail = %s, %v; want B2", lvl, err)
+	}
+	if err := dr.Delete(ctx, corp.ID); err != nil {
+		t.Fatal(err)
+	}
+	if lvl, err := er.LookupEmail(ctx, "alice@corp.test"); !errors.Is(err, elevations.ErrNotFound) {
+		t.Fatalf("after domain delete LookupEmail = %s, %v; want ErrNotFound", lvl, err)
+	}
+}
+
+func TestImportRefusesMisfiledEmail(t *testing.T) {
+	t.Parallel()
+	er, dr := newRepos(t)
+	ctx := context.Background()
+	_, _ = dr.Create(ctx, "corp.test", "", true, nil)
+	_, _ = dr.Create(ctx, "other.test", "", true, nil)
+	resolver := func(ctx context.Context, name string) (int64, error) {
+		row, err := dr.GetByName(ctx, name)
+		return row.ID, err
+	}
+	csv := "other.test,alice@corp.test,B3,\n" + // -> error (wrong domain)
+		"corp.test,alice@corp.test,B2,\n" + // -> Created
+		"corp.test,nope,B2,\n" // -> error (invalid email)
+	sum, err := er.Import(ctx, strings.NewReader(csv), resolver, nil)
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if sum.Created != 1 || len(sum.Errors) != 2 {
+		t.Fatalf("summary = %+v, want 1 created, 2 errors", sum)
+	}
+}

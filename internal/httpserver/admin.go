@@ -1253,6 +1253,12 @@ func (s *Server) handleAdminElevationAdd(w http.ResponseWriter, r *http.Request)
 	case errors.Is(err, elevations.ErrInvalidLevel):
 		http.Redirect(w, r, "/admin/elevations?err=invalid_level", http.StatusSeeOther)
 		return
+	case errors.Is(err, elevations.ErrInvalidEmail):
+		http.Redirect(w, r, "/admin/elevations?err=invalid_email", http.StatusSeeOther)
+		return
+	case errors.Is(err, elevations.ErrDomainMismatch):
+		http.Redirect(w, r, "/admin/elevations?err=domain_mismatch", http.StatusSeeOther)
+		return
 	case errors.Is(err, elevations.ErrAlreadyExists):
 		http.Redirect(w, r, "/admin/elevations?err=duplicate", http.StatusSeeOther)
 		return
@@ -2895,7 +2901,7 @@ const adminElevationsTpl = `{{define "elevations.html"}}{{template "header" .}}
 <h2>Elevations</h2>
 {{ if .Error }}<div class="err">{{ .Error }}{{ if .Details }} — <code>{{ .Details }}</code>{{ end }}</div>{{ end }}
 {{ if .OK }}<div style="background:#dcfce7;color:#166534;padding:0.5rem 1rem;border-radius:4px;margin-bottom:1rem">{{ .OK }}{{ if eq .OK "imported" }} — created <strong>{{ .ImportCreated }}</strong>, skipped <strong>{{ .ImportSkipped }}</strong>, errors <strong>{{ .ImportErrors }}</strong>{{ if .Details }}<br><small>{{ .Details }}</small>{{ end }}{{ end }}</div>{{ end }}
-<p>Elevations bind a specific email to the B2 or B3 policy of its domain (FR-C.38..46). An email can be in at most one list per domain.</p>
+<p>Elevations bind a specific email to the B2 or B3 policy of its domain (FR-C.38..46). The email must belong to the chosen domain, and an email can be in at most one of the two lists.</p>
 
 <table data-testid="elevations-table"><thead><tr><th>Domain</th><th>Email</th><th>Level</th><th>Reason</th><th>Added</th><th>Last used</th><th></th></tr></thead><tbody>
 {{ range .Items }}<tr>
