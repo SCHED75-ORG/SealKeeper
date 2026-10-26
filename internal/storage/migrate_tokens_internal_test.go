@@ -10,10 +10,10 @@ import (
 	"github.com/sched75/sealkeeper/internal/storage/storagetest"
 )
 
-// Regression (revealtokens): rows written before 0017 carried the raw
+// Regression (revealtokens): rows written before 0016 carried the raw
 // reveal token. The upgrade must not leave one behind, on either dialect,
 // and the lookup column must hold digests from then on.
-func TestMigration0017DropsClearRevealTokens(t *testing.T) {
+func TestMigration0016DropsClearRevealTokens(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), storagetest.SetupTimeout)
 	defer cancel()
@@ -53,9 +53,9 @@ func TestMigration0017DropsClearRevealTokens(t *testing.T) {
 		t.Fatal(err)
 	}
 	if n != 0 {
-		t.Fatalf("%d pre-0017 request_tokens rows survived the upgrade", n)
+		t.Fatalf("%d pre-0016 request_tokens rows survived the upgrade", n)
 	}
 	if _, err := s.db.ExecContext(ctx, `SELECT token_hash FROM request_tokens`); err != nil {
-		t.Fatalf("token_hash column missing after 0017: %v", err)
+		t.Fatalf("token_hash column missing after 0016: %v", err)
 	}
 }

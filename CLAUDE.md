@@ -103,7 +103,7 @@ Migrations live under `internal/storage/migrations/{postgres,sqlite}/`. Each mig
 | 0013 | *(`admins.totp_last_step`)*         | Last accepted TOTP time-step: a code is single-use within its window |
 | 0014 | `audit_head`                        | HMAC-sealed head anchor of the audit chain (single row, CHECK id=1); `legacy_until` cut-over |
 | 0015 | *(`integrations.config_enc`)*       | Sink credentials sealed with cryptobox; legacy clear rows sealed at boot by `SealLegacyConfigs` |
-| 0017 | *(`request_tokens.token` → `token_hash`)* | Reveal tokens stored as `sha256("sealkeeper-reveal-token:"+token)` only; pending rows dropped on upgrade (live links invalidated) |
+| 0016 | *(`request_tokens.token` → `token_hash`)* | Reveal tokens stored as `sha256("sealkeeper-reveal-token:"+token)` only; pending rows dropped on upgrade (live links invalidated) |
 
 **Single-row tables (`branding`, `smtp_config`, `audit_head`)** use `CHECK (id = 1)`. The `branding` / `smtp_config` repos' `Get` auto-bootstraps the row on first call so the public surface never errors on a missing row; `audit_head` is seeded by its migration.
 
