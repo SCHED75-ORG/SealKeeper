@@ -576,6 +576,8 @@ func (s *Server) handleAdminSetupGet(w http.ResponseWriter, r *http.Request) {
 		"RecoveryCodes":       codes,
 		"SetupBlob":           blob,
 		"CSRF":                s.requireSessionCSRF(r),
+		"Error":               querySlug(r, "err"),
+		"Why":                 admin.DescribePasswordWeakness(r.URL.Query().Get("why")),
 	})
 }
 
@@ -622,7 +624,7 @@ func (s *Server) handleAdminSetupPost(w http.ResponseWriter, r *http.Request) {
 		}
 		if err := s.adminRepo.ChangePassword(r.Context(), a.ID, np); err != nil {
 			if errors.Is(err, admin.ErrPasswordTooWeak) {
-				s.adminSetupError(w, r, "password_too_weak")
+				s.adminSetupError(w, r, "password_too_weak&why="+url.QueryEscape(admin.PasswordWeaknessCodes(err)))
 				return
 			}
 			s.logger.Error("ChangePassword failed", "err", err)
@@ -2373,12 +2375,13 @@ const adminLoginTpl = `{{define "login.html"}}{{template "header" .}}
 const adminSetupTpl = `{{define "setup.html"}}{{template "header" .}}
 <main>
 <h2>Account setup required</h2>
+{{ if .Error }}<div class="err">{{ .Error }}{{ if .Why }} — {{ .Why }}{{ end }}</div>{{ end }}
 <p>Before you can use the console you must {{ if .NeedsPasswordChange }}change the bootstrap password{{ end }}{{ if and .NeedsPasswordChange .NeedsTOTP }} and {{ end }}{{ if .NeedsTOTP }}enrol an authenticator{{ end }}.</p>
 <form method="POST" action="/admin/setup">
   <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
   {{ if .NeedsPasswordChange }}
   <fieldset><legend>New password</legend>
-    <label for="np">New password (ANSSI B3 — ≥ 16 chars, mixing 3 of lower/upper/digit/symbol)</label>
+    <label for="np">New password (ANSSI B3 — ≥ 16 chars, mixing 3 of lower/upper/digit/symbol, ≥ 100 bits once words, names, years and keyboard patterns are discounted)</label>
     <input id="np" name="new_password" type="password" minlength="16" required autocomplete="new-password">
 
     <div id="pw-meter" data-testid="password-entropy"
@@ -2454,7 +2457,7 @@ const adminSetupTpl = `{{define "setup.html"}}{{template "header" .}}
     if (bits >= 100) { level = '✓ B3'; tone = '#2A6F4F'; }
     else if (bits >= 80) { level = '✓ B2'; tone = '#7A1F2B'; }
     else if (bits >= 50) { level = '✓ B1'; tone = '#C9A961'; }
-    var hint = 'Server requires ANSSI B3 (≥ 16 chars + 3 classes).';
+    var hint = 'Upper bound only: the server also discounts words, names, years and keyboard patterns before applying B3 (≥ 100 bits).';
     if (s.length < 16) hint = 'Server requires ≥ 16 characters (you have ' + s.length + ').';
     else if (classes < 3) hint = 'Server requires 3 of lower / upper / digit / symbol (you have ' + classes + ').';
     return { bits: bits, classes: classes, level: level, tone: tone, hint: hint };
@@ -3205,6 +3208,7 @@ func (s *Server) handleAdminAccount(w http.ResponseWriter, r *http.Request) {
 		"CSRF":       sess.CSRFToken,
 		"OK":         querySlug(r, "ok"),
 		"Error":      querySlug(r, "err"),
+		"Why":        admin.DescribePasswordWeakness(r.URL.Query().Get("why")),
 	})
 }
 
@@ -3259,7 +3263,7 @@ func (s *Server) handleAdminAccountPasswordChange(w http.ResponseWriter, r *http
 	if err := s.adminRepo.ChangePassword(r.Context(), a.ID, np); err != nil {
 		if errors.Is(err, admin.ErrPasswordTooWeak) {
 			http.Redirect(w, r,
-				"/admin/account?err=password_too_weak&details="+url.QueryEscape(err.Error()),
+				"/admin/account?err=password_too_weak&why="+url.QueryEscape(admin.PasswordWeaknessCodes(err)),
 				http.StatusSeeOther)
 			return
 		}
@@ -3889,7 +3893,7 @@ const adminLoginWebauthnTpl = `{{define "login_webauthn.html"}}{{template "heade
 const adminAccountTpl = `{{define "account.html"}}{{template "header" .}}
 <main>
 <h2>My account</h2>
-{{ if .Error }}<div class="err">{{ .Error }}</div>{{ end }}
+{{ if .Error }}<div class="err">{{ .Error }}{{ if .Why }} — {{ .Why }}{{ end }}</div>{{ end }}
 {{ if .OK }}<div style="background:#dcfce7;color:#166534;padding:0.5rem 1rem;border-radius:4px;margin-bottom:1rem">{{ .OK }}</div>{{ end }}
 <p>Signed in as <strong>{{ .Admin.Email }}</strong>.</p>
 
@@ -3908,7 +3912,7 @@ const adminAccountTpl = `{{define "account.html"}}{{template "header" .}}
   <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
   <label for="cp-password">Current password</label>
   <input id="cp-password" name="current_password" type="password" required autocomplete="current-password">
-  <label for="np">New password (ANSSI B3 — ≥ 16 chars, mixing 3 of lower/upper/digit/symbol)</label>
+  <label for="np">New password (ANSSI B3 — ≥ 16 chars, mixing 3 of lower/upper/digit/symbol, ≥ 100 bits once words, names, years and keyboard patterns are discounted)</label>
   <input id="np" name="new_password" type="password" minlength="16" required autocomplete="new-password">
   <label for="np2">Confirm new password</label>
   <input id="np2" name="new_password_confirm" type="password" minlength="16" required autocomplete="new-password">

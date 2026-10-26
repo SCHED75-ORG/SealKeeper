@@ -13,6 +13,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -168,7 +169,7 @@ func runServe(args []string) int {
 		logger.Error("cryptobox init failed", "err", err)
 		return 1
 	}
-	adminRepo := admin.NewRepo(store.DB(), box)
+	adminRepo := admin.NewRepo(store.DB(), box).WithPasswordContext(cfg.InstanceDomain)
 	if err := bootstrapAdminIfNeeded(ctx, adminRepo, logger, cfg.IsEval()); err != nil {
 		logger.Error("admin bootstrap failed", "err", err)
 		return 1
@@ -499,7 +500,7 @@ func openAdminRepo(ctx context.Context) (*admin.Repo, func(), error) {
 		cleanup()
 		return nil, func() {}, fmt.Errorf("cryptobox: %w", err)
 	}
-	return admin.NewRepo(store.DB(), box), cleanup, nil
+	return admin.NewRepo(store.DB(), box).WithPasswordContext(cfg.InstanceDomain), cleanup, nil
 }
 
 func runAdminResetPassword(args []string) int {
@@ -588,16 +589,32 @@ func runAdminList(args []string) int {
 	return 0
 }
 
+// randomPassword draws n characters uniformly from a 66-glyph alphabet
+// and redraws until the result clears admin.ValidateAdminPassword, so a
+// generated password always satisfies the operator policy (a draw can
+// miss a character class, or happen to spell a pattern).
 func randomPassword(n int) (string, error) {
 	const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789!@#$%&*+=?"
-	b := make([]byte, n)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
+	// Bytes at or above limit are rejected so every glyph is equally likely.
+	const limit = 256 - 256%len(alphabet)
+	for attempt := 0; attempt < 100; attempt++ {
+		out := make([]byte, 0, n)
+		buf := make([]byte, n)
+		for len(out) < n {
+			if _, err := rand.Read(buf); err != nil {
+				return "", err
+			}
+			for _, x := range buf {
+				if int(x) < limit && len(out) < n {
+					out = append(out, alphabet[int(x)%len(alphabet)])
+				}
+			}
+		}
+		if admin.ValidateAdminPassword(string(out)) == nil {
+			return string(out), nil
+		}
 	}
-	for i, x := range b {
-		b[i] = alphabet[int(x)%len(alphabet)]
-	}
-	return string(b), nil
+	return "", errors.New("randomPassword: no draw cleared the password policy")
 }
 
 func buildLogger(cfg config.Config) *slog.Logger {

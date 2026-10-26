@@ -5,8 +5,8 @@
 package admin
 
 import (
-	"crypto/hmac"
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
@@ -90,6 +90,9 @@ type Repo struct {
 	db  *sql.DB
 	box *cryptobox.Box
 	now func() time.Time
+	// pwContext lists instance-level strings (domain, instance name) the
+	// password strength check treats as attacker-known.
+	pwContext []string
 }
 
 // NewRepo binds a Repo. The cryptobox is required.
@@ -107,6 +110,28 @@ func (r *Repo) WithClock(now func() time.Time) *Repo {
 	c := *r
 	c.now = now
 	return &c
+}
+
+// WithPasswordContext returns a copy of the repo whose password strength
+// check also refuses passwords built from words (instance domain,
+// instance name) an attacker can be assumed to know. The admin's own
+// email is always part of that context.
+func (r *Repo) WithPasswordContext(words ...string) *Repo {
+	c := *r
+	c.pwContext = append([]string(nil), words...)
+	return &c
+}
+
+// validateNewPassword runs ValidateAdminPassword with the admin's email
+// and the instance context.
+func (r *Repo) validateNewPassword(ctx context.Context, adminID int64, newPassword string) error {
+	inputs := append([]string(nil), r.pwContext...)
+	if row, err := r.loadByID(ctx, adminID); err == nil {
+		inputs = append(inputs, row.Email)
+	} else if !errors.Is(err, ErrNotFound) {
+		return err
+	}
+	return ValidateAdminPassword(newPassword, inputs...)
 }
 
 // ----- account lifecycle ----------------------------------------------------
@@ -443,7 +468,7 @@ var dummyBcryptHash = sync.OnceValue(func() []byte {
 // The caller is responsible for surfacing the new plaintext password
 // out-of-band; this method never logs it.
 func (r *Repo) ResetForBootstrap(ctx context.Context, adminID int64, newPassword string) error {
-	if err := ValidateAdminPassword(newPassword); err != nil {
+	if err := r.validateNewPassword(ctx, adminID, newPassword); err != nil {
 		return err
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
@@ -478,7 +503,7 @@ func (r *Repo) ResetForBootstrap(ctx context.Context, adminID int64, newPassword
 // ChangePassword updates the password hash and clears force_password_change.
 // Rejects candidates below the ANSSI B3 floor (see password.go).
 func (r *Repo) ChangePassword(ctx context.Context, adminID int64, newPassword string) error {
-	if err := ValidateAdminPassword(newPassword); err != nil {
+	if err := r.validateNewPassword(ctx, adminID, newPassword); err != nil {
 		return err
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
