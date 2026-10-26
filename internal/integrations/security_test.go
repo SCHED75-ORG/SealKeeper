@@ -431,6 +431,55 @@ func TestTestSinkErrorCarriesStatusOnly(t *testing.T) {
 	}
 }
 
+// Regression: a transport failure surfaced Go's *url.Error text, which holds
+// the whole request URL. Webhook paths and query strings carry secrets
+// (Slack/Teams hooks, ?token=), and the error reaches the audit log, every
+// other sink and the admin redirect, so only scheme + host may remain.
+func TestTestSinkTransportErrorRedactsURL(t *testing.T) {
+	t.Parallel()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	closedAddr := ln.Addr().String()
+	_ = ln.Close()
+	// A plain-http listener reached over https fails the TLS handshake.
+	plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(plain.Close)
+
+	const path = "/services/T000/B000/XXXXSECRETXXXX?token=hec-abc123"
+	cases := []struct {
+		name, base string
+	}{
+		{"connection refused", "http://" + closedAddr},
+		{"tls failure", "https://" + plain.Listener.Addr().String()},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			row := integrations.Integration{
+				Name: "leaky", Kind: integrations.KindWebhook,
+				ConfigJSON: json.RawMessage(`{"url":"` + c.base + path + `"}`),
+			}
+			err := integrations.TestSink(context.Background(), row, "sealkeeper.test", integrations.TestPolicy)
+			if err == nil {
+				t.Fatal("TestSink succeeded, want a transport error")
+			}
+			msg := err.Error()
+			for _, secret := range []string{"XXXXSECRETXXXX", "hec-abc123", "/services"} {
+				if strings.Contains(msg, secret) {
+					t.Fatalf("err = %q leaks %q from the sink URL", msg, secret)
+				}
+			}
+			if !strings.Contains(msg, "127.0.0.1") {
+				t.Errorf("err = %q, want the sink host kept for diagnosis", msg)
+			}
+		})
+	}
+}
+
 // Regression (SK-22): Sentinel workspace_id was spliced into the hostname,
 // so "attacker.host/x?" sent the signed request elsewhere.
 func TestSentinelWorkspaceIDMustBeGUID(t *testing.T) {
