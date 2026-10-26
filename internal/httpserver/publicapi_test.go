@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/sched75/sealkeeper/internal/tokens"
+	"github.com/sched75/sealkeeper/internal/version"
 )
 
 func countTokens(t *testing.T, db *sql.DB) int {
@@ -134,5 +135,27 @@ func TestTokenLookupsAreRateLimitedPerIP(t *testing.T) {
 	}
 	if w := get("/api/v1/policy", attacker); w.Code != http.StatusOK {
 		t.Fatalf("token-less policy: status=%d, want 200", w.Code)
+	}
+}
+
+// Regression: the landing and reveal pages printed the exact build version
+// to anonymous visitors (fingerprinting for targeted exploits, FR-E.26).
+// Not parallel: it swaps the package-level version string.
+func TestPublicPagesDoNotExposeVersion(t *testing.T) {
+	prev := version.Version
+	version.Version = "v9.8.7-sentinel"
+	defer func() { version.Version = prev }()
+
+	s := newClientIPServer(t)
+	h := s.Router()
+	for _, path := range []string{"/", "/reveal/whatever"} {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, path, nil))
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s: status=%d", path, w.Code)
+		}
+		if strings.Contains(w.Body.String(), version.Version) {
+			t.Fatalf("%s exposes the build version", path)
+		}
 	}
 }

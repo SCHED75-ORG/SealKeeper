@@ -511,7 +511,6 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	if err := s.landingTpl.Execute(w, map[string]any{
 		"CSPNonce":   scriptNonce(w),
 		"Branding":   b,
-		"Version":    version.Version,
 		"EvalBanner": s.cfg.IsEval(),
 		"DemoBanner": s.cfg.IsDemo(),
 	}); err != nil {
@@ -1112,7 +1111,6 @@ func (s *Server) handleRevealPage(w http.ResponseWriter, r *http.Request) {
 		"CSPNonce":   scriptNonce(w),
 		"Token":      token,
 		"State":      state,
-		"Version":    version.Version,
 		"EvalBanner": s.cfg.IsEval(),
 		"DemoBanner": s.cfg.IsDemo(),
 		"Branding":   s.resolveBranding(r.Context()),
@@ -1275,7 +1273,7 @@ const revealHTML = `<!doctype html>
 {{ if .DemoBanner }}<div class="banner demo" data-testid="demo-banner">⚠ Public demo — all data is public and purged daily</div>{{ end }}
 <header>
   {{ if .Branding.HasLogo }}<img src="/static/branding/logo" alt="{{ .Branding.InstanceName }} logo">{{ end }}
-  <h1>{{ .Branding.InstanceName }} <small style="font-weight:400;color:var(--stone);font-family:var(--font-body);font-size:0.95rem">{{ .Version }}</small></h1>
+  <h1>{{ .Branding.InstanceName }}</h1>
 </header>
 
 {{ if eq .State "rate_limited" }}
@@ -1396,7 +1394,7 @@ const landingHTML = `<!doctype html>
 <main>
   <header>
     {{ if .Branding.HasLogo }}<img src="/static/branding/logo" alt="{{ .Branding.InstanceName }} logo">{{ end }}
-    <h1>{{ .Branding.InstanceName }} <small style="font-weight:400;color:var(--stone);font-family:var(--font-body);font-size:0.95rem">{{ .Version }}</small></h1>
+    <h1>{{ .Branding.InstanceName }}</h1>
   </header>
   <p>Request a password by emailing yourself a one-shot reveal link.</p>
   <form id="request-form" method="POST" action="/api/v1/request">
