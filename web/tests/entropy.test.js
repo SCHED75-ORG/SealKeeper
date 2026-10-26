@@ -6,6 +6,8 @@ import { anssiLevel, calculateEntropy } from "../src/entropy.js";
 const library = (n, prefix) => Array.from({ length: n }, (_, i) => `${prefix}${i}`);
 const CORPUS_5000 = library(5000, "citation ");
 const DICT_7776 = library(7776, "word");
+// Multi-word, capitalised, accented: every transform has something to act on.
+const ACCENTED = library(500, "Été numéro ");
 
 describe("calculateEntropy", () => {
   it("anssiLevel maps thresholds correctly", () => {
@@ -33,20 +35,27 @@ describe("calculateEntropy", () => {
     expect(r.anssiLevels.B1).toBe(false); // baseline alone is below B1
   });
 
-  it("G1 with all transforms active reaches B1", () => {
+  it("G1 with symbol insertion and hash suffix reaches B1", () => {
     const r = calculateEntropy({
       generator: "G1",
       parameters: {
         library: CORPUS_5000,
-        transforms: ["T01", "T02", "T03", "T04", "T05", "T06", "T07", "T08", "T09"].map((code) => ({
-          code,
-          active: true,
-          mode: "random",
-        })),
+        transforms: ["T08", "T09"].map((code) => ({ code, active: true, mode: "random" })),
       },
     });
     expect(r.expectedBits).toBeGreaterThanOrEqual(50);
     expect(r.anssiLevels.B1).toBe(true);
+  });
+
+  it("G1 composition: all transforms together earn less than their solo credits", () => {
+    const codes = ["T01", "T02", "T03", "T04", "T05", "T06", "T07", "T08", "T09"];
+    const tr = (code) => ({ code, active: true, mode: "random" });
+    const bits = (transforms) =>
+      calculateEntropy({ generator: "G1", parameters: { library: ACCENTED, transforms } })
+        .expectedBits;
+    const base = bits([]);
+    const solo = codes.reduce((acc, code) => acc + (bits([tr(code)]) - base), 0);
+    expect(bits(codes.map(tr)) - base).toBeLessThan(solo);
   });
 
   it("G2 default policy (6 words × 7776) reaches B2", () => {
@@ -76,14 +85,33 @@ describe("calculateEntropy", () => {
     expect(withDet.expectedBits).toBeCloseTo(without.expectedBits, 1);
   });
 
-  it("transform bits cover the catalogue", () => {
+  it("transform bits cover the catalogue on G1", () => {
     const codes = ["T01", "T02", "T03", "T04", "T05", "T06", "T07", "T08", "T09"];
     for (const code of codes) {
+      const r = calculateEntropy({
+        generator: "G1",
+        parameters: { library: ACCENTED, transforms: [{ code, active: true, mode: "random" }] },
+      });
+      expect(r.breakdown.map((b) => b.component)).toContain(`transform-${code}`);
+    }
+  });
+
+  it("G2 never credits transforms (generateG2 does not apply them)", () => {
+    const plain = calculateEntropy({ generator: "G2", parameters: { library: DICT_7776 } });
+    for (const code of ["T01", "T03", "T08", "T09"]) {
       const r = calculateEntropy({
         generator: "G2",
         parameters: { library: DICT_7776, transforms: [{ code, active: true, mode: "random" }] },
       });
-      expect(r.expectedBits).toBeGreaterThan(80); // G2 baseline already ≥ 80
+      expect(r.expectedBits).toBe(plain.expectedBits);
     }
+  });
+
+  it("G1 separator is not credited when it never shows up", () => {
+    const r = calculateEntropy({
+      generator: "G1",
+      parameters: { library: ["unmot", "autre"], numericGroups: [] },
+    });
+    expect(r.breakdown.map((b) => b.component)).not.toContain("separator");
   });
 });

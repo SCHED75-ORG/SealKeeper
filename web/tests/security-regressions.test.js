@@ -7,11 +7,20 @@
 // =============================================================================
 
 import { describe, expect, it } from "vitest";
-import { calculateEntropy, descriptorFromPolicy, generate, LibraryNotFound } from "../src/index.js";
+import {
+  calculateEntropy,
+  descriptorFromPolicy,
+  generate,
+  InvalidPolicyDescriptor,
+  LibraryNotFound,
+} from "../src/index.js";
+import { generateG2 } from "../src/generators/g2.js";
 import { SAMPLE_DICTIONARY_FR } from "../src/data/sample-dictionary.js";
 
 const L10 = Math.log2(10);
-const round1 = (n) => Math.round(n * 10) / 10;
+// Reports round DOWN to 0.1 bit so a badge never crosses a threshold upward.
+const round1 = (n) => Math.floor(n * 10 + 1e-9) / 10;
+const words = (n) => Array.from({ length: n }, (_, i) => `w${i}`);
 
 describe("js-generation#1 — no silent fallback to the bundled sample", () => {
   it("rejects an admin G2 policy with only numberOfWords", async () => {
@@ -84,21 +93,154 @@ describe("js-generation#4 — duplicate library entries do not inflate entropy",
     expect(r.expectedBits).toBe(round1(L10 + 4 * L10));
   });
 
-  it("draws uniformly over unique entries so log2(unique) is exact", async () => {
+  it("draws uniformly over unique entries so log2(unique) is exact", () => {
+    const policy = {
+      generator: "G2",
+      parameters: { numberOfWords: 1, separatorOptions: ["-"], numericGroups: [] },
+    };
     let b = 0;
     const N = 4000;
-    const proposals = await generate({
-      generator: "G2",
-      proposalCount: N,
-      parameters: {
-        library: ["a", "a", "a", "b"],
-        numberOfWords: 1,
-        separatorOptions: ["-"],
-        numericGroups: [{ digitsCount: 1 }],
-      },
-    });
-    for (const x of proposals) if (x.password.split("-")[0] === "b") b++;
+    for (let i = 0; i < N; i++) if (generateG2(policy, ["a", "a", "a", "b"]) === "b") b++;
     expect(b / N).toBeGreaterThan(0.44);
     expect(b / N).toBeLessThan(0.56);
+  });
+});
+
+describe("js-generation#2 — no credit for parameters the generator ignores", () => {
+  const lib = words(7776);
+
+  it("G2 credits exactly the digits it emits", async () => {
+    const policy = {
+      generator: "G2",
+      proposalCount: 20,
+      parameters: {
+        library: lib,
+        numberOfWords: 4,
+        separatorOptions: [","],
+        numericGroups: [{ digitsCount: 2 }, { digitsCount: 8 }, { digitsCount: 8 }],
+      },
+    };
+    const r = calculateEntropy(policy);
+    const emitted = (await generate(policy)).map((p) => p.password.split(",").pop());
+    const digits = emitted[0].length;
+    for (const d of emitted) expect(d).toMatch(/^\d+$/);
+    expect(r.expectedBits).toBe(round1(4 * Math.log2(7776) + digits * L10));
+    expect(r.anssiLevels.B3).toBe(false);
+  });
+
+  it("G2 does not credit transforms it never applies", () => {
+    const base = { library: lib, numberOfWords: 4 };
+    const plain = calculateEntropy({ generator: "G2", parameters: base });
+    const withT = calculateEntropy({
+      generator: "G2",
+      parameters: {
+        ...base,
+        transforms: ["T09", "T03", "T01"].map((code) => ({ code, active: true, mode: "random" })),
+      },
+    });
+    expect(withT.expectedBits).toBe(plain.expectedBits);
+  });
+
+  it("G3 rejects an alphabetSize the generator does not draw from", async () => {
+    const policy = { generator: "G3", parameters: { length: 16, alphabetSize: 94 } };
+    expect(() => calculateEntropy(policy)).toThrow(InvalidPolicyDescriptor);
+    await expect(generate(policy)).rejects.toThrow(InvalidPolicyDescriptor);
+    // Declaring the real size stays accepted.
+    expect(
+      calculateEntropy({ generator: "G3", parameters: { length: 16, alphabetSize: 62 } })
+        .expectedBits,
+    ).toBe(round1(16 * Math.log2(62)));
+  });
+
+  it("G3 excludeAmbiguous is computed over the 57-character alphabet", () => {
+    const r = calculateEntropy({
+      generator: "G3",
+      parameters: { length: 17, excludeAmbiguous: true },
+    });
+    expect(r.expectedBits).toBe(round1(17 * Math.log2(57)));
+    expect(r.anssiLevels.B3).toBe(false);
+  });
+});
+
+describe("js-generation#3 — nonsensical parameters are rejected, not defaulted", () => {
+  const lib = words(16);
+  const bad = [
+    ["G3 length 0", { generator: "G3", parameters: { length: 0 } }],
+    ["G3 length '4'", { generator: "G3", parameters: { length: "4" } }],
+    ["G3 length -3", { generator: "G3", parameters: { length: -3 } }],
+    ["G3 excludeAmbiguous 'false'", { generator: "G3", parameters: { excludeAmbiguous: "false" } }],
+    ["G2 numberOfWords 0", { generator: "G2", parameters: { library: lib, numberOfWords: 0 } }],
+    ["G2 numberOfWords '1'", { generator: "G2", parameters: { library: lib, numberOfWords: "1" } }],
+    ["G2 numberOfWords 2.5", { generator: "G2", parameters: { library: lib, numberOfWords: 2.5 } }],
+    [
+      "G2 digitsCount '4'",
+      { generator: "G2", parameters: { library: lib, numericGroups: [{ digitsCount: "4" }] } },
+    ],
+    [
+      "G2 empty separators",
+      { generator: "G2", parameters: { library: lib, separatorOptions: [] } },
+    ],
+    ["G2 non-string entry", { generator: "G2", parameters: { library: ["a", 3] } }],
+    ["proposalCount 0", { generator: "G3", proposalCount: 0 }],
+  ];
+  for (const [name, policy] of bad) {
+    it(`rejects ${name}`, async () => {
+      expect(() => calculateEntropy(policy)).toThrow(InvalidPolicyDescriptor);
+      await expect(generate(policy)).rejects.toThrow(InvalidPolicyDescriptor);
+    });
+  }
+});
+
+describe("js-generation#4 — transform credits follow their parameters and composition", () => {
+  const citations = ["Je pense donc je suis", "Le coeur a ses raisons", "Rien ne sert de courir"];
+  const t = (code, parameters) => ({ code, active: true, mode: "random", parameters });
+
+  it("one fixed citation with weak transforms is not badged B1 (audit F4)", async () => {
+    const policy = {
+      generator: "G1",
+      proposalCount: 3,
+      parameters: {
+        library: ["Je pense donc je suis"],
+        separatorOptions: ["-"],
+        numericGroups: [],
+        transforms: [
+          t("T08", { symbols: ["!"] }),
+          t("T09", { length: 1 }),
+          t("T02", { probability: 1e-6, expectedSubstitutionsHint: 60 }),
+        ],
+      },
+    };
+    const r = calculateEntropy(policy);
+    expect(r.expectedBits).toBeLessThan(5);
+    for (const p of await generate(policy)) expect(p.anssiLevel).toBeNull();
+  });
+
+  it("T08 credits log2 of its symbol list", () => {
+    const r = calculateEntropy({
+      generator: "G1",
+      parameters: { library: citations, transforms: [t("T08", { symbols: ["!", "?"] })] },
+    });
+    expect(r.breakdown.find((b) => b.component === "transform-T08").bits).toBe(1);
+  });
+
+  it("T09 credits 4 bits per hex char, capped by its 32-bit nonce", () => {
+    const bits = (length) =>
+      calculateEntropy({
+        generator: "G1",
+        parameters: { library: citations, transforms: [t("T09", { length })] },
+      }).breakdown.find((b) => b.component === "transform-T09").bits;
+    expect(bits(2)).toBe(8);
+    expect(bits(20)).toBe(32);
+  });
+
+  it("T08 earns nothing once an earlier camelCase T01 may have removed the spaces", () => {
+    const r = calculateEntropy({
+      generator: "G1",
+      parameters: {
+        library: citations,
+        transforms: [t("T01", { candidates: ["camelCase", "lowercase"] }), t("T08")],
+      },
+    });
+    expect(r.breakdown.find((b) => b.component === "transform-T08")).toBeUndefined();
   });
 });

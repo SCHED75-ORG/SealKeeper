@@ -10,15 +10,8 @@
 // =============================================================================
 
 import { cryptoRandomChoice, cryptoRandomInt } from "../crypto.js";
-import { uniqueLibrary } from "../library.js";
+import { normalizeG1 } from "../params.js";
 import { applyTransforms } from "../transforms.js";
-
-const DEFAULT_SEPARATORS = ["-", "_", ".", "/", "+", ":", "|", ";", ",", "~"];
-const DEFAULT_POSITIONS = [
-  { position: "prefix", digitsCount: 3 },
-  { position: "middle", digitsCount: 3 },
-  { position: "suffix", digitsCount: 3 },
-];
 
 /**
  * @param {object} policy   Policy descriptor for generator G1
@@ -26,14 +19,12 @@ const DEFAULT_POSITIONS = [
  * @returns {Promise<string>}
  */
 export async function generateG1(policy, corpus) {
-  // Distinct entries only, so the draw matches the log2(size) entropy credit.
-  const citations = uniqueLibrary(corpus, "G1");
-  const params = policy.parameters ?? {};
-  const separator = cryptoRandomChoice(params.separatorOptions ?? DEFAULT_SEPARATORS);
-  const groups = params.numericGroups ?? DEFAULT_POSITIONS;
+  // Same validated, deduplicated reading as calculateEntropy (params.js).
+  const { citations, separators, groups, transforms } = normalizeG1(policy, corpus);
+  const separator = cryptoRandomChoice(separators);
 
   const citation = cryptoRandomChoice(citations);
-  const transformed = await applyTransforms(citation, params.transforms ?? []);
+  const transformed = await applyTransforms(citation, transforms);
 
   // Place digit groups at the requested positions. We split the transformed
   // citation in half on a whitespace boundary for the "middle" insertion.
@@ -49,8 +40,8 @@ export async function generateG1(policy, corpus) {
   }
 
   for (const g of groups) {
-    const digits = randomDigits(g.digitsCount ?? 3);
-    switch (g.position ?? "suffix") {
+    const digits = randomDigits(g.digitsCount);
+    switch (g.position) {
       case "prefix":
         prefix = digits + separator + prefix;
         break;

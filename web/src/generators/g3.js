@@ -10,31 +10,20 @@
 // =============================================================================
 
 import { cryptoRandomChoice } from "../crypto.js";
-
-const ALPHABET_FULL = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-const AMBIGUOUS = ["l", "I", "1", "0", "O"];
+import { normalizeG3 } from "../params.js";
 
 /**
  * @param {object} policy
  * @returns {string}
  */
 export function generateG3(policy) {
-  const params = (policy && policy.parameters) || {};
-  const length = params.length ?? 20;
-  const blockSize = params.blockSize ?? 5;
-  const blockSeparator = params.blockSeparator ?? "-";
-  const excludeAmbiguous = params.excludeAmbiguous ?? false;
-
-  const alphabet = excludeAmbiguous
-    ? Array.from(ALPHABET_FULL)
-        .filter((c) => !AMBIGUOUS.includes(c))
-        .join("")
-    : ALPHABET_FULL;
-  const alphabetChars = Array.from(alphabet);
+  // Same validated reading as calculateEntropy (params.js): the alphabet
+  // drawn here is the one whose size entropy uses.
+  const { length, alphabet, blockSize, blockSeparator } = normalizeG3(policy);
 
   let chars = "";
   for (let i = 0; i < length; i++) {
-    chars += cryptoRandomChoice(alphabetChars);
+    chars += cryptoRandomChoice(alphabet);
   }
 
   if (blockSize <= 0 || blockSize >= length) return chars;

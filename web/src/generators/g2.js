@@ -9,9 +9,7 @@
 // =============================================================================
 
 import { cryptoRandomChoice, cryptoRandomInt } from "../crypto.js";
-import { uniqueLibrary } from "../library.js";
-
-const DEFAULT_SEPARATORS = ["-", "_", ".", "/", "+", ":", "|", ";", ",", "~"];
+import { normalizeG2 } from "../params.js";
 
 /**
  * @param {object} policy
@@ -19,25 +17,23 @@ const DEFAULT_SEPARATORS = ["-", "_", ".", "/", "+", ":", "|", ";", ",", "~"];
  * @returns {string}
  */
 export function generateG2(policy, dictionary) {
-  // Distinct entries only, so the draw matches the log2(size) entropy credit.
-  const entries = uniqueLibrary(dictionary, "G2");
-  const params = policy.parameters ?? {};
-  const wordCount = params.numberOfWords ?? 6;
-  const separator = cryptoRandomChoice(params.separatorOptions ?? DEFAULT_SEPARATORS);
-  const numericGroup = (params.numericGroups ?? [{ digitsCount: 4, position: "suffix" }])[0];
-  const digitsCount = numericGroup.digitsCount ?? 4;
-  const attached = numericGroup.separator === undefined ? false : numericGroup.separator === "";
+  // Same validated, deduplicated reading as calculateEntropy (params.js).
+  // Only the first numeric group is used and no transform is applied;
+  // entropy credits exactly that.
+  const { words: entries, wordCount, separators, digits } = normalizeG2(policy, dictionary);
+  const separator = cryptoRandomChoice(separators);
 
   const words = [];
   for (let i = 0; i < wordCount; i++) {
     words.push(cryptoRandomChoice(entries));
   }
-  const digits = randomDigits(digitsCount);
-  if (attached) {
-    words[words.length - 1] = words[words.length - 1] + digits;
+  if (!digits) return words.join(separator);
+  const suffix = randomDigits(digits.digitsCount);
+  if (digits.attached) {
+    words[words.length - 1] = words[words.length - 1] + suffix;
     return words.join(separator);
   }
-  return words.join(separator) + separator + digits;
+  return words.join(separator) + separator + suffix;
 }
 
 function randomDigits(n) {

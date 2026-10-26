@@ -11,6 +11,7 @@ import { generateG2 } from "./generators/g2.js";
 import { generateG3 } from "./generators/g3.js";
 import { calculateEntropy, anssiLevel } from "./entropy.js";
 import { resolveLibrary } from "./library.js";
+import { normalizeTopLevel } from "./params.js";
 import { InvalidPolicyDescriptor, LibraryNotFound, RegenerationLimitExceeded } from "./errors.js";
 
 const regenCount = new WeakMap();
@@ -20,9 +21,8 @@ const regenCount = new WeakMap();
  * @returns {Promise<Array<{password:string, entropyBits:number, anssiLevel:string|null, generator:string}>>}
  */
 export async function generate(policy) {
-  validatePolicy(policy);
+  const { proposalCount: n } = validatePolicy(policy);
   const proposals = [];
-  const n = policy.proposalCount ?? 5;
   // Same resolution as calculateEntropy: the badge describes the library
   // actually drawn from, never an assumed size.
   const library = resolveLibrary(policy);
@@ -45,8 +45,7 @@ export async function generate(policy) {
  * @returns {Promise<Array>}
  */
 export async function regenerate(policy) {
-  validatePolicy(policy);
-  const limit = policy.regenerateLimit ?? 3;
+  const { regenerateLimit: limit } = validatePolicy(policy);
   const used = regenCount.get(policy) ?? 0;
   if (used >= limit) throw new RegenerationLimitExceeded();
   regenCount.set(policy, used + 1);
@@ -102,6 +101,9 @@ function validatePolicy(policy) {
   if (!["G1", "G2", "G3"].includes(policy.generator)) {
     throw new InvalidPolicyDescriptor(`unknown generator ${policy.generator}`);
   }
+  // Generator parameters are validated by the same normalisers that
+  // calculateEntropy and the generators use (params.js).
+  return normalizeTopLevel(policy);
 }
 
 // -----------------------------------------------------------------------------
