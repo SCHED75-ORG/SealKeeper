@@ -23,6 +23,10 @@ export default [
         document: "readonly",
         TextEncoder: "readonly",
         TextDecoder: "readonly",
+        // reveal.js: session clock and clipboard purge timer.
+        performance: "readonly",
+        setTimeout: "readonly",
+        clearTimeout: "readonly",
       },
     },
     rules: {

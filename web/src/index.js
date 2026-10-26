@@ -13,6 +13,7 @@ import { calculateEntropy, anssiLevel } from "./entropy.js";
 import { resolveLibrary } from "./library.js";
 import { normalizeTopLevel } from "./params.js";
 import { InvalidPolicyDescriptor, LibraryNotFound, RegenerationLimitExceeded } from "./errors.js";
+import Reveal from "./reveal.js";
 
 const regenCount = new WeakMap();
 
@@ -50,6 +51,16 @@ export async function regenerate(policy) {
   if (used >= limit) throw new RegenerationLimitExceeded();
   regenCount.set(policy, used + 1);
   return generate(policy);
+}
+
+/**
+ * How many more regenerate(policy) calls the policy allows.
+ * @param {object} policy
+ * @returns {number}
+ */
+export function regenerationsLeft(policy) {
+  const { regenerateLimit: limit } = validatePolicy(policy);
+  return Math.max(0, limit - (regenCount.get(policy) ?? 0));
 }
 
 export { calculateEntropy } from "./entropy.js";
@@ -111,12 +122,20 @@ function validatePolicy(policy) {
 // `window` is undefined in Node, hence the typeof guard.
 // -----------------------------------------------------------------------------
 
-const Generation = { generate, regenerate, calculateEntropy, descriptorFromPolicy };
+const Generation = {
+  generate,
+  regenerate,
+  regenerationsLeft,
+  calculateEntropy,
+  descriptorFromPolicy,
+};
 
 if (typeof window !== "undefined") {
   window.SealKeeper = window.SealKeeper || {};
   window.SealKeeper.Generation = Generation;
+  window.SealKeeper.Reveal = Reveal;
 }
 
 export default Generation;
 export { InvalidPolicyDescriptor, LibraryNotFound, RegenerationLimitExceeded };
+export { Reveal };
