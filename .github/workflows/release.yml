@@ -58,6 +58,12 @@
 #   - Third-party actions are pinned by commit SHA; syft and trivy are fetched
 #     from pinned release assets and checked against a hard-coded SHA-256.
 #   - Release builds do not consume GitHub Actions caches (cache poisoning).
+#   - build-image pushes the image BY DIGEST only: no tag exists until every
+#     gate (JS bundle assertion, Trivy, smoke-bundle, smoke-image) has passed
+#     against that digest. The terminal `release` job then points the
+#     human-facing tags at the gated digest with `docker buildx imagetools
+#     create` (:vX.Y.Z, :X.Y.Z, and :latest only for non-prerelease tags),
+#     so a failed gate or an -rc tag never moves :latest.
 # =============================================================================
 
 name: Release
@@ -100,6 +106,7 @@ jobs:
     outputs:
       version: ${{ steps.parse.outputs.version }}
       version_nopv: ${{ steps.parse.outputs.version_nopv }}
+      prerelease: ${{ steps.parse.outputs.prerelease }}
       commit: ${{ steps.verify.outputs.commit }}
     steps:
       - name: Checkout (tags)
@@ -123,6 +130,12 @@ jobs:
           fi
           echo "version=$tag" >> "$GITHUB_OUTPUT"
           echo "version_nopv=${tag#v}" >> "$GITHUB_OUTPUT"
+          # SemVer prerelease (vX.Y.Z-rc.1): marked prerelease on GitHub and
+          # never tagged :latest.
+          case "$tag" in
+            *-*) echo "prerelease=true" >> "$GITHUB_OUTPUT" ;;
+            *) echo "prerelease=false" >> "$GITHUB_OUTPUT" ;;
+          esac
 
       - name: Import maintainer GPG public key
         env:
@@ -313,6 +326,7 @@ jobs:
   # ---------------------------------------------------------------------------
   # 3. Build & push multi-arch OCI image (distroless), scan, sign, SBOM
   #    Protected environment: pushes to GHCR and signs with the repo identity.
+  #    The image is pushed by digest, untagged; tags are added by `release`.
   # ---------------------------------------------------------------------------
   build-image:
     name: Build & sign OCI image
@@ -329,6 +343,7 @@ jobs:
     outputs:
       image_digest: ${{ steps.push.outputs.digest }}
       image_ref: ${{ steps.imgref.outputs.image_ref }}
+      image_repo: ${{ steps.imgrepo.outputs.repo }}
     steps:
       - name: Checkout verified tag
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -366,21 +381,20 @@ jobs:
 
       # DECISION: no `cache-from: type=gha` — a signed release image must not
       # be assembled from layers another workflow run could have written.
-      - name: Build & push (linux/amd64, linux/arm64)
+      # DECISION: push-by-digest, no `tags:`. Every gate below and in the
+      # smoke jobs runs against this digest; nothing a deployment resolves
+      # by tag (:latest, :vX.Y.Z) points at it until `release` says so.
+      - name: Build & push by digest (linux/amd64, linux/arm64)
         id: push
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           file: Dockerfile
           platforms: linux/amd64,linux/arm64
-          push: true
+          outputs: type=image,name=${{ steps.imgrepo.outputs.repo }},push-by-digest=true,name-canonical=true,push=true
           provenance: true
           sbom: true
           no-cache: true
-          tags: |
-            ${{ steps.imgrepo.outputs.repo }}:${{ needs.verify-tag.outputs.version }}
-            ${{ steps.imgrepo.outputs.repo }}:${{ needs.verify-tag.outputs.version_nopv }}
-            ${{ steps.imgrepo.outputs.repo }}:latest
           labels: |
             org.opencontainers.image.title=SealKeeper
             org.opencontainers.image.version=${{ needs.verify-tag.outputs.version }}
@@ -777,29 +791,30 @@ jobs:
           tar -xzf "bundle/sealkeeper-deploy-${VERSION}.tar.gz" -C smoke
           echo "EXTRACT=smoke/sealkeeper-deploy-${VERSION}" >> "$GITHUB_ENV"
 
+      # The bundle's Compose file refuses to render without SK_DOMAIN, and
+      # only Caddy publishes host ports (80/443): the smoke test reaches
+      # SealKeeper through Caddy at https://localhost, exactly like a real
+      # deployment, with Caddy's internal CA for the `localhost` site.
+      # SK_IMAGE is the gated digest: no release tag exists yet. ACME_EMAIL
+      # is set as in .env.example: the Caddyfile's `email` takes one argument.
       - name: Generate fake master secret and write .env
+        env:
+          IMAGE_REF: ${{ needs.build-image.outputs.image_ref }}
         run: |
           set -euo pipefail
           SECRET=$(openssl rand -base64 32)
           cat > "$EXTRACT/.env" <<EOF
           SK_MODE=eval
-          SK_BASE_URL=http://localhost:8443
+          SK_DOMAIN=localhost
+          ACME_EMAIL=smoke@example.test
+          SK_BASE_URL=https://localhost
           SK_MASTER_SECRET=${SECRET}
           SK_HTTP_LISTEN=:8443
           SK_LOG_FORMAT=json
           SK_LOG_LEVEL=info
-          POSTGRES_PASSWORD=$(openssl rand -base64 24)
+          POSTGRES_PASSWORD=$(openssl rand -hex 24)
+          SK_IMAGE=${IMAGE_REF}
           EOF
-
-      - name: Override image tag to current release
-        env:
-          IMAGE_REPO_LC: ghcr.io/${{ github.repository_owner }}/sealkeeper
-          VERSION: ${{ needs.verify-tag.outputs.version }}
-        run: |
-          set -euo pipefail
-          repo=$(echo "$IMAGE_REPO_LC" | tr '[:upper:]' '[:lower:]')
-          # Compose may use ${SK_IMAGE} or hardcoded value; both are handled.
-          echo "SK_IMAGE=${repo}:${VERSION}" >> "$EXTRACT/.env"
 
       - name: Log in to GHCR
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
@@ -812,27 +827,30 @@ jobs:
         working-directory: ${{ env.EXTRACT }}
         run: docker compose up -d
 
-      - name: Wait for /healthz (60s timeout)
+      # Caddy mints its local CA on first start; trust only that root.
+      - name: Wait for /healthz through Caddy (120s timeout)
         working-directory: ${{ env.EXTRACT }}
         run: |
           set -euo pipefail
-          for i in $(seq 1 60); do
-            if curl -fsS http://localhost:8443/healthz >/dev/null 2>&1; then
+          for i in $(seq 1 120); do
+            if docker compose cp caddy:/data/caddy/pki/authorities/local/root.crt "${RUNNER_TEMP}/caddy-root.crt" >/dev/null 2>&1 \
+              && curl -fsS --cacert "${RUNNER_TEMP}/caddy-root.crt" https://localhost/healthz >/dev/null 2>&1; then
               echo "healthz OK after ${i}s"; exit 0
             fi
             sleep 1
           done
-          echo "::error::healthz never returned 200 within 60s"
+          echo "::error::healthz never returned 200 through Caddy within 120s"
+          docker compose ps
           docker compose logs --tail=200
           exit 1
 
       - name: Check public root (GET /)
-        run: curl -fsS -o /dev/null -w "%{http_code}\n" http://localhost:8443/ | grep -q '^200$'
+        run: curl -fsS --cacert "${RUNNER_TEMP}/caddy-root.crt" -o /dev/null -w "%{http_code}\n" https://localhost/ | grep -q '^200$'
 
       - name: Check policy endpoint (GET /api/v1/policy)
         run: |
           set -euo pipefail
-          body=$(curl -fsS http://localhost:8443/api/v1/policy)
+          body=$(curl -fsS --cacert "${RUNNER_TEMP}/caddy-root.crt" https://localhost/api/v1/policy)
           echo "$body" | jq -e '.' >/dev/null
 
       - name: Verify captured mail in eval mode (POST request + GET /__captured_mail)
@@ -840,12 +858,12 @@ jobs:
           set -euo pipefail
           # Submit a benign request that should generate a captured mail in eval mode.
           # Endpoint shape per FR-G + module C; tolerate JSON or form bodies.
-          curl -fsS -X POST -H "Content-Type: application/json" \
+          curl -fsS --cacert "${RUNNER_TEMP}/caddy-root.crt" -X POST -H "Content-Type: application/json" \
             -d '{"email":"smoke@example.test","domain":"example.test"}' \
-            http://localhost:8443/api/v1/request || true
+            https://localhost/api/v1/request || true
           # Allow a brief window for the request pipeline to capture the mail.
           sleep 3
-          mails=$(curl -fsS http://localhost:8443/__captured_mail)
+          mails=$(curl -fsS --cacert "${RUNNER_TEMP}/caddy-root.crt" https://localhost/__captured_mail)
           echo "$mails" | jq -e '.items | length >= 1' >/dev/null || {
             echo "::error::No mail captured in eval mode"
             docker compose -f "${EXTRACT}/docker-compose.yml" logs --tail=200
@@ -907,7 +925,8 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # 9. Publish GitHub Release (gated on all upstream jobs including smokes)
-  #    Protected environment: creates the Release and pushes the Helm chart.
+  #    Protected environment: tags the gated image digest, creates the
+  #    Release and pushes the Helm chart.
   # ---------------------------------------------------------------------------
   release:
     name: Publish GitHub Release
@@ -926,7 +945,50 @@ jobs:
     environment: release
     permissions:
       contents: write # create GitHub Release, upload assets
+      packages: write # add the release tags to the gated image digest
     steps:
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Every gate passed against IMAGE_REF (repo@digest), which cosign
+      # signed and SLSA attested. With a single source index, imagetools
+      # create copies the manifest unchanged, so the tags resolve to that
+      # same digest — re-checked below rather than assumed.
+      - name: Tag the gated image digest
+        env:
+          IMAGE_REPO_LC: ${{ needs.build-image.outputs.image_repo }}
+          IMAGE_REF: ${{ needs.build-image.outputs.image_ref }}
+          IMAGE_DIGEST: ${{ needs.build-image.outputs.image_digest }}
+          VERSION: ${{ needs.verify-tag.outputs.version }}
+          VERSION_NOPV: ${{ needs.verify-tag.outputs.version_nopv }}
+          PRERELEASE: ${{ needs.verify-tag.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          tags=("${IMAGE_REPO_LC}:${VERSION}" "${IMAGE_REPO_LC}:${VERSION_NOPV}")
+          if [ "$PRERELEASE" = "false" ]; then
+            tags+=("${IMAGE_REPO_LC}:latest")
+          else
+            echo "Prerelease ${VERSION}: :latest is left untouched"
+          fi
+          args=()
+          for t in "${tags[@]}"; do args+=(--tag "$t"); done
+          docker buildx imagetools create "${args[@]}" "$IMAGE_REF"
+          for t in "${tags[@]}"; do
+            got="$(docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "$t")"
+            if [ "$got" != "$IMAGE_DIGEST" ]; then
+              echo "::error::$t resolves to $got, expected the gated digest $IMAGE_DIGEST"
+              exit 1
+            fi
+            echo "$t -> $got"
+          done
+
       - name: Download signed binaries + SBOMs
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -999,7 +1061,7 @@ jobs:
           name: ${{ needs.verify-tag.outputs.version }}
           body_path: release-notes.md
           draft: false
-          prerelease: ${{ contains(needs.verify-tag.outputs.version, '-') }}
+          prerelease: ${{ needs.verify-tag.outputs.prerelease == 'true' }}
           files: |
             release-assets/binaries/sealkeeper-*
             release-assets/binaries/SHA256SUMS
