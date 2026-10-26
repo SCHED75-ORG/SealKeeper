@@ -15,11 +15,14 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/sched75/sealkeeper/internal/webbundle"
 )
 
 // Mode is the high-level operating mode of the SealKeeper instance.
@@ -80,8 +83,8 @@ type Config struct {
 
 	// WebDir is the directory served at /static/*. The reveal page <script
 	// src="/static/sealkeeper-generation.umd.js"> lives in there. Defaults
-	// to the best-existing path among /app/web (in-image), ./web/dist
-	// (developer build) and ./web (Docker copy target). When none exists
+	// to the first of /app/web (in-image), ./web/dist (developer build) and
+	// ./web (Docker copy target) that holds the bundle file. When none does
 	// the server serves the bundle embedded at build time (webbundle).
 	WebDir string `yaml:"web_dir"`
 
@@ -534,12 +537,16 @@ func parseSecondsEnv(dst *time.Duration, key string) error {
 	return nil
 }
 
-// autodetectWebDir picks the first existing path among the common locations
-// the build pipeline writes the JS bundle to.
+// autodetectWebDir picks the first path among the common locations the
+// build pipeline writes the JS bundle to that actually holds the bundle.
+// A bare directory is not enough: a standalone binary started from a cwd
+// with an unrelated (or source-only) web/ would otherwise mount it over
+// the embedded copy and 404 the reveal page's script.
 func autodetectWebDir() string {
 	candidates := []string{"/app/web", "web/dist", "./web/dist", "web", "./web"}
 	for _, c := range candidates {
-		if info, err := os.Stat(c); err == nil && info.IsDir() {
+		info, err := os.Stat(filepath.Join(c, webbundle.BundleName))
+		if err == nil && info.Mode().IsRegular() && info.Size() > 0 {
 			return c
 		}
 	}
