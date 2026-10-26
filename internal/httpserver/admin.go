@@ -489,6 +489,8 @@ func (s *Server) handleAdminLoginWebauthnFinish(w http.ResponseWriter, r *http.R
 		Name: cookieAdminLoginStep, Value: "", Path: "/admin",
 		Expires: time.Unix(0, 0), MaxAge: -1,
 	})
+	// Password + WebAuthn both passed: only now clear the failure counter.
+	s.adminRepo.RecordLoginSuccess(r.Context(), ad.ID)
 
 	sess, err := s.adminRepo.CreateSession(r.Context(), ad.ID,
 		hashShort(s.clientIP(r)), hashShort(r.UserAgent()))

@@ -344,10 +344,14 @@ func (r *Repo) Authenticate(ctx context.Context, email, password, totpCode strin
 		return AuthResult{}, ErrInvalidCreds
 	}
 
-	// Password OK: clear failure counter.
-	_ = r.resetFailedAttempts(ctx, row.ID)
+	// The failure counter is cleared only once every factor has passed
+	// (RecordLoginSuccess). Clearing it here, on the password alone, let an
+	// attacker holding the password guess TOTP codes without ever reaching
+	// MaxFailedAttempts.
 
 	if row.ForceTOTPEnroll || len(row.TOTPSecretEnc) == 0 {
+		// No second factor exists yet: the password is the whole proof.
+		r.RecordLoginSuccess(ctx, row.ID)
 		return AuthResult{
 			Admin:               row.toAdmin(),
 			NeedsPasswordChange: row.ForcePasswordChange,
@@ -371,11 +375,7 @@ func (r *Repo) Authenticate(ctx context.Context, email, password, totpCode strin
 		return AuthResult{}, ErrInvalidCreds
 	}
 
-	now := r.now().UTC()
-	_, _ = r.db.ExecContext(ctx,
-		rebind(r.db, `UPDATE admins SET last_login_at = ?, updated_at = ? WHERE id = ?`),
-		now, now, row.ID,
-	)
+	r.RecordLoginSuccess(ctx, row.ID)
 
 	return AuthResult{
 		Admin:               row.toAdmin(),
@@ -748,33 +748,34 @@ func (r *Repo) scanRow(rs rowScanner) (adminRow, error) {
 
 func (r *Repo) incrementFailedAttempts(ctx context.Context, adminID int64) error {
 	now := r.now().UTC()
-	// Read counter, increment, lock if threshold reached. Two queries so we
-	// keep the dialect-agnostic style; v1 audiences are too tiny for a
-	// CASE-driven UPDATE to matter.
-	row, err := r.loadByID(ctx, adminID)
-	if err != nil {
+	// Increment in SQL rather than read-modify-write: concurrent guesses
+	// must each count, or parallel requests could slip past the threshold.
+	if _, err := r.db.ExecContext(ctx,
+		rebind(r.db, `UPDATE admins SET failed_attempts = failed_attempts + 1, updated_at = ? WHERE id = ?`),
+		now, adminID,
+	); err != nil {
 		return err
 	}
-	row.FailedAttempts++
-	var lockedUntil any
-	if row.FailedAttempts >= MaxFailedAttempts {
-		lockedUntil = now.Add(LockoutDuration)
-		row.FailedAttempts = 0
-	}
-	_, err = r.db.ExecContext(ctx,
-		rebind(r.db, `UPDATE admins SET failed_attempts = ?, locked_until = ?, updated_at = ? WHERE id = ?`),
-		row.FailedAttempts, lockedUntil, now, adminID,
+	_, err := r.db.ExecContext(ctx,
+		rebind(r.db, `UPDATE admins SET failed_attempts = 0, locked_until = ?, updated_at = ?
+			WHERE id = ? AND failed_attempts >= ?`),
+		now.Add(LockoutDuration), now, adminID, MaxFailedAttempts,
 	)
 	return err
 }
 
-func (r *Repo) resetFailedAttempts(ctx context.Context, adminID int64) error {
+// RecordLoginSuccess clears the failure counter and stamps last_login_at.
+// Call it only once every required factor has been verified — password
+// plus TOTP in Authenticate, or password plus a WebAuthn assertion in the
+// step-up handler. Errors are swallowed: a missed stamp must not block a
+// legitimate login.
+func (r *Repo) RecordLoginSuccess(ctx context.Context, adminID int64) {
 	now := r.now().UTC()
-	_, err := r.db.ExecContext(ctx,
-		rebind(r.db, `UPDATE admins SET failed_attempts = 0, locked_until = NULL, updated_at = ? WHERE id = ?`),
-		now, adminID,
+	_, _ = r.db.ExecContext(ctx,
+		rebind(r.db, `UPDATE admins SET failed_attempts = 0, locked_until = NULL,
+			last_login_at = ?, updated_at = ? WHERE id = ?`),
+		now, now, adminID,
 	)
-	return err
 }
 
 func (r *Repo) openTOTPSecret(row adminRow) (totp.Secret, error) {

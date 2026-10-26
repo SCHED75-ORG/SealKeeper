@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/sched75/sealkeeper/internal/admin"
 	"github.com/sched75/sealkeeper/internal/cryptobox"
 	"github.com/sched75/sealkeeper/internal/storage"
+	"github.com/sched75/sealkeeper/internal/totp"
 )
 
 func newRepo(t *testing.T) *admin.Repo {
@@ -147,5 +149,94 @@ func TestListReturnsCreatedAdmins(t *testing.T) {
 	}
 	if len(list) != 3 {
 		t.Errorf("List = %d rows, want 3", len(list))
+	}
+}
+
+// enrolledAdmin creates an admin with a TOTP secret on a frozen clock and
+// returns the repo, the secret and a 6-digit code Verify rejects at that
+// instant.
+func enrolledAdmin(t *testing.T, email, password string) (*admin.Repo, totp.Secret, string) {
+	t.Helper()
+	at := time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC)
+	r := newRepo(t).WithClock(func() time.Time { return at })
+	ctx := context.Background()
+	a, err := r.Create(ctx, email, password)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	secret, err := totp.NewSecret()
+	if err != nil {
+		t.Fatalf("NewSecret: %v", err)
+	}
+	if err := r.EnrollTOTP(ctx, a.ID, secret, []string{"aaaa-bbbb"}); err != nil {
+		t.Fatalf("EnrollTOTP: %v", err)
+	}
+	for n := 0; n < 1_000_000; n++ {
+		code := fmt.Sprintf("%06d", n)
+		if ok, _ := totp.Verify(secret, code, at); !ok {
+			return r, secret, code
+		}
+	}
+	t.Fatal("no rejected code found")
+	return nil, "", ""
+}
+
+// Regression: a correct password used to reset the failure counter before
+// the TOTP check, so wrong TOTP codes never reached MaxFailedAttempts.
+func TestAuthenticateWrongTOTPLocksAccount(t *testing.T) {
+	t.Parallel()
+	const email, pw = "ops@example.test", "supersecret-12chars"
+	r, _, bad := enrolledAdmin(t, email, pw)
+	ctx := context.Background()
+	for i := 0; i < admin.MaxFailedAttempts; i++ {
+		if _, err := r.Authenticate(ctx, email, pw, bad); !errors.Is(err, admin.ErrInvalidCreds) {
+			t.Fatalf("attempt %d: err = %v, want ErrInvalidCreds", i+1, err)
+		}
+	}
+	if _, err := r.Authenticate(ctx, email, pw, bad); !errors.Is(err, admin.ErrAccountLocked) {
+		t.Fatalf("after %d wrong TOTP codes: err = %v, want ErrAccountLocked", admin.MaxFailedAttempts, err)
+	}
+}
+
+// Regression: a correct password with an empty TOTP field must not reset
+// the counter either, or an attacker interleaves blank submissions.
+func TestAuthenticateBlankTOTPDoesNotResetCounter(t *testing.T) {
+	t.Parallel()
+	const email, pw = "ops@example.test", "supersecret-12chars"
+	r, _, bad := enrolledAdmin(t, email, pw)
+	ctx := context.Background()
+	for i := 0; i < admin.MaxFailedAttempts; i++ {
+		if _, err := r.Authenticate(ctx, email, pw, ""); !errors.Is(err, admin.ErrTOTPRequired) {
+			t.Fatalf("blank attempt: err = %v, want ErrTOTPRequired", err)
+		}
+		if _, err := r.Authenticate(ctx, email, pw, bad); err != nil && !errors.Is(err, admin.ErrInvalidCreds) && !errors.Is(err, admin.ErrAccountLocked) {
+			t.Fatalf("attempt %d: unexpected err %v", i+1, err)
+		}
+	}
+	if _, err := r.Authenticate(ctx, email, pw, bad); !errors.Is(err, admin.ErrAccountLocked) {
+		t.Fatalf("err = %v, want ErrAccountLocked", err)
+	}
+}
+
+func TestAuthenticateSuccessResetsCounter(t *testing.T) {
+	t.Parallel()
+	const email, pw = "ops@example.test", "supersecret-12chars"
+	r, secret, bad := enrolledAdmin(t, email, pw)
+	ctx := context.Background()
+	for i := 0; i < admin.MaxFailedAttempts-1; i++ {
+		_, _ = r.Authenticate(ctx, email, pw, bad)
+	}
+	good, err := totp.Generate(secret, time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if _, err := r.Authenticate(ctx, email, pw, good); err != nil {
+		t.Fatalf("valid login: %v", err)
+	}
+	// Counter cleared: MaxFailedAttempts-1 more failures must not lock.
+	for i := 0; i < admin.MaxFailedAttempts-1; i++ {
+		if _, err := r.Authenticate(ctx, email, pw, bad); !errors.Is(err, admin.ErrInvalidCreds) {
+			t.Fatalf("attempt %d after success: err = %v, want ErrInvalidCreds", i+1, err)
+		}
 	}
 }
