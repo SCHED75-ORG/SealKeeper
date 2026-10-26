@@ -30,6 +30,7 @@ import (
 	"net/http"
 	"net/netip"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -114,6 +115,11 @@ type Server struct {
 
 	// trustedProxies gates X-Forwarded-For (FR-H.42). Empty = never trust.
 	trustedProxies []netip.Prefix
+
+	// Constant-latency POST /api/v1/request (FR-B.13, see requestmail.go).
+	requestFloor time.Duration
+	mailSlots    chan struct{}
+	mailWG       sync.WaitGroup
 }
 
 // New builds an HTTP server with the given configuration.
@@ -189,6 +195,8 @@ func New(cfg config.Config, logger *slog.Logger) *Server {
 		adminLabel:     cfg.InstanceDomain,
 		adminTpl:       adminTpls,
 		loginPending:   newLoginPendingStore(5 * time.Minute),
+		requestFloor:   requestLatencyFloor,
+		mailSlots:      make(chan struct{}, mailWorkers),
 	}
 }
 
@@ -447,7 +455,9 @@ func (s *Server) Run(ctx context.Context) error {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		s.logger.Info("http server shutting down")
-		return srv.Shutdown(shutdownCtx)
+		err := srv.Shutdown(shutdownCtx)
+		s.WaitMail(shutdownCtx) // let queued reveal mails reach the relay
+		return err
 	case err := <-errCh:
 		return err
 	}
@@ -500,11 +510,14 @@ type requestPayload struct {
 
 func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
+	start := time.Now()
 	captureOwner := s.demoCaptureHandle(w, r)
 
-	// FR-B.7 invariant — every code path below returns the SAME 202 body.
+	// FR-B.7 invariant — every code path below returns the SAME 202 body,
+	// after the same latency floor (FR-B.13, see requestmail.go).
 	// Failure information stays in the audit log, never in the response.
 	acceptedResp := func(extra map[string]string) {
+		s.padRequestLatency(r.Context(), start)
 		body := map[string]string{"status": "accepted"}
 		for k, v := range extra {
 			body[k] = v
@@ -693,25 +706,22 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	// tagged with its demo owner and eval mode gets the capture id back.
 	// (Setting CaptureIDCallback on the shared sender raced between
 	// concurrent requests.)
+	// Any other sender talks to a relay: it runs in the background so the
+	// relay round trip never shows in the response time (FR-B.13); a
+	// failure is audited as mail.send_failed.
+	sender := s.sender
 	captureID := ""
-	if cs, ok := s.sender.(*mailer.CaptureSender); ok && cs.Store != nil {
+	if cs, ok := sender.(*mailer.CaptureSender); ok && cs.Store != nil {
 		captureID = cs.Store.CaptureFor(captureOwner, msg.To, msg.Subject, msg.String())
-	} else if err := s.sender.Send(r.Context(), msg); err != nil {
-		s.logger.Error("mail send failed", "transport", s.sender.Name(), "err", err)
-		s.auditAppend(r.Context(), "mail.send_failed", email, tokenRef(tok.Token), map[string]any{
-			"transport": s.sender.Name(),
-			"error":     err.Error(),
-		})
-		// FR-B.13 anti-enumeration: still acknowledge.
-		acceptedResp(nil)
-		return
+	} else {
+		s.sendRevealMail(r.Context(), sender, email, tokenRef(tok.Token), msg)
 	}
 
 	s.auditAppend(r.Context(), audit.EventTokenIssued, email, tokenRef(tok.Token), map[string]any{
 		"ip_hash":   ipHash,
 		"ua_hash":   uaHash,
 		"domain":    tok.Domain,
-		"transport": s.sender.Name(),
+		"transport": sender.Name(),
 	})
 
 	extra := map[string]string{}

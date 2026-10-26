@@ -207,6 +207,7 @@ func captureCookie(t *testing.T, w *httptest.ResponseRecorder) *http.Cookie {
 func TestDemoCapturedMailIsScopedToTheRequester(t *testing.T) {
 	t.Parallel()
 	s, _, _ := newModeServer(t, config.ModeProduction, true)
+	s.requestFloor = 0
 	h := s.Router()
 
 	alice := postRequest(h, "192.0.2.1:1000", "alice@example.test")
@@ -254,6 +255,7 @@ func TestCapturedMailExposure(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
 			s, _, _ := newModeServer(t, c.mode, c.demo)
+			s.requestFloor = 0
 			h := s.Router()
 			postRequest(h, "192.0.2.1:1000", "eve@example.test")
 			code, got := getCaptured(t, h)
