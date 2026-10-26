@@ -176,7 +176,7 @@ func runServe(args []string) int {
 	admin.SessionTTL = cfg.AdminSessionTTL
 	admin.SessionIdleTTL = cfg.AdminSessionIdleTimeout
 	adminRepo := admin.NewRepo(store.DB(), box).WithPasswordContext(cfg.InstanceDomain)
-	if err := bootstrapAdminIfNeeded(ctx, adminRepo, logger, cfg.IsEval()); err != nil {
+	if err := bootstrapAdminIfNeeded(ctx, adminRepo, auditRepo, logger, cfg.IsEval()); err != nil {
 		logger.Error("admin bootstrap failed", "err", err)
 		return 1
 	}
@@ -293,20 +293,29 @@ func runMigrate(args []string) int {
 
 	switch sub {
 	case "up":
+		// An unreadable version (fresh database) counts as 0.
+		before, _ := store.SchemaVersion(ctx)
 		if err := store.MigrateUp(ctx); err != nil {
 			logger.Error("migrate up failed", "err", err)
 			return 1
 		}
+		v, _ := store.SchemaVersion(ctx)
 		// Seal the audit head anchor right after migration 0014 so a
 		// migrated legacy log is anchored before anything else runs. Eval
 		// mode may run on a throw-away secret; its serve step seals instead.
 		if !cfg.IsEval() && cfg.MasterSecret != "" {
-			if _, err := openAuditRepo(ctx, cfg, store.DB(), logger); err != nil {
+			auditRepo, err := openAuditRepo(ctx, cfg, store.DB(), logger)
+			if err != nil {
 				logger.Error("audit init failed", "err", err)
 				return 1
 			}
+			if v != before {
+				if _, err := auditRepo.Append(ctx, "schema.migrated", "cli", "",
+					map[string]any{"from_version": before, "to_version": v, "dialect": string(store.Dialect())}); err != nil {
+					logger.Error("audit append failed", "err", err)
+				}
+			}
 		}
-		v, _ := store.SchemaVersion(ctx)
 		logger.Info("migrate up complete",
 			"dialect", string(store.Dialect()),
 			"schema_version", v,
@@ -419,7 +428,7 @@ func buildSender(cfg config.Config, logger *slog.Logger) (mailer.Sender, error) 
 // password — used by the screenshot / demo tooling that needs a
 // predictable login. Outside eval mode the env var is ignored so a
 // production deployment can't accidentally pin a weak password.
-func bootstrapAdminIfNeeded(ctx context.Context, repo *admin.Repo, logger *slog.Logger, evalMode bool) error {
+func bootstrapAdminIfNeeded(ctx context.Context, repo *admin.Repo, auditRepo *audit.Repo, logger *slog.Logger, evalMode bool) error {
 	n, err := repo.Count(ctx)
 	if err != nil {
 		return err
@@ -441,8 +450,15 @@ func bootstrapAdminIfNeeded(ctx context.Context, repo *admin.Repo, logger *slog.
 		}
 	}
 	const email = "admin@localhost"
-	if _, err := repo.Create(ctx, email, pwd); err != nil {
+	a, err := repo.Create(ctx, email, pwd)
+	if err != nil {
 		return err
+	}
+	if auditRepo != nil {
+		if _, err := auditRepo.Append(ctx, "admin.bootstrapped", "system", email,
+			map[string]any{"admin_id": a.ID}); err != nil {
+			logger.Error("audit append failed", "event", "admin.bootstrapped", "err", err)
+		}
 	}
 	logger.Info("================================================================")
 	logger.Info("BOOTSTRAP ADMIN PASSWORD — record this NOW, it will not be reprinted",
@@ -491,7 +507,9 @@ func openAuditRepo(ctx context.Context, cfg config.Config, db *sql.DB, logger *s
 	return repo, nil
 }
 
-// appendCLIAudit records a CLI action in the keyed audit chain.
+// appendCLIAudit records a CLI action in the keyed audit chain. The chain
+// is HMAC-keyed from the master secret: derive the same key the server
+// uses, or the row would break the chain.
 func appendCLIAudit(ctx context.Context, repo *admin.Repo, event, target string, details map[string]any) error {
 	cfg, err := config.Load()
 	if err != nil {
@@ -566,6 +584,11 @@ func runAdminResetPassword(args []string) int {
 	if err := repo.ResetForBootstrap(ctx, a.ID, pwd); err != nil {
 		fmt.Fprintf(os.Stderr, "admin reset-password: %v\n", err)
 		return 1
+	}
+	// An out-of-band credential reset must not be invisible to the console.
+	if err := appendCLIAudit(ctx, repo, "admin.password_reset", a.Email,
+		map[string]any{"admin_id": a.ID, "via": "cli", "generated": *customPwd == ""}); err != nil {
+		fmt.Fprintf(os.Stderr, "admin reset-password: audit append failed: %v\n", err)
 	}
 	fmt.Println("================================================================")
 	fmt.Println("ADMIN PASSWORD RESET — record this NOW, it will not be reprinted")

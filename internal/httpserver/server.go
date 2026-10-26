@@ -506,10 +506,12 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 // maxRequestBodyBytes bounds POST /api/v1/request bodies.
 const maxRequestBodyBytes = 4 << 10
 
+// requestPayload is the POST /api/v1/request body. Legacy "domain" and
+// "subject" fields are ignored: the domain is derived server-side from the
+// normalised email so a requester cannot forge what operators see in the
+// audit log, the SIEM feed or request_tokens.domain.
 type requestPayload struct {
-	Email   string `json:"email"`
-	Domain  string `json:"domain"`
-	Subject string `json:"subject"`
+	Email string `json:"email"`
 }
 
 func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
@@ -582,11 +584,11 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	// FR-C.20..23 — consult the domain allowlist when it has any entries.
 	// An empty table keeps the zero-config eval flow open. A denied domain
 	// is FR-B.9-silent: same response, audit log carries the truth.
+	emailDomain := ""
+	if at := strings.LastIndex(email, "@"); at > 0 && at+1 < len(email) {
+		emailDomain = email[at+1:]
+	}
 	if s.domains != nil {
-		emailDomain := ""
-		if at := strings.LastIndex(email, "@"); at > 0 && at+1 < len(email) {
-			emailDomain = email[at+1:]
-		}
 		ok, err := s.domains.Allows(r.Context(), emailDomain)
 		if err != nil {
 			s.logger.Error("domains.Allows failed", "err", err)
@@ -640,7 +642,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 	tok, err := s.tokens.Issue(r.Context(), tokens.IssueOptions{
 		Email:  email,
-		Domain: p.Domain,
+		Domain: emailDomain,
 		IPHash: ipHash,
 		UAHash: uaHash,
 		TTL:    tokens.DefaultTTL,

@@ -393,11 +393,12 @@ docker run -d \
 
 <pre><code>curl -X POST https://your-host/api/v1/request \
   -H "Content-Type: application/json" \
-  -d '{
-    "email": "jane@partner.eu",
-    "domain": "partner.eu",
-    "subject": "Quarterly access renewal"
-  }'</code></pre>
+  -d '{ "email": "jane@partner.eu" }'</code></pre>
+
+<p>
+  The domain is derived from the email address on the server; any other
+  field in the body is ignored.
+</p>
 
 <p>
   The response is always <code>HTTP 202 { "status": "accepted" }</code>.
