@@ -21,6 +21,24 @@
 	servers {
 		protocols h1 h2 h3
 	}
+
+	# Token redaction for every log that is NOT the site access log below:
+	# the error log (http.log.error.*, e.g. "no upstreams available" while
+	# SealKeeper is down), reverse_proxy errors and, at debug level, the
+	# upstream round-trip lines all embed the request with its full URI.
+	# A /reveal/<token> written there while SealKeeper is down is never
+	# consumed and stays live. The default logger (stderr, i.e. the
+	# container log) gets the same filter as the access log. Keep the two
+	# regexps identical.
+	log default {
+		output stderr
+		format filter {
+			request>uri regexp "(?i)(^/+reveal/)[^?#]*|([?&]token=)[^&#]*" "${1}${2}REDACTED"
+			request>headers>Referer delete
+			resp_headers>Location regexp "(?i)(/reveal/)[^?#]*|([?&]token=)[^&#]*" "${1}${2}REDACTED"
+			wrap json
+		}
+	}
 }
 
 {$SK_DOMAIN} {
@@ -73,12 +91,26 @@
 	}
 
 	# Structured access log — JSON, one line per request.
+	#
+	# Token redaction: /reveal/<token> carries a live, single-use reveal
+	# token, a bearer credential — anyone reading this log (or a SIEM fed
+	# by it) could open the link before its owner. The `filter` rewrites
+	# the path segment and any token= query parameter before the line is
+	# written, drops Referer (it may echo a reveal URL) and redacts the
+	# Location response header (the automatic HTTP->HTTPS redirect logs to
+	# this logger too, with Location: https://<host>/reveal/<token>). Keep
+	# these filters if you change the log format or ship the log elsewhere.
 	log {
 		output file /var/log/caddy/sealkeeper-access.log {
 			roll_size     50mb
 			roll_keep     5
 			roll_keep_for 14d
 		}
-		format json
+		format filter {
+			request>uri regexp "(?i)(^/+reveal/)[^?#]*|([?&]token=)[^&#]*" "${1}${2}REDACTED"
+			request>headers>Referer delete
+			resp_headers>Location regexp "(?i)(/reveal/)[^?#]*|([?&]token=)[^&#]*" "${1}${2}REDACTED"
+			wrap json
+		}
 	}
 }

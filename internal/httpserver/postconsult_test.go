@@ -86,7 +86,7 @@ func TestPostConsultMailIsAwaitedAtShutdown(t *testing.T) {
 	s, token := consultFixture(t, sender)
 
 	w := httptest.NewRecorder()
-	s.handlePolicy(w, httptest.NewRequest(http.MethodGet, "/api/v1/policy?token="+token, nil))
+	s.handlePolicyConsume(w, consumeRequest(token))
 	if w.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
@@ -106,12 +106,12 @@ func TestPostConsultMailShowsIPAndUserAgent(t *testing.T) {
 	sender := &bodySender{}
 	s, token := consultFixture(t, sender)
 
-	r := httptest.NewRequest(http.MethodGet, "/api/v1/policy?token="+token, nil)
+	r := consumeRequest(token)
 	r.RemoteAddr = "192.0.2.50:4242"
 	r.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) TestBrowser/1.0\x7f"+strings.Repeat("A", 1000))
 	r.Header.Set("Accept-Language", "en")
 	w := httptest.NewRecorder()
-	s.handlePolicy(w, r)
+	s.handlePolicyConsume(w, r)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
@@ -134,4 +134,11 @@ func TestPostConsultMailShowsIPAndUserAgent(t *testing.T) {
 	if strings.Contains(body, strings.Repeat("A", 300)) {
 		t.Error("User-Agent was not truncated")
 	}
+}
+
+// consumeRequest builds the POST /api/v1/policy request the reveal page sends.
+func consumeRequest(token string) *http.Request {
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/policy", strings.NewReader(`{"token":"`+token+`"}`))
+	r.Header.Set("Content-Type", "application/json")
+	return r
 }

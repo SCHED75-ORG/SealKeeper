@@ -5,7 +5,7 @@ import Generation, {
   InvalidPolicyDescriptor,
 } from "../src/index.js";
 
-// Shape returned by GET /api/v1/policy?token=… when an admin policy
+// Shape returned by POST /api/v1/policy {token} when an admin policy
 // resolves (internal/httpserver/server.go resolvedPolicy).
 const adminPolicy = {
   id: 7,

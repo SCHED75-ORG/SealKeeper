@@ -124,8 +124,9 @@ Migrations live under `internal/storage/migrations/{postgres,sqlite}/`. Each mig
 | GET    | `/version`                      | Build metadata                                             |
 | GET    | `/`                             | Landing + request form                                     |
 | POST   | `/api/v1/request`               | Issue reveal token, send email (always 202 — FR-B.13). `application/json` only (415 otherwise) and cross-origin browsers refused (403, `sameOriginPOST`) |
-| GET    | `/api/v1/policy`                | Returns default policy. With `?token=X` it **consumes** the token atomically and returns the typed policy. |
-| GET    | `/reveal/{token}`               | Reveal page HTML; the JS bundle does the actual consumption. Token lookups (this + `/api/v1/policy?token=`) share a 60 / 15 min per-IP cap → 429 + `Retry-After` |
+| GET    | `/api/v1/policy`                | Returns default policy. A `?token=` is refused (400 `token_in_query`) and never consumed — URLs land in proxy/SIEM access logs. |
+| POST   | `/api/v1/policy`                | Body `{"token":"…"}` (application/json, same-origin): **consumes** the token atomically and returns the typed policy. Resolves and validates the policy first; a policy that can't be served is a 503 and the token is kept. |
+| GET    | `/reveal/{token}`               | Reveal page HTML; the JS bundle does the actual consumption. Token lookups (this + `POST /api/v1/policy`) share a 60 / 15 min per-IP cap → 429 + `Retry-After` |
 | GET    | `/static/*`                     | JS bundle + assets (origin: `cfg.WebDir`)                  |
 | GET    | `/static/branding/logo`         | Inline logo blob streamed from the branding repo           |
 | GET    | `/__captured_mail`              | In-memory mail viewer (eval + demo only)                   |

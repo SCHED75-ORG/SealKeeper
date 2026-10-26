@@ -40,7 +40,8 @@ async function stubbedRevealURL(request: APIRequestContext): Promise<string> {
 // stubPolicy answers the token consumption with a small G3 policy so the
 // tests need no admin setup.
 async function stubPolicy(page: Page, extra: Record<string, unknown>) {
-  await page.route("**/api/v1/policy?token=*", (route) =>
+  // The reveal page consumes the token with POST {"token":…}.
+  await page.route("**/api/v1/policy", (route) =>
     route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -154,9 +155,18 @@ test.describe("@happy-path public flow", () => {
     const decode = page.getByRole("button", { name: /Décoder/i });
     await expect(decode).toBeVisible();
 
-    // 3. Clicking "Décoder" consumes the token via /api/v1/policy?token=…
-    //    and runs window.SealKeeper.Generation.generate() in the page.
+    // 3. Clicking "Décoder" consumes the token via POST /api/v1/policy
+    //    (token in the JSON body, never the URL) and runs
+    //    window.SealKeeper.Generation.generate() in the page.
+    const consumed = page.waitForRequest(
+      (req) => req.url().endsWith("/api/v1/policy") && req.method() === "POST",
+    );
     await decode.click();
+    const consumeReq = await consumed;
+    expect(consumeReq.url()).not.toContain("token=");
+    expect(consumeReq.postDataJSON()).toEqual({
+      token: revealURL.split("/").pop(),
+    });
 
     // 4. Wait for the proposals to render. We expect at least 1 card with a
     //    visible password and an ANSSI badge.
@@ -179,8 +189,10 @@ test.describe("@happy-path public flow", () => {
   }) => {
     const revealURL = await stubbedRevealURL(request);
 
-    await page.route("**/api/v1/policy?token=*", (route) =>
-      route.fulfill({
+    await page.route("**/api/v1/policy", (route) => {
+      expect(route.request().method()).toBe("POST");
+      expect(route.request().url()).not.toContain("token=");
+      return route.fulfill({
         status: 200,
         contentType: "application/json",
         body: JSON.stringify({
@@ -191,8 +203,8 @@ test.describe("@happy-path public flow", () => {
             parameters: { length: 32, blockSize: 8, blockSeparator: "." },
           },
         }),
-      }),
-    );
+      });
+    });
 
     await page.goto(revealURL);
     await page.getByRole("button", { name: /Décoder/i }).click();
@@ -338,10 +350,21 @@ test.describe("@happy-path public flow", () => {
     };
     const token = url.split("/").pop()!;
 
-    const first = await request.get(`/api/v1/policy?token=${token}`);
+    // A token in the URL ends up in access logs: it is refused and NOT
+    // consumed (the POST below still succeeds).
+    const inQuery = await request.get(`/api/v1/policy?token=${token}`);
+    expect(inQuery.status()).toBe(400);
+    expect((await inQuery.json()).title).toBe("token_in_query");
+
+    const consume = () =>
+      request.post("/api/v1/policy", {
+        data: { token },
+        headers: { "Content-Type": "application/json" },
+      });
+    const first = await consume();
     expect(first.status()).toBe(200);
 
-    const second = await request.get(`/api/v1/policy?token=${token}`);
+    const second = await consume();
     expect(second.status()).toBe(410);
     expect(second.headers()["content-type"]).toMatch(
       /application\/problem\+json/,

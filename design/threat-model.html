@@ -109,7 +109,8 @@
   carrying <code>https://&lt;instance&gt;/reveal/&lt;token&gt;</code>, and
   answers the requester with a constant
   <code>HTTP&nbsp;202&nbsp;accepted</code>. The recipient clicks the
-  link. The reveal page asks <code>GET /api/v1/policy?token=&lt;t&gt;</code>;
+  link. The reveal page sends <code>POST /api/v1/policy</code> with the token
+  in its JSON body (never the URL, which would land in access logs);
   the server consumes the token <em>atomically</em>, returns a
   policy descriptor (generator id + parameters), and the
   <strong>browser</strong> generates a handful of password proposals
@@ -261,7 +262,7 @@
 
       <!-- recipient → server (consume token) -->
       <path d="M620 245 L 445 245" fill="none" stroke="#7A1F2B" stroke-width="1.2" marker-end="url(#arr1)"/>
-      <text x="535" y="238" text-anchor="middle" fill="currentColor" opacity="0.7">GET /api/v1/policy?token=…</text>
+      <text x="535" y="238" text-anchor="middle" fill="currentColor" opacity="0.7">POST /api/v1/policy {token}</text>
 
       <!-- server → recipient (policy + bundle) -->
       <path d="M442 280 L 622 280" fill="none" stroke="#7A1F2B" stroke-width="1.2" marker-end="url(#arr1)"/>

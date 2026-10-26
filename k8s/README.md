@@ -13,7 +13,7 @@ For a templated, configurable variant, prefer the Helm chart in `../helm/`.
 | `secret.example.yaml` | **Reference only** — documents the keys of the `sealkeeper` Secret (SK_MASTER_SECRET, SK_DATABASE_URL, SK_METRICS_TOKEN). Not included in `kustomization.yaml`; create the Secret out of band |
 | `deployment.yaml` | App `Deployment` (FR-H.30): 2 replicas, rolling update, readOnlyRoot, drop ALL, probes on `/healthz` + `/readyz` |
 | `service.yaml` | `ClusterIP` on 8443 |
-| `ingress.yaml` | `Ingress` for ingress-nginx, TLS via cert-manager (annotation commented) |
+| `ingress.yaml` | `Ingress` for ingress-nginx, TLS via cert-manager (annotation commented); a second `sealkeeper-reveal` Ingress turns the access log off for `/reveal/` + `/api/v1/policy` (tokens in URLs) |
 | `networkpolicy.yaml` | Default-deny + targeted allow (ingress controller → 8443, egress to DNS, PG, SMTP, SIEM) |
 | `poddisruptionbudget.yaml` | `minAvailable: 1` for zero-downtime drains |
 | `kustomization.yaml` | Bundles everything for `kubectl apply -k .` |
