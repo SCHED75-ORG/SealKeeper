@@ -1008,7 +1008,7 @@ func (s *Server) handleAdminPolicyAdd(w http.ResponseWriter, r *http.Request) {
 	p, err := s.policies.Create(r.Context(), in, &a.ID)
 	switch {
 	case errors.Is(err, policies.ErrInvalidShape):
-		http.Redirect(w, r, "/admin/policies?err=invalid", http.StatusSeeOther)
+		http.Redirect(w, r, "/admin/policies?err=invalid&details="+url.QueryEscape(err.Error()), http.StatusSeeOther)
 		return
 	case errors.Is(err, policies.ErrAlreadyExists):
 		http.Redirect(w, r, "/admin/policies?err=duplicate", http.StatusSeeOther)

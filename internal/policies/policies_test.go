@@ -38,6 +38,9 @@ func newRig(t *testing.T) rigs {
 	return rigs{dr, er, pr}
 }
 
+// g2Params is the smallest parameter set a G2 policy is saved with.
+const g2Params = `{"library":["alpha","bravo","charlie","delta"]}`
+
 // ----- Create + validation --------------------------------------------------
 
 func TestCreateValidationFailures(t *testing.T) {
@@ -66,7 +69,7 @@ func TestCreateUniquePerDomainLevel(t *testing.T) {
 	d, _ := r.domains.Create(context.Background(), "example.com", "", true, nil)
 	in := policies.CreateInputs{
 		DomainID: d.ID, ANSSILevel: elevations.LevelB1, Name: "default",
-		Generator: policies.GeneratorG2, Active: true,
+		Generator: policies.GeneratorG2, ParamsJSON: g2Params, Active: true,
 	}
 	if _, err := r.policies.Create(context.Background(), in, nil); err != nil {
 		t.Fatalf("first Create: %v", err)
@@ -92,7 +95,7 @@ func TestResolveB1Default(t *testing.T) {
 	d, _ := r.domains.Create(context.Background(), "example.com", "", true, nil)
 	_, _ = r.policies.Create(context.Background(), policies.CreateInputs{
 		DomainID: d.ID, ANSSILevel: elevations.LevelB1, Name: "B1",
-		Generator: policies.GeneratorG2, Active: true,
+		Generator: policies.GeneratorG2, ParamsJSON: g2Params, Active: true,
 	}, nil)
 	got, err := r.policies.Resolve(context.Background(), "user@example.com")
 	if err != nil {
@@ -109,7 +112,7 @@ func TestResolveWildcardDomain(t *testing.T) {
 	d, _ := r.domains.Create(context.Background(), "*.entreprise.com", "", true, nil)
 	_, _ = r.policies.Create(context.Background(), policies.CreateInputs{
 		DomainID: d.ID, ANSSILevel: elevations.LevelB1, Name: "B1-wild",
-		Generator: policies.GeneratorG2, Active: true,
+		Generator: policies.GeneratorG2, ParamsJSON: g2Params, Active: true,
 	}, nil)
 	got, err := r.policies.Resolve(context.Background(), "alice@paris.entreprise.com")
 	if err != nil {
@@ -125,8 +128,8 @@ func TestResolveElevationPicksRightPolicy(t *testing.T) {
 	r := newRig(t)
 	ctx := context.Background()
 	d, _ := r.domains.Create(ctx, "example.com", "", true, nil)
-	_, _ = r.policies.Create(ctx, policies.CreateInputs{DomainID: d.ID, ANSSILevel: elevations.LevelB1, Name: "B1", Generator: policies.GeneratorG2, Active: true}, nil)
-	_, _ = r.policies.Create(ctx, policies.CreateInputs{DomainID: d.ID, ANSSILevel: elevations.LevelB2, Name: "B2", Generator: policies.GeneratorG2, Active: true}, nil)
+	_, _ = r.policies.Create(ctx, policies.CreateInputs{DomainID: d.ID, ANSSILevel: elevations.LevelB1, Name: "B1", Generator: policies.GeneratorG2, ParamsJSON: g2Params, Active: true}, nil)
+	_, _ = r.policies.Create(ctx, policies.CreateInputs{DomainID: d.ID, ANSSILevel: elevations.LevelB2, Name: "B2", Generator: policies.GeneratorG2, ParamsJSON: g2Params, Active: true}, nil)
 	_, _ = r.policies.Create(ctx, policies.CreateInputs{DomainID: d.ID, ANSSILevel: elevations.LevelB3, Name: "B3", Generator: policies.GeneratorG3, Active: true}, nil)
 
 	if _, err := r.elevations.Create(ctx, d.ID, "manager@example.com", elevations.LevelB2, "", nil); err != nil {
@@ -160,7 +163,7 @@ func TestResolveSkipsInactivePolicy(t *testing.T) {
 	d, _ := r.domains.Create(ctx, "example.com", "", true, nil)
 	p, _ := r.policies.Create(ctx, policies.CreateInputs{
 		DomainID: d.ID, ANSSILevel: elevations.LevelB1, Name: "B1",
-		Generator: policies.GeneratorG2, Active: true,
+		Generator: policies.GeneratorG2, ParamsJSON: g2Params, Active: true,
 	}, nil)
 	if err := r.policies.SetActive(ctx, p.ID, false); err != nil {
 		t.Fatalf("SetActive: %v", err)
@@ -178,7 +181,7 @@ func TestResolveElevationButNoMatchingPolicyDenies(t *testing.T) {
 	// Only B1 policy exists; user elevated to B3 must be denied per FR-C.28.
 	_, _ = r.policies.Create(ctx, policies.CreateInputs{
 		DomainID: d.ID, ANSSILevel: elevations.LevelB1, Name: "B1",
-		Generator: policies.GeneratorG2, Active: true,
+		Generator: policies.GeneratorG2, ParamsJSON: g2Params, Active: true,
 	}, nil)
 	_, _ = r.elevations.Create(ctx, d.ID, "root@example.com", elevations.LevelB3, "", nil)
 	if _, err := r.policies.Resolve(ctx, "root@example.com"); !errors.Is(err, policies.ErrNoPolicy) {
@@ -221,6 +224,28 @@ func TestResolveElevationSurvivesDomainRowsAndSubaddress(t *testing.T) {
 		}
 		if p.ANSSILevel != elevations.LevelB3 {
 			t.Errorf("%s resolved to %s, want B3", email, p.ANSSILevel)
+		}
+	}
+}
+
+// G1/G2 policies without an inline library used to save fine and then
+// silently draw from the 256-word sample at reveal time (SK-01). Saving
+// them is now refused, like the browser bundle refuses to generate.
+func TestCreateRejectsGeneratorParamsTheBundleRefuses(t *testing.T) {
+	t.Parallel()
+	r := newRig(t)
+	d, _ := r.domains.Create(context.Background(), "example.com", "", true, nil)
+	for i, in := range []policies.CreateInputs{
+		{Generator: policies.GeneratorG2},
+		{Generator: policies.GeneratorG1, ParamsJSON: `{"library":"dict-42"}`},
+		{Generator: policies.GeneratorG2, ParamsJSON: `{"library":["ok",""]}`},
+		{Generator: policies.GeneratorG2, ParamsJSON: `{"library":["a","b"],"numberOfWords":0}`},
+		{Generator: policies.GeneratorG3, ParamsJSON: `{"length":-4}`},
+		{Generator: policies.GeneratorG3, ParamsJSON: `{"length":12.5}`},
+	} {
+		in.DomainID, in.ANSSILevel, in.Name = d.ID, elevations.LevelB1, "x"
+		if _, err := r.policies.Create(context.Background(), in, nil); !errors.Is(err, policies.ErrInvalidShape) {
+			t.Errorf("case %d: err = %v, want ErrInvalidShape", i, err)
 		}
 	}
 }
