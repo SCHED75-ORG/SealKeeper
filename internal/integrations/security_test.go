@@ -292,6 +292,49 @@ func TestNetPolicyAddressClasses(t *testing.T) {
 	}
 }
 
+// Regression: IPv6 forms that the network translates back to an embedded
+// IPv4 destination (NAT64 well-known prefix, RFC 8215 local-use prefix,
+// 6to4) used to be treated as ordinary public IPv6, so [64:ff9b::a9fe:a9fe]
+// reached the cloud metadata endpoint on a NAT64 network. The embedded
+// IPv4 must get the same verdict as the bare IPv4.
+func TestNetPolicyIPv4EmbeddedInIPv6(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		ip                  string
+		strict, withPrivate bool // allowed?
+	}{
+		// NAT64 well-known prefix 64:ff9b::/96 (RFC 6052).
+		{"64:ff9b::a9fe:a9fe", false, false}, // 169.254.169.254
+		{"64:ff9b::7f00:1", false, false},    // 127.0.0.1
+		{"64:ff9b::6464:64c8", false, false}, // 100.100.100.200
+		{"64:ff9b::a00:5", false, true},      // 10.0.0.5
+		{"64:ff9b::c0a8:10a", false, true},   // 192.168.1.10
+		{"64:ff9b::808:808", true, true},     // 8.8.8.8
+		// RFC 8215 local-use prefix 64:ff9b:1::/48: local by design, and
+		// any RFC 6052 embedding of a blocked IPv4 is always refused.
+		{"64:ff9b:1::a9fe:a9fe", false, false},      // /96 embedding
+		{"64:ff9b:1:a9fe:a9:fe00::", false, false},  // /48 embedding
+		{"64:ff9b:1:ff7f:0:1::", false, false},      // /56 embedding
+		{"64:ff9b:1:ffff:7f:0:100:0", false, false}, // /64 embedding
+		{"64:ff9b:1::808:808", false, true},         // public, but local-use prefix
+		{"64:ff9b:1:808:8:800::", false, true},      // 8.8.8.8, /48 embedding
+		// 6to4 2002::/16: IPv4 in bits 16..47.
+		{"2002:a9fe:a9fe::1", false, false}, // 169.254.169.254
+		{"2002:7f00:1::1", false, false},    // 127.0.0.1
+		{"2002:a00:5::1", false, true},      // 10.0.0.5
+		{"2002:808:808::1", true, true},     // 8.8.8.8
+	}
+	for _, c := range cases {
+		ip := netip.MustParseAddr(c.ip)
+		if got := (integrations.NetPolicy{}).CheckAddr(ip) == nil; got != c.strict {
+			t.Errorf("strict %s allowed=%v, want %v", c.ip, got, c.strict)
+		}
+		if got := (integrations.NetPolicy{AllowPrivate: true}).CheckAddr(ip) == nil; got != c.withPrivate {
+			t.Errorf("allow-private %s allowed=%v, want %v", c.ip, got, c.withPrivate)
+		}
+	}
+}
+
 // Regression (SK-22): a webhook to loopback (here reached through the
 // "localhost" hostname, so the check is on the resolved IP) used to be
 // dialled. It must be refused before any byte leaves the process.

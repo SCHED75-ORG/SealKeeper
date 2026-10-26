@@ -25,7 +25,13 @@ var ErrDestinationBlocked = errors.New("integrations: destination address blocke
 // metadata), unspecified, multicast, broadcast, 0.0.0.0/8 and the
 // well-known metadata endpoints that live in otherwise "private" ranges
 // (fd00:ec2::254, 100.100.100.200). Refused unless AllowPrivate: RFC 1918,
-// ULA fc00::/7 and CGNAT 100.64.0.0/10 (SK_INTEGRATIONS_ALLOW_PRIVATE).
+// ULA fc00::/7, CGNAT 100.64.0.0/10 and the RFC 8215 local-use NAT64
+// prefix 64:ff9b:1::/48 (SK_INTEGRATIONS_ALLOW_PRIVATE).
+//
+// IPv6 forms that the network translates back to an embedded IPv4 (NAT64
+// 64:ff9b::/96 and 64:ff9b:1::/48, 6to4 2002::/16) are judged on that
+// embedded IPv4 too, so [64:ff9b::a9fe:a9fe] is refused like
+// 169.254.169.254.
 //
 // HTTP sinks must use https unless AllowPlainHTTP (set in eval mode only):
 // a plain http sink would carry audit events and its own credentials in
@@ -48,14 +54,63 @@ var (
 	}
 	privatePrefixes = []netip.Prefix{
 		netip.MustParsePrefix("100.64.0.0/10"), // CGNAT, RFC 6598
+		nat64LocalPrefix,
 	}
+
+	nat64WellKnownPrefix = netip.MustParsePrefix("64:ff9b::/96")   // RFC 6052
+	nat64LocalPrefix     = netip.MustParsePrefix("64:ff9b:1::/48") // RFC 8215
+	sixToFourPrefix      = netip.MustParsePrefix("2002::/16")      // RFC 3056
+	thisNetworkPrefix    = netip.MustParsePrefix("0.0.0.0/8")
 )
+
+// embeddedIPv4 returns the IPv4 destinations an IPv6 address is translated
+// to by NAT64 or 6to4 relays. The RFC 8215 local-use prefix may be deployed
+// with any RFC 6052 prefix length >= /48, so every candidate layout is
+// returned; a single blocked candidate refuses the address.
+func embeddedIPv4(ip netip.Addr) []netip.Addr {
+	if !ip.Is6() {
+		return nil
+	}
+	b := ip.As16()
+	v4 := func(i ...int) netip.Addr {
+		return netip.AddrFrom4([4]byte{b[i[0]], b[i[1]], b[i[2]], b[i[3]]})
+	}
+	switch {
+	case nat64WellKnownPrefix.Contains(ip):
+		return []netip.Addr{v4(12, 13, 14, 15)}
+	case nat64LocalPrefix.Contains(ip):
+		// RFC 6052 section 2.2 layouts; byte 8 (u-octet) is skipped. The
+		// zero padding of one layout reads as 0.0.0.0/8 in another, and no
+		// translator forwards to 0.0.0.0/8: drop those guesses so they do
+		// not refuse every address under the prefix.
+		var out []netip.Addr
+		for _, c := range []netip.Addr{
+			v4(6, 7, 9, 10),    // /48
+			v4(7, 9, 10, 11),   // /56
+			v4(9, 10, 11, 12),  // /64
+			v4(12, 13, 14, 15), // /96
+		} {
+			if !thisNetworkPrefix.Contains(c) {
+				out = append(out, c)
+			}
+		}
+		return out
+	case sixToFourPrefix.Contains(ip):
+		return []netip.Addr{v4(2, 3, 4, 5)}
+	}
+	return nil
+}
 
 // checkAddr reports whether `ip` may be dialled under the policy.
 func (p NetPolicy) checkAddr(ip netip.Addr) error {
 	ip = ip.Unmap()
 	if !ip.IsValid() {
 		return fmt.Errorf("%w: invalid address", ErrDestinationBlocked)
+	}
+	for _, v4 := range embeddedIPv4(ip) {
+		if err := p.checkAddr(v4); err != nil {
+			return fmt.Errorf("%w (embedded in %s)", err, ip)
+		}
 	}
 	if ip.IsLoopback() && p.allowLoopback {
 		return nil
