@@ -392,3 +392,77 @@ func TestExtractAngleAddr(t *testing.T) {
 	}
 	_ = fmt.Sprintf // keep fmt referenced
 }
+
+// Regression: in "auto" mode an on-path attacker could strip STARTTLS from
+// the EHLO reply and the sender carried on in plaintext, handing the relay
+// credentials (via the custom LOGIN auth) and every reveal link to the
+// attacker.
+func TestSMTPSenderAutoRefusesPlaintextToRemoteRelay(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		username string
+	}{
+		{name: "with credentials", username: "svc-relay"},
+		{name: "without credentials"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			f := newFakeSMTP(t, "AUTH") // no STARTTLS: stripped by the attacker
+			s, err := mailer.NewSMTPSender(mailer.SMTPConfig{
+				Host:     "relay.example.test",
+				Username: c.username,
+				Password: "relay-secret",
+				TLS:      mailer.TLSAuto,
+			})
+			if err != nil {
+				t.Fatalf("NewSMTPSender: %v", err)
+			}
+			s = s.WithDialer(dialerFor(t, f))
+			if err := s.Send(context.Background(), sampleMessage(t)); err == nil {
+				t.Fatal("Send succeeded over plaintext to a remote relay in auto mode")
+			}
+			if len(f.authCreds) != 0 {
+				t.Errorf("credentials sent in clear: %v", f.authCreds)
+			}
+			if len(f.Received()) != 0 {
+				t.Error("message delivered in clear")
+			}
+		})
+	}
+}
+
+func TestSMTPSenderNeverAuthenticatesInClearToRemoteRelay(t *testing.T) {
+	t.Parallel()
+	f := newFakeSMTP(t, "AUTH")
+	s, err := mailer.NewSMTPSender(mailer.SMTPConfig{
+		Host:     "relay.example.test",
+		Username: "svc-relay",
+		Password: "relay-secret",
+		TLS:      mailer.TLSDisable, // explicit plaintext still must not leak creds
+	})
+	if err != nil {
+		t.Fatalf("NewSMTPSender: %v", err)
+	}
+	s = s.WithDialer(dialerFor(t, f))
+	if err := s.Send(context.Background(), sampleMessage(t)); err == nil {
+		t.Fatal("Send authenticated over plaintext to a remote relay")
+	}
+	if len(f.authCreds) != 0 {
+		t.Errorf("credentials sent in clear: %v", f.authCreds)
+	}
+}
+
+func TestSMTPSenderAutoAllowsPlaintextLoopbackRelay(t *testing.T) {
+	t.Parallel()
+	f := newFakeSMTP(t)
+	s, err := mailer.NewSMTPSender(mailer.SMTPConfig{Host: "127.0.0.1", TLS: mailer.TLSAuto})
+	if err != nil {
+		t.Fatalf("NewSMTPSender: %v", err)
+	}
+	s = s.WithDialer(dialerFor(t, f))
+	if err := s.Send(context.Background(), sampleMessage(t)); err != nil {
+		t.Fatalf("Send to loopback relay: %v", err)
+	}
+}

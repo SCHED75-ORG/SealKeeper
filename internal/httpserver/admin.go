@@ -4005,7 +4005,7 @@ const adminSMTPTpl = `{{define "smtp.html"}}{{template "header" .}}
 
   <label for="tls_mode">TLS mode</label>
   <select id="tls_mode" name="tls_mode">
-    <option value="auto" {{ if eq .Config.TLSMode "auto" }}selected{{ end }}>auto — STARTTLS when offered, else implicit on :465</option>
+    <option value="auto" {{ if eq .Config.TLSMode "auto" }}selected{{ end }}>auto — STARTTLS required (plaintext only to a loopback relay)</option>
     <option value="starttls" {{ if eq .Config.TLSMode "starttls" }}selected{{ end }}>starttls — require STARTTLS</option>
     <option value="implicit" {{ if eq .Config.TLSMode "implicit" }}selected{{ end }}>implicit — TLS at TCP layer (e.g. :465)</option>
     <option value="disable" {{ if eq .Config.TLSMode "disable" }}selected{{ end }}>disable — plaintext (lab / capture only)</option>

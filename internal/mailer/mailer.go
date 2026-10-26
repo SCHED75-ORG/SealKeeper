@@ -67,8 +67,10 @@ func (*CaptureSender) Name() string { return "capture" }
 type TLSMode string
 
 const (
-	// TLSAuto picks implicit TLS when the port is 465, otherwise STARTTLS
-	// when the server advertises it, otherwise plaintext.
+	// TLSAuto upgrades with STARTTLS. It falls back to plaintext only for a
+	// loopback relay (a local MTA sidecar); for any other host a server that
+	// does not advertise STARTTLS is refused, because an on-path attacker can
+	// strip the capability and read the relay credentials and reveal links.
 	TLSAuto TLSMode = "auto"
 	// TLSStartTLS requires the server to support STARTTLS; the sender aborts
 	// when the advertised capabilities do not include it.
@@ -228,7 +230,10 @@ func (s *SMTPSender) maybeStartTLS(client *smtp.Client) error {
 		if ok, _ := client.Extension("STARTTLS"); ok {
 			return client.StartTLS(s.tlsConfig())
 		}
-		return nil
+		if isLoopbackHost(s.cfg.Host) {
+			return nil
+		}
+		return errors.New("server does not advertise STARTTLS; refusing plaintext to a non-loopback relay (set TLS mode to \"disable\" to allow it explicitly)")
 	}
 	return fmt.Errorf("unknown TLS mode %q", s.cfg.TLS)
 }
@@ -236,6 +241,11 @@ func (s *SMTPSender) maybeStartTLS(client *smtp.Client) error {
 func (s *SMTPSender) maybeAuth(client *smtp.Client) error {
 	if s.cfg.Username == "" {
 		return nil
+	}
+	// Never send relay credentials in clear to a remote host, whatever the
+	// TLS mode. net/smtp's PlainAuth has this guard; our LOGIN impl did not.
+	if _, tlsOK := client.TLSConnectionState(); !tlsOK && !isLoopbackHost(s.cfg.Host) {
+		return errors.New("refusing to send credentials over an unencrypted connection")
 	}
 	ok, mechs := client.Extension("AUTH")
 	if !ok {
@@ -268,8 +278,20 @@ type loginAuth struct {
 	username, password string
 }
 
-func (a loginAuth) Start(*smtp.ServerInfo) (string, []byte, error) {
+func (a loginAuth) Start(server *smtp.ServerInfo) (string, []byte, error) {
+	if !server.TLS && !isLoopbackHost(server.Name) {
+		return "", nil, errors.New("unencrypted connection")
+	}
 	return "LOGIN", nil, nil
+}
+
+// isLoopbackHost reports whether host names the local machine.
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 func (a loginAuth) Next(fromServer []byte, more bool) ([]byte, error) {
 	if !more {
