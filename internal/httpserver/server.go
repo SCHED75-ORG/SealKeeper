@@ -68,6 +68,13 @@ func pseudonymKey(masterSecret string) []byte {
 	return sum[:]
 }
 
+// ceremonyKey derives the WebAuthn ceremony MAC key from the master
+// secret, domain-separated from every other use of it.
+func ceremonyKey(masterSecret string) []byte {
+	sum := sha256.Sum256([]byte("sealkeeper-webauthn-ceremony:" + masterSecret))
+	return sum[:]
+}
+
 // adminLoginPerIPWindow is the number of admin login attempts one client IP
 // may make per 15 minutes.
 const adminLoginPerIPWindow = 20
@@ -112,6 +119,10 @@ type Server struct {
 
 	// pseudonymKey keys hashShort (derived from the master secret).
 	pseudonymKey []byte
+
+	// ceremonyKey authenticates the WebAuthn ceremony state the browser
+	// carries between /begin and /finish (see sealCeremony).
+	ceremonyKey []byte
 
 	// trustedProxies gates X-Forwarded-For (FR-H.42). Empty = never trust.
 	trustedProxies []netip.Prefix
@@ -179,6 +190,7 @@ func New(cfg config.Config, logger *slog.Logger) *Server {
 	return &Server{
 		trustedProxies: trusted,
 		pseudonymKey:   pseudonymKey(cfg.MasterSecret),
+		ceremonyKey:    ceremonyKey(cfg.MasterSecret),
 		loginLimiter:   ratelimit.New(adminLoginPerIPWindow, 15*time.Minute),
 		cfg:            cfg,
 		logger:         logger,
