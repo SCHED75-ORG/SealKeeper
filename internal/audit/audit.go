@@ -33,6 +33,15 @@
 // newest row (tail truncation, or rows added without the key). The domain
 // tags keep entry and head MACs from ever being confused with each other.
 //
+// A sealed anchor stays MAC-valid forever, so on its own it cannot reveal
+// that an older copy of it was written back over a tail cut to match.
+// The Repo therefore also keeps an in-memory high-water mark: the highest
+// head_seq it has written or seen under a valid MAC (SealAnchor learns it
+// at boot). A valid anchor below that mark is reported as broken from
+// head_seq+1, and the next Append records it in broken_seq so the
+// evidence outlives the process. Restoring a database backup under a
+// running server looks exactly the same, so restart it after a restore.
+//
 // # Legacy rows (v1) and cut-over
 //
 // Deployments that predate the keyed chain hold rows hashed with plain
@@ -63,8 +72,15 @@
 // consistent log. Likewise, one who rolls the schema back to before 0014
 // (drops audit_head and every later migration's objects, deletes their
 // goose_db_version rows) makes the next migration re-run the cut-over.
-// Continuity across either point is only visible from the outside (the
-// SIEM receives real sequence numbers, so it sees the gap or the rewrite).
+// A selective rollback of the tail is the same kind of residual risk: an
+// attacker who keeps a copy of the sealed audit_head row, later deletes the
+// rows appended after it and writes the copy back leaves a consistent,
+// shorter log. The high-water mark catches this only while a process that
+// saw the newer head keeps running; across a restart just a sequence_no
+// gap remains (not checked: Postgres sequences burn values on rollback),
+// and the attacker can close it by resetting the sequence. Continuity
+// across any of these points is only visible from the outside (the SIEM
+// receives real sequence numbers, so it sees the gap or the rewrite).
 package audit
 
 import (
@@ -78,6 +94,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/sched75/sealkeeper/internal/storage"
@@ -137,12 +154,16 @@ type Repo struct {
 	db  *sql.DB
 	key []byte
 	now func() time.Time
+	// floor is the highest head_seq this process has written or seen
+	// under a valid MAC (see the package comment); shared by WithClock
+	// copies.
+	floor *atomic.Int64
 }
 
 // NewRepo binds the audit writer to a *sql.DB and the audit chain key
 // (see DeriveKey). The key is copied.
 func NewRepo(db *sql.DB, key []byte) *Repo {
-	return &Repo{db: db, key: append([]byte(nil), key...), now: time.Now}
+	return &Repo{db: db, key: append([]byte(nil), key...), now: time.Now, floor: new(atomic.Int64)}
 }
 
 // WithClock returns a copy of the repo bound to a custom clock (tests).
@@ -194,6 +215,7 @@ func (r *Repo) Append(ctx context.Context, eventType, actor, target string, deta
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	floor := r.floor.Load()
 	h, err := readHead(ctx, tx)
 	if err != nil {
 		return Entry{}, fmt.Errorf("audit.Append: read head: %w", err)
@@ -205,7 +227,7 @@ func (r *Repo) Append(ctx context.Context, eventType, actor, target string, deta
 
 	// Carry a valid sticky marker forward; otherwise record whatever the
 	// anchor proves broken right now, so the evidence survives this write.
-	broken := r.anchorBreak(h, t, false)
+	broken := r.anchorBreak(h, t, floor, false)
 	if r.headValid(h) && h.broken != 0 {
 		broken = h.broken
 	}
@@ -232,6 +254,7 @@ func (r *Repo) Append(ctx context.Context, eventType, actor, target string, deta
 	if err := tx.Commit(); err != nil {
 		return Entry{}, fmt.Errorf("audit.Append: commit: %w", err)
 	}
+	r.raiseFloor(seq)
 	return Entry{
 		SequenceNo: seq,
 		OccurredAt: now,
@@ -269,6 +292,7 @@ func (r *Repo) SealAnchor(ctx context.Context, legacyMigrated bool) error {
 		return fmt.Errorf("audit.SealAnchor: read head: %w", err)
 	}
 	if h.present && h.mac != "" {
+		r.observe(h)
 		return nil
 	}
 	t, err := readTail(ctx, tx)
@@ -280,7 +304,7 @@ func (r *Repo) SealAnchor(ctx context.Context, legacyMigrated bool) error {
 		legacyUntil: h.legacyUntil,
 		seq:         t.seq,
 		hash:        t.hash,
-		broken:      r.anchorBreak(h, t, legacyMigrated),
+		broken:      r.anchorBreak(h, t, 0, legacyMigrated),
 	}
 	if err := r.writeHead(ctx, tx, next); err != nil {
 		return fmt.Errorf("audit.SealAnchor: %w", err)
@@ -288,6 +312,7 @@ func (r *Repo) SealAnchor(ctx context.Context, legacyMigrated bool) error {
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("audit.SealAnchor: commit: %w", err)
 	}
+	r.raiseFloor(t.seq)
 	return nil
 }
 
@@ -312,6 +337,9 @@ func (r *Repo) VerifyChain(ctx context.Context) (int64, error) {
 	if len(r.key) == 0 {
 		return 0, fmt.Errorf("audit.VerifyChain: %w", ErrNoKey)
 	}
+	// Read the high-water mark before the snapshot: every head it counts
+	// was committed before then, so the snapshot cannot be older.
+	floor := r.floor.Load()
 	// Anchor and rows must come from one snapshot, or an Append committing
 	// in between would look like a truncation.
 	var opts *sql.TxOptions
@@ -332,7 +360,8 @@ func (r *Repo) VerifyChain(ctx context.Context) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	anchorBad := r.anchorBreak(h, t, false)
+	r.observe(h)
+	anchorBad := r.anchorBreak(h, t, floor, false)
 	if r.headValid(h) && h.broken != 0 && (anchorBad == 0 || h.broken < anchorBad) {
 		anchorBad = h.broken
 	}
@@ -397,10 +426,12 @@ func (r *Repo) rowValid(seq int64, occurred any, evt, actor, target, details, pr
 }
 
 // anchorBreak returns the first sequence number the anchor shows to be
-// broken given the newest row, or 0 when they agree. allowUnsealedLegacy
-// accepts the post-migration state (unsealed anchor, rows only at or below
-// legacy_until); only SealAnchor right after migration 0014 passes true.
-func (r *Repo) anchorBreak(h head, t tail, allowUnsealedLegacy bool) int64 {
+// broken given the newest row, or 0 when they agree. floor is the
+// high-water mark read before h: a valid anchor below it was replayed over
+// a rolled-back tail. allowUnsealedLegacy accepts the post-migration state
+// (unsealed anchor, rows only at or below legacy_until); only SealAnchor
+// right after migration 0014 passes true.
+func (r *Repo) anchorBreak(h head, t tail, floor int64, allowUnsealedLegacy bool) int64 {
 	switch {
 	case !h.present:
 		if t.seq == 0 {
@@ -420,6 +451,8 @@ func (r *Repo) anchorBreak(h head, t tail, allowUnsealedLegacy bool) int64 {
 		}
 	case !r.headValid(h):
 		return max(h.seq, 1)
+	case h.seq < floor:
+		return h.seq + 1
 	case t.seq < h.seq:
 		return t.seq + 1
 	case t.seq > h.seq:
@@ -439,6 +472,23 @@ func (r *Repo) headMAC(h head) string {
 
 func (r *Repo) headValid(h head) bool {
 	return h.present && h.mac != "" && hmac.Equal([]byte(h.mac), []byte(r.headMAC(h)))
+}
+
+// observe raises the high-water mark to a MAC-valid anchor's head_seq.
+func (r *Repo) observe(h head) {
+	if r.headValid(h) {
+		r.raiseFloor(h.seq)
+	}
+}
+
+// raiseFloor moves the high-water mark up to seq; it never goes down.
+func (r *Repo) raiseFloor(seq int64) {
+	for {
+		cur := r.floor.Load()
+		if seq <= cur || r.floor.CompareAndSwap(cur, seq) {
+			return
+		}
+	}
 }
 
 // entryMAC returns hex(HMAC(key, prev || canonical)) (FR-E.1).
