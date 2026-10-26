@@ -123,70 +123,98 @@ func (r *Repo) Get(ctx context.Context) (Config, error) {
 // KeepPassword=false clears the override entirely.
 func (r *Repo) Update(ctx context.Context, in UpdateInputs, adminID *int64) error {
 	if strings.TrimSpace(in.Host) == "" {
-		_, err := r.db.ExecContext(ctx, rebind(r.db,
-			`UPDATE smtp_config SET host='', port=587, username='', password_enc=NULL,
-				from_addr='', tls_mode='auto', server_name='', insecure_tls=FALSE,
-				timeout_seconds=30, updated_by_admin_id=?, updated_at=?
-				WHERE id = 1`),
-			nullableInt(adminID), r.now().UTC())
-		if err != nil {
-			return err
-		}
-		// If no row yet, insert a cleared one so subsequent Get is consistent.
-		var n int64
-		if err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM smtp_config`).Scan(&n); err != nil {
-			return err
-		}
-		if n == 0 {
-			_, err := r.db.ExecContext(ctx, rebind(r.db,
-				`INSERT INTO smtp_config (id, updated_by_admin_id, created_at, updated_at)
-					VALUES (1, ?, ?, ?)`),
-				nullableInt(adminID), r.now().UTC(), r.now().UTC())
-			return err
-		}
-		return nil
+		return r.clearOverride(ctx, adminID)
 	}
 
-	port := in.Port
+	port, timeout, tlsMode := normalizeRelay(in)
+
+	// Build the password ciphertext. If KeepPassword is set (and no new
+	// password typed) we read the existing one and re-seal it — but only
+	// when the relay destination and identity are unchanged.
+	pwdEnc, err := r.sealPassword(ctx, in, port, tlsMode)
+	if err != nil {
+		return err
+	}
+
+	return r.upsertRow(ctx, in, port, timeout, tlsMode, pwdEnc, adminID)
+}
+
+// clearOverride resets the single row to its cleared defaults, inserting
+// a cleared row when none exists yet so subsequent Get is consistent.
+func (r *Repo) clearOverride(ctx context.Context, adminID *int64) error {
+	_, err := r.db.ExecContext(ctx, rebind(r.db,
+		`UPDATE smtp_config SET host='', port=587, username='', password_enc=NULL,
+			from_addr='', tls_mode='auto', server_name='', insecure_tls=FALSE,
+			timeout_seconds=30, updated_by_admin_id=?, updated_at=?
+			WHERE id = 1`),
+		nullableInt(adminID), r.now().UTC())
+	if err != nil {
+		return err
+	}
+	// If no row yet, insert a cleared one so subsequent Get is consistent.
+	var n int64
+	if err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM smtp_config`).Scan(&n); err != nil {
+		return err
+	}
+	if n == 0 {
+		_, err := r.db.ExecContext(ctx, rebind(r.db,
+			`INSERT INTO smtp_config (id, updated_by_admin_id, created_at, updated_at)
+				VALUES (1, ?, ?, ?)`),
+			nullableInt(adminID), r.now().UTC(), r.now().UTC())
+		return err
+	}
+	return nil
+}
+
+// normalizeRelay applies the port / timeout / TLS-mode defaults to the
+// submitted inputs.
+func normalizeRelay(in UpdateInputs) (port, timeout int, tlsMode string) {
+	port = in.Port
 	if port <= 0 {
 		port = 587
 	}
-	timeout := in.TimeoutSeconds
+	timeout = in.TimeoutSeconds
 	if timeout <= 0 {
 		timeout = 30
 	}
-	tlsMode := strings.ToLower(strings.TrimSpace(in.TLSMode))
+	tlsMode = strings.ToLower(strings.TrimSpace(in.TLSMode))
 	switch tlsMode {
 	case "auto", "starttls", "implicit", "disable":
 	default:
 		tlsMode = "auto"
 	}
+	return port, timeout, tlsMode
+}
 
-	// Build the password ciphertext. If KeepPassword is set (and no new
-	// password typed) we read the existing one and re-seal it — but only
-	// when the relay destination and identity are unchanged.
+// sealPassword resolves the password to store (the typed one, or the
+// previously stored one under KeepPassword when the relay is not
+// retargeted) and seals it. A nil result means no password is stored.
+func (r *Repo) sealPassword(ctx context.Context, in UpdateInputs, port int, tlsMode string) ([]byte, error) {
 	pwd := in.Password
 	if in.KeepPassword && pwd == "" {
 		prev, err := r.Get(ctx)
 		if err == nil && prev.Password != "" {
 			if retargeted(prev, in.Host, port, in.Username, tlsMode, in.ServerName, in.InsecureTLS) {
-				return ErrPasswordRequired
+				return nil, ErrPasswordRequired
 			}
 			pwd = prev.Password
 		}
 	}
-	var pwdEnc []byte
-	if pwd != "" {
-		var err error
-		pwdEnc, err = r.box.Seal([]byte(pwd), smtpAAD())
-		if err != nil {
-			return fmt.Errorf("smtpconfig.Update: seal password: %w", err)
-		}
+	if pwd == "" {
+		return nil, nil
 	}
+	pwdEnc, err := r.box.Seal([]byte(pwd), smtpAAD())
+	if err != nil {
+		return nil, fmt.Errorf("smtpconfig.Update: seal password: %w", err)
+	}
+	return pwdEnc, nil
+}
 
+// upsertRow writes the single row via a two-step probe + INSERT/UPDATE —
+// keeps the SQL portable between SQLite and Postgres without ON CONFLICT
+// clauses.
+func (r *Repo) upsertRow(ctx context.Context, in UpdateInputs, port, timeout int, tlsMode string, pwdEnc []byte, adminID *int64) error {
 	now := r.now().UTC()
-	// Upsert via two-step probe + INSERT/UPDATE — keeps the SQL
-	// portable between SQLite and Postgres without ON CONFLICT clauses.
 	var n int64
 	if err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM smtp_config WHERE id = 1`).Scan(&n); err != nil {
 		return err

@@ -98,25 +98,9 @@ func validateKindConfig(kind Kind, raw json.RawMessage, pol NetPolicy) error {
 		}
 		return validateHTTPURL(cfg.URL, "webhook", pol.AllowPlainHTTP)
 	case KindSplunk:
-		var cfg SplunkConfig
-		if err := unmarshalConfig(raw, &cfg); err != nil {
-			return err
-		}
-		if cfg.InsecureTLS {
-			// Never honoured: refuse rather than let the operator believe
-			// certificate verification is off.
-			return fmt.Errorf("%w: splunk: insecure_tls is not supported (certificates are always verified)", ErrInvalidConfig)
-		}
-		return validateHTTPURL(cfg.URL, "splunk", pol.AllowPlainHTTP)
+		return validateSplunkConfig(raw, pol)
 	case KindSentinel:
-		var cfg SentinelConfig
-		if err := unmarshalConfig(raw, &cfg); err != nil {
-			return err
-		}
-		if !sentinelWorkspaceRe.MatchString(cfg.WorkspaceID) {
-			return fmt.Errorf("%w: sentinel: workspace_id must be a GUID", ErrInvalidConfig)
-		}
-		return nil
+		return validateSentinelConfig(raw)
 	case KindElastic:
 		var cfg ElasticConfig
 		if err := unmarshalConfig(raw, &cfg); err != nil {
@@ -124,21 +108,53 @@ func validateKindConfig(kind Kind, raw json.RawMessage, pol NetPolicy) error {
 		}
 		return validateHTTPURL(cfg.URL, "elastic", pol.AllowPlainHTTP)
 	case KindSyslog:
-		var cfg SyslogConfig
-		if err := unmarshalConfig(raw, &cfg); err != nil {
-			return err
-		}
-		host, port, err := net.SplitHostPort(strings.TrimSpace(cfg.Address))
-		if err != nil || host == "" || port == "" {
-			return fmt.Errorf("%w: syslog: address must be host:port", ErrInvalidConfig)
-		}
-		if cfg.Network != "" && cfg.Network != "udp" && cfg.Network != "tcp" {
-			return fmt.Errorf("%w: syslog: network must be udp or tcp", ErrInvalidConfig)
-		}
-		return nil
+		return validateSyslogConfig(raw)
 	default:
 		return fmt.Errorf("%w: %q", ErrInvalidKind, kind)
 	}
+}
+
+// validateSplunkConfig refuses insecure_tls and checks the HEC URL.
+func validateSplunkConfig(raw json.RawMessage, pol NetPolicy) error {
+	var cfg SplunkConfig
+	if err := unmarshalConfig(raw, &cfg); err != nil {
+		return err
+	}
+	if cfg.InsecureTLS {
+		// Never honoured: refuse rather than let the operator believe
+		// certificate verification is off.
+		return fmt.Errorf("%w: splunk: insecure_tls is not supported (certificates are always verified)", ErrInvalidConfig)
+	}
+	return validateHTTPURL(cfg.URL, "splunk", pol.AllowPlainHTTP)
+}
+
+// validateSentinelConfig requires the workspace ID to be a GUID.
+func validateSentinelConfig(raw json.RawMessage) error {
+	var cfg SentinelConfig
+	if err := unmarshalConfig(raw, &cfg); err != nil {
+		return err
+	}
+	if !sentinelWorkspaceRe.MatchString(cfg.WorkspaceID) {
+		return fmt.Errorf("%w: sentinel: workspace_id must be a GUID", ErrInvalidConfig)
+	}
+	return nil
+}
+
+// validateSyslogConfig requires a host:port address and a udp/tcp (or
+// empty) network.
+func validateSyslogConfig(raw json.RawMessage) error {
+	var cfg SyslogConfig
+	if err := unmarshalConfig(raw, &cfg); err != nil {
+		return err
+	}
+	host, port, err := net.SplitHostPort(strings.TrimSpace(cfg.Address))
+	if err != nil || host == "" || port == "" {
+		return fmt.Errorf("%w: syslog: address must be host:port", ErrInvalidConfig)
+	}
+	if cfg.Network != "" && cfg.Network != "udp" && cfg.Network != "tcp" {
+		return fmt.Errorf("%w: syslog: network must be udp or tcp", ErrInvalidConfig)
+	}
+	return nil
 }
 
 func unmarshalConfig(raw json.RawMessage, v any) error {
