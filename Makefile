@@ -109,7 +109,7 @@ compose-logs: ## Tail SealKeeper logs
 
 .PHONY: helm-lint
 helm-lint: ## helm lint helm/sealkeeper
-	$(HELM) lint helm/sealkeeper
+	$(HELM) lint helm/sealkeeper --set secret.masterSecret="$$(openssl rand -base64 32)"
 
 .PHONY: helm-package
 helm-package: ## Package the chart into chart-dist/

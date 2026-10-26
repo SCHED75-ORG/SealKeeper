@@ -44,3 +44,33 @@ func TestValidate_RejectsBadTrustedProxy(t *testing.T) {
 		t.Fatal("validate accepted a malformed SK_TRUSTED_PROXY_CIDRS entry")
 	}
 }
+
+// Regression: any string was accepted as the production master secret,
+// including the REPLACE_ME placeholder shipped in k8s/secret.example.yaml.
+func TestValidate_MasterSecret(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name, secret string
+		ok           bool
+	}{
+		{"base64 32 bytes", "q83vEjRWeJq83vEjRWeJq83vEjRWeJq83vEjRWeJq8M=", true},
+		{"long passphrase (legacy)", "correct horse battery staple and then some more", true},
+		{"shipped placeholder", "REPLACE_ME_WITH_BASE64_32_BYTES", false},
+		{"changeme", "changeme-changeme-changeme-changeme", false},
+		{"short", "hunter2", false},
+		{"base64 16 bytes", "AAAAAAAAAAAAAAAAAAAAAA==", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := Defaults()
+			cfg.MasterSecret = c.secret
+			cfg.BaseURL = "https://sk.example.test"
+			cfg.DatabaseURL = "sqlite://x.db"
+			err := cfg.validate()
+			if (err == nil) != c.ok {
+				t.Fatalf("validate() err = %v, want ok=%v", err, c.ok)
+			}
+		})
+	}
+}
