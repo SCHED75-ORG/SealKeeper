@@ -34,6 +34,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 
@@ -88,9 +89,8 @@ type Server struct {
 	logger   *slog.Logger
 	readyz   *readiness.Set
 	mail     *mailcapture.Store
-	sender   mailer.Sender // never nil — defaults to capture in eval, noop otherwise
-	tokens   *tokens.Repo  // optional — nil when storage is unavailable
-	audit    *audit.Repo   // optional — nil when storage is unavailable
+	tokens   *tokens.Repo // optional — nil when storage is unavailable
+	audit    *audit.Repo  // optional — nil when storage is unavailable
 	limiter  ratelimit.Composite
 	reqCount *prometheus.CounterVec
 	reqDur   *prometheus.HistogramVec
@@ -134,6 +134,13 @@ type Server struct {
 	requestFloor time.Duration
 	mailSlots    chan struct{}
 	mailWG       sync.WaitGroup
+
+	// sender is never nil — capture in eval, noop otherwise. /admin/smtp
+	// swaps it while requests read it: go through currentSender /
+	// storeSender. smtpMu serialises RebuildSMTPSender so the last
+	// rebuild always installs the latest saved relay.
+	sender atomic.Pointer[senderRef]
+	smtpMu sync.Mutex
 }
 
 // New builds an HTTP server with the given configuration.
@@ -190,7 +197,7 @@ func New(cfg config.Config, logger *slog.Logger) *Server {
 		trusted = nil
 	}
 
-	return &Server{
+	s := &Server{
 		trustedProxies: trusted,
 		pseudonymKey:   pseudonymKey(cfg.MasterSecret),
 		loginLimiter:   ratelimit.New(adminLoginPerIPWindow, 15*time.Minute),
@@ -199,7 +206,6 @@ func New(cfg config.Config, logger *slog.Logger) *Server {
 		logger:         logger,
 		readyz:         readiness.New(),
 		mail:           mailStore,
-		sender:         defaultSender,
 		limiter:        limiter,
 		reqCount:       reqCount,
 		reqDur:         reqDur,
@@ -213,7 +219,19 @@ func New(cfg config.Config, logger *slog.Logger) *Server {
 		requestFloor:   requestLatencyFloor,
 		mailSlots:      make(chan struct{}, mailWorkers),
 	}
+	s.storeSender(defaultSender)
+	return s
 }
+
+// senderRef boxes the mailer.Sender interface for atomic.Pointer.
+type senderRef struct{ mailer.Sender }
+
+// currentSender returns the active mail sender. Callers that use it more
+// than once (Send then Name) take one snapshot so a concurrent swap
+// cannot split them across two transports.
+func (s *Server) currentSender() mailer.Sender { return s.sender.Load().Sender }
+
+func (s *Server) storeSender(sender mailer.Sender) { s.sender.Store(&senderRef{sender}) }
 
 // MailStore returns the underlying mail capture store (eval mode).
 func (s *Server) MailStore() *mailcapture.Store { return s.mail }
@@ -244,7 +262,7 @@ func (s *Server) SetSender(sender mailer.Sender) {
 			return
 		}
 	}
-	s.sender = sender
+	s.storeSender(sender)
 }
 
 // SetDomains binds the allowlist repo. When nil, every domain is accepted —
@@ -309,6 +327,8 @@ func (s *Server) RebuildSMTPSender(ctx context.Context) error {
 	if s.cfg.IsDemo() {
 		return nil
 	}
+	s.smtpMu.Lock()
+	defer s.smtpMu.Unlock()
 	cfg, err := s.smtpConfig.Get(ctx)
 	if errors.Is(err, smtpconfig.ErrNotConfigured) {
 		return nil
@@ -334,7 +354,7 @@ func (s *Server) RebuildSMTPSender(ctx context.Context) error {
 	// Bypass the SetSender guard against non-capture senders in demo
 	// mode by short-circuiting above; here we know the mode is not
 	// demo so direct assignment is fine.
-	s.sender = sender
+	s.storeSender(sender)
 	return nil
 }
 
@@ -738,7 +758,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	// Any other sender talks to a relay: it runs in the background so the
 	// relay round trip never shows in the response time (FR-B.13); a
 	// failure is audited as mail.send_failed.
-	sender := s.sender
+	sender := s.currentSender()
 	captureID := ""
 	if cs, ok := sender.(*mailer.CaptureSender); ok && cs.Store != nil {
 		captureID = cs.Store.CaptureFor(captureOwner, msg.To, msg.Subject, msg.String())
@@ -940,7 +960,7 @@ func (s *Server) handlePolicy(w http.ResponseWriter, r *http.Request) {
 // owner and returns its NotifyOnConsult flag. Returns false on any error
 // or when the policies layer is not wired (zero-config eval).
 func (s *Server) shouldNotifyPostConsult(ctx context.Context, email string) bool {
-	if s.policies == nil || s.mailTpls == nil || s.sender == nil {
+	if s.policies == nil || s.mailTpls == nil {
 		return false
 	}
 	pol, err := s.policies.Resolve(ctx, email)
@@ -1052,17 +1072,18 @@ func (s *Server) dispatchPostConsult(m postConsultMail) {
 		})
 		return
 	}
-	if err := s.sender.Send(ctx, msg); err != nil {
-		s.logger.Error("post-consultation send failed", "transport", s.sender.Name(), "err", err)
+	sender := s.currentSender()
+	if err := sender.Send(ctx, msg); err != nil {
+		s.logger.Error("post-consultation send failed", "transport", sender.Name(), "err", err)
 		s.auditAppend(ctx, "mail.post_consult_failed", m.email, tokenRef(m.token), map[string]any{
 			"stage":     "send",
-			"transport": s.sender.Name(),
+			"transport": sender.Name(),
 			"error":     err.Error(),
 		})
 		return
 	}
 	s.auditAppend(ctx, "mail.post_consult_sent", m.email, tokenRef(m.token), map[string]any{
-		"transport": s.sender.Name(),
+		"transport": sender.Name(),
 	})
 }
 

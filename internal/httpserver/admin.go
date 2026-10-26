@@ -702,7 +702,7 @@ func (s *Server) handleAdminDashboard(w http.ResponseWriter, r *http.Request) {
 		"Mode":           mode,
 		"BaseURL":        s.cfg.BaseURL,
 		"InstanceDomain": s.cfg.InstanceDomain,
-		"SenderName":     s.sender.Name(),
+		"SenderName":     s.currentSender().Name(),
 	})
 }
 
@@ -4034,7 +4034,7 @@ func (s *Server) handleAdminSMTP(w http.ResponseWriter, r *http.Request) {
 		"Config":      cfg,
 		"Configured":  configured,
 		"HasPassword": hasPassword,
-		"SenderName":  s.sender.Name(),
+		"SenderName":  s.currentSender().Name(),
 		"OK":          querySlug(r, "ok"),
 		"Error":       querySlug(r, "err"),
 		"Details":     r.URL.Query().Get("details"),
@@ -4141,13 +4141,14 @@ func (s *Server) handleAdminSMTPTest(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
-	if err := s.sender.Send(ctx, msg); err != nil {
+	sender := s.currentSender()
+	if err := sender.Send(ctx, msg); err != nil {
 		// The full error (with the remote reply text) stays in the server
 		// log; the UI and the audit chain only get the sanitised status.
 		s.logger.Warn("smtp test failed", "to", to, "err", err)
 		status := mailer.FailureStatus(err)
 		s.auditAppend(r.Context(), "smtp.test_failed", a.Email, to, map[string]any{
-			"transport": s.sender.Name(),
+			"transport": sender.Name(),
 			"status":    status,
 		})
 		http.Redirect(w, r,
@@ -4156,7 +4157,7 @@ func (s *Server) handleAdminSMTPTest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.auditAppend(r.Context(), "smtp.test_sent", a.Email, to, map[string]any{
-		"transport": s.sender.Name(),
+		"transport": sender.Name(),
 	})
 	http.Redirect(w, r, "/admin/smtp?ok=test_sent", http.StatusSeeOther)
 }
