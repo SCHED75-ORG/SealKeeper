@@ -44,7 +44,8 @@ build: ## Build local binary into ./dist/sealkeeper
 web-embed: ## Build the JS bundle and copy it into internal/webbundle for go:embed
 	cd web && npm ci --ignore-scripts --no-audit --no-fund && npm run build
 	test -s web/dist/sealkeeper-generation.umd.js
-	cp web/dist/sealkeeper-generation.umd.js internal/webbundle/dist/
+	test -s web/dist/sealkeeper-generation.umd.js.map
+	cp web/dist/sealkeeper-generation.umd.js web/dist/sealkeeper-generation.umd.js.map internal/webbundle/dist/
 
 .PHONY: build-all
 build-all: web-embed ## Build linux+darwin × amd64+arm64 binaries (bundle embedded)

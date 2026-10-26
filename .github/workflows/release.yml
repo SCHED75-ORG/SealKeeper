@@ -316,7 +316,9 @@ jobs:
           npm ci --ignore-scripts --no-audit --no-fund
           npm run build
           test -s dist/sealkeeper-generation.umd.js
-          cp dist/sealkeeper-generation.umd.js ../internal/webbundle/dist/
+          test -s dist/sealkeeper-generation.umd.js.map
+          cp dist/sealkeeper-generation.umd.js dist/sealkeeper-generation.umd.js.map \
+            ../internal/webbundle/dist/
 
       - name: Build reproducibly
         env:

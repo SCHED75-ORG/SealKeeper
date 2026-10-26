@@ -3,7 +3,8 @@
 //
 // web/dist is gitignored and outside any Go package, so the release build
 // (release.yml build-binaries, `make web-embed`) copies the Vite output into
-// dist/ here before `go build`. A plain checkout only carries dist/.gitkeep:
+// dist/ here before `go build`, together with its source map (the bundle's
+// trailing sourceMappingURL points at it, as in the Docker image). A plain checkout only carries dist/.gitkeep:
 // `go build ./...` still compiles, FS returns nil and the server falls back
 // to the on-disk web directory alone, as before. The Docker image keeps
 // serving /app/web (SK_WEB_DIR wins over the embedded copy).
