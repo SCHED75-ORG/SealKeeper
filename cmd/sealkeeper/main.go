@@ -486,6 +486,20 @@ func openAuditRepo(ctx context.Context, cfg config.Config, db *sql.DB, logger *s
 	return repo, nil
 }
 
+// appendCLIAudit records a CLI action in the keyed audit chain.
+func appendCLIAudit(ctx context.Context, repo *admin.Repo, event, target string, details map[string]any) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	key, err := audit.DeriveKey(cfg.MasterSecret)
+	if err != nil {
+		return err
+	}
+	_, err = audit.NewRepo(repo.DB(), key).Append(ctx, event, "cli", target, details)
+	return err
+}
+
 // openAdminRepo loads config, opens the database, runs migrations and
 // binds an admin.Repo with a real cryptobox. Shared by every admin
 // subcommand; returns the repo + a cleanup closure.
@@ -594,7 +608,9 @@ func runAdminEnable(args []string) int {
 		fmt.Fprintf(os.Stderr, "admin enable: %v\n", err)
 		return 1
 	}
-	if _, err := audit.NewRepo(repo.DB()).Append(ctx, "admin.enabled", "cli", a.Email,
+	// The audit chain is HMAC-keyed from the master secret: derive the same
+	// key the server uses, or the row would break the chain.
+	if err := appendCLIAudit(ctx, repo, "admin.enabled", a.Email,
 		map[string]any{"admin_id": a.ID, "via": "cli"}); err != nil {
 		fmt.Fprintf(os.Stderr, "admin enable: audit append failed: %v\n", err)
 	}
