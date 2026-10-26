@@ -27,10 +27,18 @@ templates. A CR or LF in any header value is refused.
 Template rules (enforced at save time and again on every send, see
 `internal/mailtemplates/safety.go`): `{{ .RevealURL }}` may only be the whole
 `href` of a link in the HTML body, appear on its own in the text body, and
-never in the subject; the HTML body may not load anything remote (no remote
-`src`, no stylesheet links, no CSS `url()`/`@import`, no `ping=`, no
-scripts, frames, forms or meta refresh). The shipped defaults load no remote
-resource and contain no tracking.
+never in the subject. The rendered HTML body is held to an allowlist of
+elements and attributes typical of transactional mail (layout tables, text
+formatting, `<a>`, `<img>`, `<meta charset>`, `<title>`, `<style>`), checked
+both with the HTML tokenizer and with a scripting-disabled tree builder.
+Anything else is refused, including every element whose content a mail
+client could parse differently (`noscript`, `xmp`, `noembed`, `noframes`,
+`plaintext`, `textarea`, `iframe`, `script`, `template`, SVG/MathML, VML).
+`<title>`/`<style>` content may not contain `<`; CSS may not use `url()`,
+`image-set()`, `@import` or any at-rule but `@media`, or backslash escapes;
+links may only use `https:`, `http:`, `mailto:` or `#`; `<img src>` only
+`data:image/{png,gif,jpeg,webp}` or `cid:`. The shipped defaults load no
+remote resource and contain no tracking.
 
 The mail language is the instance setting `SK_MAIL_LANGUAGE` (`en` or `fr`),
 never the requester's `Accept-Language`.
