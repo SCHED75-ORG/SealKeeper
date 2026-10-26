@@ -101,10 +101,11 @@ func TestLoad_DeprecatedKnobs(t *testing.T) {
 
 	t.Setenv("SK_MAX_ACTIVE_SESSIONS", "50")
 	t.Setenv("SK_SESSION_TTL_SECONDS", "300")
+	t.Setenv("SK_SWAGGER_UI_ENABLED", "true") // no /api/docs route exists
 	if cfg, err = Load(); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if len(cfg.Warnings) != 2 {
+	if len(cfg.Warnings) != 3 {
 		t.Errorf("Warnings = %v, want one per ignored knob", cfg.Warnings)
 	}
 }

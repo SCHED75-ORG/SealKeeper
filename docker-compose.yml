@@ -80,7 +80,6 @@ services:
       SK_MAX_LIBRARY_SIZE_MB: ${SK_MAX_LIBRARY_SIZE_MB:-10}
       SK_ADMIN_SESSION_TTL_SECONDS: ${SK_ADMIN_SESSION_TTL_SECONDS:-28800}
       SK_ADMIN_SESSION_IDLE_SECONDS: ${SK_ADMIN_SESSION_IDLE_SECONDS:-1800}
-      SK_SWAGGER_UI_ENABLED: ${SK_SWAGGER_UI_ENABLED:-false}
       SK_DEMO_MODE: ${SK_DEMO_MODE:-false}
     volumes:
       - sealkeeper-data:/data # libraries + (eval) SQLite

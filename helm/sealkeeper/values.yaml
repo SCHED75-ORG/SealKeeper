@@ -35,7 +35,6 @@ config:
   maxLibrarySizeMB: 10
   adminSessionTTLSeconds: 28800
   adminSessionIdleSeconds: 1800
-  swaggerUiEnabled: false
   demoMode: false
 
 # Secrets — see secret.yaml. In production prefer ExternalSecrets / Sealed

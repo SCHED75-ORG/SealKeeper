@@ -63,6 +63,8 @@ type Config struct {
 	// startup rather than silently ignored.
 	MaintenanceMode bool `yaml:"maintenance_mode"`
 
+	// Deprecated: no /api/docs route exists. true only produces a startup
+	// warning (see Warnings) rather than being silently ignored.
 	SwaggerUIEnabled bool `yaml:"swagger_ui_enabled"`
 	DemoMode         bool `yaml:"demo_mode"`
 
@@ -195,6 +197,9 @@ func (c Config) deprecationWarnings() []string {
 	}
 	if c.SessionTTL != d.SessionTTL {
 		out = append(out, "SK_SESSION_TTL_SECONDS / session_ttl is ignored: the user session lifetime is set per policy in /admin/policies")
+	}
+	if c.SwaggerUIEnabled {
+		out = append(out, "SK_SWAGGER_UI_ENABLED / swagger_ui_enabled is not implemented and is ignored: no /api/docs route is served")
 	}
 	return out
 }
