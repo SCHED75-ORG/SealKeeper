@@ -52,6 +52,15 @@ func opaqueToken(n int) (string, error) {
 // to a stopwatch attacker.
 const adminConstantTime = 300 * time.Millisecond
 
+// Body caps for the admin POSTs reachable without a session. Without them
+// ParseForm buffers up to 10 MB, and the login email went verbatim into the
+// audit log and the redirect. The login form is four short fields; the
+// WebAuthn assertion is a few KB of JSON.
+const (
+	adminLoginMaxBodyBytes    = 8 << 10
+	adminWebauthnMaxBodyBytes = 64 << 10
+)
+
 const (
 	cookieAdminSession = "sk_admin_session"
 	cookieAdminCSRF    = "sk_admin_csrf"
@@ -225,6 +234,7 @@ func (s *Server) handleAdminLoginPost(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "admin disabled (no storage)", http.StatusServiceUnavailable)
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, adminLoginMaxBodyBytes)
 	if err := r.ParseForm(); err != nil {
 		s.adminLoginError(w, r, "bad_form")
 		return
@@ -234,11 +244,22 @@ func (s *Server) handleAdminLoginPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// No admin can hold an address over MaxEmailBytes; audit a bounded
+	// prefix and answer like a wrong password.
 	email := strings.TrimSpace(r.FormValue("email"))
+	overlong := len(email) > admin.MaxEmailBytes
+	if overlong {
+		email = strings.ToValidUTF8(email[:admin.MaxEmailBytes], "")
+	}
 	password := r.FormValue("password")
 	if !s.loginLimiter.Allow(rateLimitIPKey(s.clientIP(r))) {
 		s.auditAppend(r.Context(), "admin.login_failed", email, "", map[string]any{"reason": "rate_limited"})
 		s.adminLoginError(w, r, "rate_limited")
+		return
+	}
+	if overlong {
+		s.auditAppend(r.Context(), "admin.login_failed", email, "", map[string]any{"reason": "email_too_long"})
+		s.adminLoginError(w, r, "bad_creds")
 		return
 	}
 	totpCode := strings.TrimSpace(r.FormValue("totp"))
@@ -313,6 +334,7 @@ func (s *Server) handleAdminLogout(w http.ResponseWriter, r *http.Request) {
 		// Require the session's CSRF token so a cross-site POST cannot log
 		// the operator out (e.g. in the middle of an incident).
 		if sess, _, err := s.adminRepo.LookupSession(r.Context(), c.Value); err == nil {
+			r.Body = http.MaxBytesReader(w, r.Body, adminLoginMaxBodyBytes)
 			_ = r.ParseForm()
 			if !constantTimeEqualString(sess.CSRFToken, r.FormValue("csrf_token")) {
 				http.Error(w, "csrf", http.StatusForbidden)
@@ -429,6 +451,7 @@ func (s *Server) handleAdminLoginWebauthnBegin(w http.ResponseWriter, r *http.Re
 		http.Error(w, "webauthn not configured", http.StatusServiceUnavailable)
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, adminLoginMaxBodyBytes)
 	if err := r.ParseForm(); err != nil || !s.checkLoginCSRF(r) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
@@ -470,6 +493,7 @@ func (s *Server) handleAdminLoginWebauthnFinish(w http.ResponseWriter, r *http.R
 		http.Error(w, "webauthn not configured", http.StatusServiceUnavailable)
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, adminWebauthnMaxBodyBytes)
 	if !s.checkLoginCSRF(r) {
 		http.Error(w, "csrf", http.StatusForbidden)
 		return
@@ -545,6 +569,7 @@ func (s *Server) handleAdminLoginWebauthnFinish(w http.ResponseWriter, r *http.R
 // step-up and return to the password form (or use TOTP). We just drop the
 // pending token + cookies and bounce to /admin/login.
 func (s *Server) handleAdminLoginWebauthnCancel(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, adminLoginMaxBodyBytes)
 	if err := r.ParseForm(); err != nil || !s.checkLoginCSRF(r) {
 		http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
 		return
@@ -2228,7 +2253,9 @@ func (s *Server) draftSetup(r *http.Request) (totp.Secret, string, []string) {
 
 func (s *Server) adminLoginError(w http.ResponseWriter, r *http.Request, slug string) {
 	q := "?err=" + slug
-	if email := strings.TrimSpace(r.FormValue("email")); email != "" {
+	// An overlong email is never echoed: it could only be an attacker's
+	// payload, and the Location header would carry it URL-escaped.
+	if email := strings.TrimSpace(r.FormValue("email")); email != "" && len(email) <= admin.MaxEmailBytes {
 		q += "&email=" + url.QueryEscape(email)
 	}
 	http.Redirect(w, r, "/admin/login"+q, http.StatusSeeOther)

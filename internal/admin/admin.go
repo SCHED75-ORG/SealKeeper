@@ -60,6 +60,15 @@ var (
 // safe, and the operator surface is for trusted humans.
 var emailRe = regexp.MustCompile(`^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+$`)
 
+// MaxEmailBytes is the RFC 5321 ceiling on a usable address. Create and
+// ChangeEmail refuse anything longer, so the login surface can drop a
+// longer email before it reaches the audit log or a redirect.
+const MaxEmailBytes = 254
+
+func validEmail(email string) bool {
+	return len(email) <= MaxEmailBytes && emailRe.MatchString(email)
+}
+
 // Admin represents a row in the admins table that the application is
 // allowed to see. Secrets (password hash, totp_secret_enc) stay inside the
 // repository.
@@ -147,7 +156,7 @@ func (r *Repo) Create(ctx context.Context, email, plainPassword string) (Admin, 
 	if plainPassword == "" {
 		return Admin{}, errors.New("admin.Create: password required")
 	}
-	if !emailRe.MatchString(email) {
+	if !validEmail(email) {
 		return Admin{}, ErrInvalidEmail
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(plainPassword), bcrypt.DefaultCost)
@@ -178,7 +187,7 @@ func (r *Repo) Create(ctx context.Context, email, plainPassword string) (Admin, 
 // same semantics as Create.
 func (r *Repo) ChangeEmail(ctx context.Context, adminID int64, newEmail string) error {
 	newEmail = strings.ToLower(strings.TrimSpace(newEmail))
-	if !emailRe.MatchString(newEmail) {
+	if !validEmail(newEmail) {
 		return ErrInvalidEmail
 	}
 	now := r.now().UTC()

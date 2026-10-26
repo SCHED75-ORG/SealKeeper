@@ -55,6 +55,27 @@ func TestCreateRejectsInvalidEmail(t *testing.T) {
 	}
 }
 
+// The login handler drops any email over MaxEmailBytes unread, so no
+// account may be created or renamed past it.
+func TestEmailCappedAtMaxEmailBytes(t *testing.T) {
+	t.Parallel()
+	r := newRepo(t)
+	ctx := context.Background()
+	at := "@example.test"
+	fits := strings.Repeat("a", admin.MaxEmailBytes-len(at)) + at
+	a, err := r.Create(ctx, fits, "supersecret-12chars")
+	if err != nil {
+		t.Fatalf("Create %d-byte email: %v", len(fits), err)
+	}
+	over := "b" + fits
+	if _, err := r.Create(ctx, over, "supersecret-12chars"); !errors.Is(err, admin.ErrInvalidEmail) {
+		t.Errorf("Create %d-byte email err = %v, want ErrInvalidEmail", len(over), err)
+	}
+	if err := r.ChangeEmail(ctx, a.ID, over); !errors.Is(err, admin.ErrInvalidEmail) {
+		t.Errorf("ChangeEmail %d-byte email err = %v, want ErrInvalidEmail", len(over), err)
+	}
+}
+
 func TestCreateRejectsDuplicate(t *testing.T) {
 	t.Parallel()
 	r := newRepo(t)

@@ -223,8 +223,23 @@ type tail struct {
 	hash string
 }
 
+// MaxFieldBytes caps actor and target. Both can carry request input, and a
+// chained row cannot be deleted, so an unbounded value is a permanent disk
+// write for whoever controls it. Callers bound their own input; this is the
+// backstop.
+const MaxFieldBytes = 2048
+
+// clipField truncates s to MaxFieldBytes without splitting a rune.
+func clipField(s string) string {
+	if len(s) <= MaxFieldBytes {
+		return s
+	}
+	return strings.ToValidUTF8(s[:MaxFieldBytes], "")
+}
+
 // Append writes a new entry and advances the head anchor in the same
-// transaction.
+// transaction. Actor and target longer than MaxFieldBytes are truncated
+// before they are stored and authenticated.
 func (r *Repo) Append(ctx context.Context, eventType, actor, target string, details map[string]any) (Entry, error) {
 	if strings.TrimSpace(eventType) == "" {
 		return Entry{}, errors.New("audit.Append: event_type required")
@@ -232,6 +247,7 @@ func (r *Repo) Append(ctx context.Context, eventType, actor, target string, deta
 	if len(r.key) == 0 {
 		return Entry{}, fmt.Errorf("audit.Append: %w", ErrNoKey)
 	}
+	actor, target = clipField(actor), clipField(target)
 
 	detailsJSON, err := canonicalJSON(details)
 	if err != nil {
