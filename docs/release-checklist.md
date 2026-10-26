@@ -20,6 +20,23 @@
 | 9 | Tag from `main` with an annotated **signed** tag (FR-L.63): `git tag -s vX.Y.Z -m "SealKeeper vX.Y.Z"`. Verify locally with `git tag -v vX.Y.Z` before pushing. | Release manager | ☐ |
 | 10 | Push the tag (`git push origin vX.Y.Z`) and watch the `release` workflow. Do not delete or recreate the tag once `release.yml` has started — Rekor will already have recorded the signature. | Release manager | ☐ |
 
+## One-time repository settings (release supply chain)
+
+`release.yml` only runs on a tag push (there is no manual `workflow_dispatch`
+path), builds exactly the commit the verified tag points to, and runs every
+signing / publishing job (`build-image`, `sign-binaries`, `release`) in the
+protected `release` environment. The workflow file cannot enforce the
+following by itself — a maintainer must configure them once in GitHub:
+
+| Setting | Where | Value |
+|---------|-------|-------|
+| `release` environment | Settings → Environments → New environment | Name `release` (must match `environment: release` in the workflow). |
+| Required reviewers | `release` environment | At least one maintainer; enable **Prevent self-review**. The run pauses twice: once before `build-image` + `sign-binaries`, once before the final `release` job. |
+| Deployment branches and tags | `release` environment | **Selected branches and tags** → add tag rule `v*.*.*` only (no branches). A run started from any other ref cannot enter the environment or read its secrets. |
+| Environment secrets | `release` environment | `MAINTAINER_GPG_PRIVATE`, `MAINTAINER_GPG_PASSPHRASE`, `HELM_REPO_URL`, `HELM_REPO_USER`, `HELM_REPO_TOKEN`. **Delete any repository-level copies** — a repository secret is readable by every workflow run, including one started from an unreviewed branch. `MAINTAINER_GPG_PUBLIC` and `MAINTAINER_GPG_FPR` may stay repository secrets (they are public). |
+| Tag ruleset | Settings → Rules → Rulesets → New tag ruleset | Target `v*.*.*`; restrict creations, updates and deletions; bypass list = release maintainers only. |
+| Actions permissions | Settings → Actions → General | Workflow permissions: **Read repository contents** (the workflow requests write scopes per job). |
+
 ## Post-release
 
 | # | Step | Owner | Done? |
@@ -36,7 +53,10 @@ If the `release` workflow fails after the tag is pushed:
 
 1. **Do not** delete or move the tag. The signed tag is immutable and may already
    be referenced in Rekor.
-2. Investigate the failing job. Smoke-test failures should be treated as
+2. Investigate the failing job. A transient failure (runner, network) is
+   retried with **Re-run failed jobs** on the original tag-push run — never
+   from another branch, which would not be able to enter the `release`
+   environment and would sign under the wrong identity. Smoke-test failures should be treated as
    "release blocker, the bundle does not actually work".
 3. If a fix is required, commit it to `main` (`fix:` prefix), then issue a new
    patch tag (e.g. `v0.1.1` after a failed `v0.1.0`). Never re-use a tag that

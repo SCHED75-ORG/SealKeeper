@@ -170,7 +170,7 @@ jobs:
           # DECISION: -trimpath + -buildvcs prepare ground for SLSA L3 (FR-L.68)
           go build -trimpath -buildvcs=true \
             -ldflags "-s -w -X main.Version=ci-${GITHUB_SHA::7}" \
-            -o "dist/sealkeeper-linux-${{ matrix.goarch }}" \
+            -o "dist/sealkeeper-linux-${GOARCH}" \
             ./cmd/sealkeeper
 
       - name: Upload binary artifact
@@ -474,8 +474,12 @@ jobs:
     if: always()
     steps:
       - name: Verify all upstream jobs succeeded
+        env:
+          # Expressions travel through env, never inline in run: (script
+          # injection hygiene, see release.yml header).
+          UPSTREAM_FAILED: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
         run: |
-          if [ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}" = "true" ]; then
+          if [ "$UPSTREAM_FAILED" = "true" ]; then
             echo "::error::One or more upstream jobs failed or were cancelled"
             exit 1
           fi

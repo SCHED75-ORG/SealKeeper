@@ -19,13 +19,15 @@ sha256sum -c SHA256SUMS
 
 # 2. Cosign keyless signature on the OCI image
 cosign verify \
-  --certificate-identity-regexp '^https://github.com/sched75/SealKeeper/.github/workflows/release\.yml@refs/tags/' \
+  --certificate-identity "https://github.com/sched75/SealKeeper/.github/workflows/release.yml@refs/tags/${TAG}" \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   ghcr.io/sealkeeper/sealkeeper:${TAG}
 
 # 3. SLSA provenance attestation
 gh attestation verify oci://ghcr.io/sealkeeper/sealkeeper:${TAG} \
-  --repo sched75/SealKeeper
+  --repo sched75/SealKeeper \
+  --signer-workflow sched75/SealKeeper/.github/workflows/release.yml \
+  --source-ref "refs/tags/${TAG}"
 
 # 4. SBOM (CycloneDX 1.5) for the image
 cosign download attestation \
@@ -77,7 +79,7 @@ Install cosign ≥ v2.4 (`brew install cosign` or
 
 ```bash
 cosign verify \
-  --certificate-identity-regexp '^https://github.com/sched75/SealKeeper/\.github/workflows/release\.yml@refs/tags/' \
+  --certificate-identity 'https://github.com/sched75/SealKeeper/.github/workflows/release.yml@refs/tags/v0.1.0' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   ghcr.io/sealkeeper/sealkeeper:v0.1.0
 ```
@@ -101,7 +103,9 @@ it natively:
 
 ```bash
 gh attestation verify oci://ghcr.io/sealkeeper/sealkeeper:v0.1.0 \
-  --repo sched75/SealKeeper
+  --repo sched75/SealKeeper \
+  --signer-workflow sched75/SealKeeper/.github/workflows/release.yml \
+  --source-ref refs/tags/v0.1.0
 ```
 
 Expected: `Loaded ... attestation(s) from ...; verified signed by ...; the

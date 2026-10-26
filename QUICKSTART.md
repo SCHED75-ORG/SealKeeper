@@ -126,11 +126,12 @@ We sign everything. Before running a binary, verify the GPG signature on `SHA256
 ```bash
 TAG=v0.1.0
 cosign verify \
-  --certificate-identity-regexp '^https://github.com/sched75/SealKeeper/\.github/workflows/release\.yml@refs/tags/' \
+  --certificate-identity "https://github.com/sched75/SealKeeper/.github/workflows/release.yml@refs/tags/${TAG}" \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   ghcr.io/sealkeeper/sealkeeper:${TAG}
 
-gh attestation verify oci://ghcr.io/sealkeeper/sealkeeper:${TAG} --repo sched75/SealKeeper
+gh attestation verify oci://ghcr.io/sealkeeper/sealkeeper:${TAG} --repo sched75/SealKeeper \
+  --signer-workflow sched75/SealKeeper/.github/workflows/release.yml --source-ref "refs/tags/${TAG}"
 ```
 
 ---

@@ -32,6 +32,32 @@
 #   in parallel. The terminal `release` job depends on every upstream job and is
 #   the only one that actually publishes the GitHub Release — this guarantees a
 #   single point of "publish" that we can gate on the smoke tests.
+#
+# SUPPLY-CHAIN HARDENING (SK-21):
+#   - Tag push is the ONLY trigger. The former `workflow_dispatch` path verified
+#     the tag named in its input but built `github.sha` of whatever branch it
+#     was started from, then signed that under the verified tag's name. A failed
+#     release is re-run from the tag-push run ("Re-run jobs"), which keeps the
+#     cosign identity bound to `refs/tags/<version>`.
+#   - Every job checks out `refs/tags/<version>` explicitly and asserts that
+#     HEAD is the commit the verified tag points to.
+#   - No `${{ }}` expression is interpolated inside a `run:` script: values
+#     travel through `env:` and are referenced as quoted shell variables.
+#   - Jobs that sign or publish (build-image, sign-binaries, release) run in the
+#     protected `release` environment. The maintainer GPG secrets MUST be
+#     environment secrets of that environment, not repository secrets.
+#     Required repository settings (Settings → Environments → `release`):
+#       * Required reviewers: at least one maintainer, "Prevent self-review" on.
+#       * Deployment branches and tags: "Selected" → tag pattern `v*.*.*` only.
+#       * Environment secrets: MAINTAINER_GPG_PRIVATE, MAINTAINER_GPG_PASSPHRASE,
+#         HELM_REPO_URL / HELM_REPO_USER / HELM_REPO_TOKEN (delete any
+#         repository-level copies).
+#     And Settings → Rules → Tag ruleset on `v*.*.*`: restrict creation,
+#     update and deletion to maintainers.
+#   - Permissions default to `contents: read`; each job adds only what it needs.
+#   - Third-party actions are pinned by commit SHA; syft and trivy are fetched
+#     from pinned release assets and checked against a hard-coded SHA-256.
+#   - Release builds do not consume GitHub Actions caches (cache poisoning).
 # =============================================================================
 
 name: Release
@@ -40,30 +66,26 @@ on:
   push:
     tags:
       - "v*.*.*"
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: "Tag to release (must already exist, signed)"
-        required: true
 
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
 permissions:
-  contents: write        # create GitHub Release, upload assets
-  packages: write        # push image to ghcr.io
-  id-token: write        # cosign keyless via OIDC
-  attestations: write    # SLSA provenance attestation
-  security-events: write # upload Trivy SARIF to the Security tab
+  contents: read
 
 env:
   GO_VERSION: "1.26.10"
   NODE_VERSION: "20"
   IMAGE_REPO: ghcr.io/${{ github.repository_owner }}/sealkeeper
   COSIGN_VERSION: v2.4.1
-  SYFT_VERSION: v1.18.1
-  TRIVY_VERSION: 0.58.0
+  # syft + trivy: pinned release asset + SHA-256 of that asset. Bump both
+  # values together (sha256 from the upstream *_checksums.txt, cross-checked
+  # against a local download).
+  SYFT_VERSION: "1.18.1"
+  SYFT_SHA256: "066c251652221e4d44fcc4d115ce3df33a91769da38c830a8533199db2f65aab"
+  TRIVY_VERSION: "0.75.0"
+  TRIVY_SHA256: "b6d7b944b6cbf4e7de5b4bc6c3635900c50fed53b64b77b99a5fbc3136cd1d5d"
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -73,30 +95,28 @@ jobs:
     name: Verify signed tag
     runs-on: ubuntu-latest
     timeout-minutes: 3
+    permissions:
+      contents: read
     outputs:
       version: ${{ steps.parse.outputs.version }}
       version_nopv: ${{ steps.parse.outputs.version_nopv }}
+      commit: ${{ steps.verify.outputs.commit }}
     steps:
       - name: Checkout (tags)
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
-
-      - name: Resolve ref name
-        id: ref
-        run: |
-          set -euo pipefail
-          if [ -n "${{ github.event.inputs.tag }}" ]; then
-            echo "ref=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "ref=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
-          fi
+          persist-credentials: false
 
       - name: Parse and validate SemVer
         id: parse
         run: |
           set -euo pipefail
-          tag="${{ steps.ref.outputs.ref }}"
+          case "$GITHUB_REF" in
+            refs/tags/*) ;;
+            *) echo "::error::Release must be triggered by a tag push (got '$GITHUB_REF')"; exit 1 ;;
+          esac
+          tag="${GITHUB_REF#refs/tags/}"
           if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
             echo "::error::Tag '$tag' is not strict SemVer (vMAJOR.MINOR.PATCH[-prerelease])"
             exit 1
@@ -105,35 +125,50 @@ jobs:
           echo "version_nopv=${tag#v}" >> "$GITHUB_OUTPUT"
 
       - name: Import maintainer GPG public key
-        run: |
-          set -euo pipefail
+        env:
           # MAINTAINER_GPG_PUBLIC: ASCII-armored public key block of the release
           # signing key. The fingerprint is also pinned via MAINTAINER_GPG_FPR
           # and re-checked below.
-          echo "${{ secrets.MAINTAINER_GPG_PUBLIC }}" | gpg --import # TODO: configure secret MAINTAINER_GPG_PUBLIC
-
-      - name: Verify tag is annotated and GPG-signed
+          MAINTAINER_GPG_PUBLIC: ${{ secrets.MAINTAINER_GPG_PUBLIC }} # TODO: configure secret MAINTAINER_GPG_PUBLIC
         run: |
           set -euo pipefail
-          tag="${{ steps.ref.outputs.ref }}"
+          printf '%s\n' "$MAINTAINER_GPG_PUBLIC" | gpg --import
+
+      - name: Verify tag is annotated and GPG-signed
+        id: verify
+        env:
+          TAG: ${{ steps.parse.outputs.version }}
+          EXPECTED_FPR: ${{ secrets.MAINTAINER_GPG_FPR }} # TODO: configure secret MAINTAINER_GPG_FPR
+        run: |
+          set -euo pipefail
+          ref="refs/tags/${TAG}"
           # Reject lightweight tags (object type must be 'tag', not 'commit').
-          if [ "$(git cat-file -t "$tag")" != "tag" ]; then
-            echo "::error::Tag '$tag' is lightweight; only annotated, signed tags are accepted"
+          if [ "$(git cat-file -t "$ref")" != "tag" ]; then
+            echo "::error::Tag '$TAG' is lightweight; only annotated, signed tags are accepted"
             exit 1
           fi
           # Reject unsigned annotated tags.
-          if ! git verify-tag "$tag" 2>&1 | tee /tmp/verify.log; then
-            echo "::error::Tag '$tag' is not signed by a trusted GPG key"
+          if ! git verify-tag "$ref" 2>&1 | tee /tmp/verify.log; then
+            echo "::error::Tag '$TAG' is not signed by a trusted GPG key"
             exit 1
           fi
           # Optional fingerprint pinning.
-          expected_fpr="${{ secrets.MAINTAINER_GPG_FPR }}" # TODO: configure secret MAINTAINER_GPG_FPR
-          if [ -n "$expected_fpr" ]; then
-            if ! grep -F "$expected_fpr" /tmp/verify.log >/dev/null; then
+          if [ -n "$EXPECTED_FPR" ]; then
+            if ! grep -F "$EXPECTED_FPR" /tmp/verify.log >/dev/null; then
               echo "::error::Tag signing key does not match pinned fingerprint"
               exit 1
             fi
+          else
+            echo "::warning::MAINTAINER_GPG_FPR is not set — any key in MAINTAINER_GPG_PUBLIC is accepted"
           fi
+          # The commit every downstream job must build. On a tag push it is
+          # also github.sha; refuse to continue if the two ever disagree.
+          commit="$(git rev-parse "${ref}^{commit}")"
+          if [ "$commit" != "$GITHUB_SHA" ]; then
+            echo "::error::Tag '$TAG' points to $commit but the run was triggered for $GITHUB_SHA"
+            exit 1
+          fi
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
 
   # ---------------------------------------------------------------------------
   # 1. Full tests — including E2E multi-browser + axe-core a11y (FR-L.27, 28)
@@ -143,17 +178,34 @@ jobs:
     runs-on: ubuntu-latest
     needs: [verify-tag]
     timeout-minutes: 25
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout verified tag
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: refs/tags/${{ needs.verify-tag.outputs.version }}
+          persist-credentials: false
+
+      - name: Assert HEAD is the verified tag commit
+        env:
+          EXPECTED_SHA: ${{ needs.verify-tag.outputs.commit }}
+        run: |
+          set -euo pipefail
+          actual="$(git rev-parse HEAD)"
+          if [ "$actual" != "$EXPECTED_SHA" ]; then
+            echo "::error::Checked out $actual, expected verified tag commit $EXPECTED_SHA"
+            exit 1
+          fi
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: "npm"
@@ -188,7 +240,7 @@ jobs:
 
       - name: Upload E2E artifacts on failure
         if: failure() && hashFiles('tests/e2e/package-lock.json') != ''
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: e2e-artifacts
           path: |
@@ -204,19 +256,37 @@ jobs:
     runs-on: ubuntu-latest
     needs: [verify-tag]
     timeout-minutes: 10
+    permissions:
+      contents: read
     strategy:
       fail-fast: true
       matrix:
         os: [linux, darwin]
         arch: [amd64, arm64]
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout verified tag
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: refs/tags/${{ needs.verify-tag.outputs.version }}
+          persist-credentials: false
+
+      - name: Assert HEAD is the verified tag commit
+        env:
+          EXPECTED_SHA: ${{ needs.verify-tag.outputs.commit }}
+        run: |
+          set -euo pipefail
+          actual="$(git rev-parse HEAD)"
+          if [ "$actual" != "$EXPECTED_SHA" ]; then
+            echo "::error::Checked out $actual, expected verified tag commit $EXPECTED_SHA"
+            exit 1
+          fi
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: ${{ env.GO_VERSION }}
-          cache: true
+          # Signed artefacts are built from a clean module cache.
+          cache: false
 
       - name: Build reproducibly
         env:
@@ -234,7 +304,7 @@ jobs:
             ./cmd/sealkeeper
 
       - name: Upload binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: bin-${{ matrix.os }}-${{ matrix.arch }}
           path: dist/sealkeeper-${{ matrix.os }}-${{ matrix.arch }}
@@ -242,26 +312,49 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # 3. Build & push multi-arch OCI image (distroless), scan, sign, SBOM
+  #    Protected environment: pushes to GHCR and signs with the repo identity.
   # ---------------------------------------------------------------------------
   build-image:
     name: Build & sign OCI image
     runs-on: ubuntu-latest
     needs: [verify-tag, test-full]
     timeout-minutes: 20
+    environment: release
+    permissions:
+      contents: read
+      packages: write        # push image to ghcr.io
+      id-token: write        # cosign keyless via OIDC
+      attestations: write    # SLSA provenance attestation
+      security-events: write # upload Trivy SARIF to the Security tab
     outputs:
       image_digest: ${{ steps.push.outputs.digest }}
-      image_ref: ${{ steps.push.outputs.image_ref }}
+      image_ref: ${{ steps.imgref.outputs.image_ref }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout verified tag
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: refs/tags/${{ needs.verify-tag.outputs.version }}
+          persist-credentials: false
+
+      - name: Assert HEAD is the verified tag commit
+        env:
+          EXPECTED_SHA: ${{ needs.verify-tag.outputs.commit }}
+        run: |
+          set -euo pipefail
+          actual="$(git rev-parse HEAD)"
+          if [ "$actual" != "$EXPECTED_SHA" ]; then
+            echo "::error::Checked out $actual, expected verified tag commit $EXPECTED_SHA"
+            exit 1
+          fi
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
 
       - name: Set up Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.repository_owner }}
@@ -269,11 +362,13 @@ jobs:
 
       - name: Compute lowercase image repo
         id: imgrepo
-        run: echo "repo=$(echo '${{ env.IMAGE_REPO }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+        run: echo "repo=$(printf '%s' "$IMAGE_REPO" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
 
+      # DECISION: no `cache-from: type=gha` — a signed release image must not
+      # be assembled from layers another workflow run could have written.
       - name: Build & push (linux/amd64, linux/arm64)
         id: push
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           file: Dockerfile
@@ -281,6 +376,7 @@ jobs:
           push: true
           provenance: true
           sbom: true
+          no-cache: true
           tags: |
             ${{ steps.imgrepo.outputs.repo }}:${{ needs.verify-tag.outputs.version }}
             ${{ steps.imgrepo.outputs.repo }}:${{ needs.verify-tag.outputs.version_nopv }}
@@ -288,28 +384,32 @@ jobs:
           labels: |
             org.opencontainers.image.title=SealKeeper
             org.opencontainers.image.version=${{ needs.verify-tag.outputs.version }}
-            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.revision=${{ needs.verify-tag.outputs.commit }}
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.licenses=AGPL-3.0-or-later
           build-args: |
             VERSION=${{ needs.verify-tag.outputs.version }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
 
       - name: Expose image reference
-        run: |
-          echo "image_ref=${{ steps.imgrepo.outputs.repo }}@${{ steps.push.outputs.digest }}" >> "$GITHUB_OUTPUT"
         id: imgref
-
-      - name: Install Trivy
+        env:
+          REPO: ${{ steps.imgrepo.outputs.repo }}
+          DIGEST: ${{ steps.push.outputs.digest }}
         run: |
           set -euo pipefail
-          v="${{ env.TRIVY_VERSION }}"
-          curl -sSL -o trivy.deb \
-            "https://github.com/aquasecurity/trivy/releases/download/v${v}/trivy_${v}_Linux-64bit.deb"
+          echo "image_ref=${REPO}@${DIGEST}" >> "$GITHUB_OUTPUT"
+
+      - name: Install Trivy (pinned + checksum)
+        run: |
+          set -euo pipefail
+          curl -sSfL -o trivy.deb \
+            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.deb"
+          echo "${TRIVY_SHA256}  trivy.deb" | sha256sum -c -
           sudo dpkg -i trivy.deb
 
       - name: Trivy scan (block on HIGH/CRITICAL)
+        env:
+          IMAGE_REF: ${{ steps.imgref.outputs.image_ref }}
         run: |
           set -euo pipefail
           trivy image \
@@ -318,60 +418,65 @@ jobs:
             --no-progress \
             --format sarif \
             --output trivy.sarif \
-            "${{ steps.imgrepo.outputs.repo }}@${{ steps.push.outputs.digest }}"
+            "$IMAGE_REF"
 
       - name: Upload Trivy SARIF
         if: always()
-        uses: github/codeql-action/upload-sarif@v4
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
         with:
           sarif_file: trivy.sarif
           category: trivy-image
 
-      - name: Install syft
+      - name: Install syft (pinned + checksum)
         run: |
           set -euo pipefail
-          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh \
-            | sh -s -- -b /usr/local/bin ${{ env.SYFT_VERSION }}
+          curl -sSfL -o syft.tar.gz \
+            "https://github.com/anchore/syft/releases/download/v${SYFT_VERSION}/syft_${SYFT_VERSION}_linux_amd64.tar.gz"
+          echo "${SYFT_SHA256}  syft.tar.gz" | sha256sum -c -
+          sudo tar -xzf syft.tar.gz -C /usr/local/bin syft
 
       - name: Generate SBOM (CycloneDX 1.5)
+        env:
+          IMAGE_REF: ${{ steps.imgref.outputs.image_ref }}
         run: |
           set -euo pipefail
-          syft "${{ steps.imgrepo.outputs.repo }}@${{ steps.push.outputs.digest }}" \
-            -o cyclonedx-json=sbom-image.cdx.json
+          syft "$IMAGE_REF" -o cyclonedx-json=sbom-image.cdx.json
           # Sanity check: spec version must be 1.5 (FR-L.66)
           jq -e '.specVersion == "1.5"' sbom-image.cdx.json >/dev/null
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3.9.1
         with:
           cosign-release: ${{ env.COSIGN_VERSION }}
 
       - name: Cosign keyless sign image
         env:
           COSIGN_EXPERIMENTAL: "1"
+          IMAGE_REF: ${{ steps.imgref.outputs.image_ref }}
         run: |
           set -euo pipefail
-          cosign sign --yes "${{ steps.imgrepo.outputs.repo }}@${{ steps.push.outputs.digest }}"
+          cosign sign --yes "$IMAGE_REF"
 
       - name: Cosign attest SBOM
         env:
           COSIGN_EXPERIMENTAL: "1"
+          IMAGE_REF: ${{ steps.imgref.outputs.image_ref }}
         run: |
           set -euo pipefail
           cosign attest --yes \
             --predicate sbom-image.cdx.json \
             --type cyclonedx \
-            "${{ steps.imgrepo.outputs.repo }}@${{ steps.push.outputs.digest }}"
+            "$IMAGE_REF"
 
       - name: SLSA provenance attestation (level 2)
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:
           subject-name: ${{ steps.imgrepo.outputs.repo }}
           subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true
 
       - name: Upload image SBOM artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: sbom-image
           path: sbom-image.cdx.json
@@ -379,27 +484,33 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # 4. SBOM for binaries + GPG-signed SHA256SUMS
+  #    Protected environment: the maintainer GPG private key lives only there.
+  #    DECISION: also waits for test-full so this job and build-image reach the
+  #    environment approval gate together (one review covers both).
   # ---------------------------------------------------------------------------
   sign-binaries:
     name: SBOM + sign binaries
     runs-on: ubuntu-latest
-    needs: [verify-tag, build-binaries]
+    needs: [verify-tag, build-binaries, test-full]
     timeout-minutes: 8
+    environment: release
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
-
       - name: Download all binary artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: bin-*
           path: dist
           merge-multiple: true
 
-      - name: Install syft
+      - name: Install syft (pinned + checksum)
         run: |
           set -euo pipefail
-          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh \
-            | sh -s -- -b /usr/local/bin ${{ env.SYFT_VERSION }}
+          curl -sSfL -o /tmp/syft.tar.gz \
+            "https://github.com/anchore/syft/releases/download/v${SYFT_VERSION}/syft_${SYFT_VERSION}_linux_amd64.tar.gz"
+          echo "${SYFT_SHA256}  /tmp/syft.tar.gz" | sha256sum -c -
+          sudo tar -xzf /tmp/syft.tar.gz -C /usr/local/bin syft
 
       - name: Generate SBOMs per binary
         run: |
@@ -416,9 +527,12 @@ jobs:
         run: sha256sum sealkeeper-* > SHA256SUMS
 
       - name: Import maintainer GPG private key
+        env:
+          # Environment secret of `release` — never a repository secret.
+          MAINTAINER_GPG_PRIVATE: ${{ secrets.MAINTAINER_GPG_PRIVATE }} # TODO: configure secret MAINTAINER_GPG_PRIVATE
         run: |
           set -euo pipefail
-          echo "${{ secrets.MAINTAINER_GPG_PRIVATE }}" | gpg --batch --import # TODO: configure secret MAINTAINER_GPG_PRIVATE
+          printf '%s\n' "$MAINTAINER_GPG_PRIVATE" | gpg --batch --import
           # Cache passphrase via gpg-preset-passphrase if needed; here we expect a
           # passphrase-less subkey or GPG_PASSPHRASE injected at sign time.
 
@@ -433,8 +547,12 @@ jobs:
               --passphrase "${GPG_PASSPHRASE}" \
               --armor --detach-sign --output SHA256SUMS.asc SHA256SUMS
 
+      - name: Remove GPG key material from the runner
+        if: always()
+        run: rm -rf "${HOME}/.gnupg"
+
       - name: Upload signed binaries bundle
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: signed-binaries
           path: |
@@ -452,28 +570,47 @@ jobs:
     runs-on: ubuntu-latest
     needs: [verify-tag]
     timeout-minutes: 5
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout verified tag
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: refs/tags/${{ needs.verify-tag.outputs.version }}
+          persist-credentials: false
+
+      - name: Assert HEAD is the verified tag commit
+        env:
+          EXPECTED_SHA: ${{ needs.verify-tag.outputs.commit }}
+        run: |
+          set -euo pipefail
+          actual="$(git rev-parse HEAD)"
+          if [ "$actual" != "$EXPECTED_SHA" ]; then
+            echo "::error::Checked out $actual, expected verified tag commit $EXPECTED_SHA"
+            exit 1
+          fi
 
       - name: Set up Helm
-        uses: azure/setup-helm@v4
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
         with:
           version: v3.16.2
 
       - name: Lint chart
-        run: helm lint helm/sealkeeper
+        run: helm lint helm/sealkeeper --set masterSecret=lint-only-placeholder
 
       - name: Package chart
+        env:
+          VERSION: ${{ needs.verify-tag.outputs.version_nopv }}
         run: |
           set -euo pipefail
           mkdir -p chart-dist
           helm package helm/sealkeeper \
-            --version "${{ needs.verify-tag.outputs.version_nopv }}" \
-            --app-version "${{ needs.verify-tag.outputs.version_nopv }}" \
+            --version "${VERSION}" \
+            --app-version "${VERSION}" \
             --destination chart-dist
 
       - name: Upload Helm chart artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: helm-chart
           path: chart-dist/sealkeeper-*.tgz
@@ -487,20 +624,37 @@ jobs:
     runs-on: ubuntu-latest
     needs: [verify-tag, sign-binaries, package-helm]
     timeout-minutes: 5
+    permissions:
+      contents: read
     outputs:
       tarball: ${{ steps.pack.outputs.tarball }}
       zipfile: ${{ steps.pack.outputs.zipfile }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout verified tag
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: refs/tags/${{ needs.verify-tag.outputs.version }}
+          persist-credentials: false
+
+      - name: Assert HEAD is the verified tag commit
+        env:
+          EXPECTED_SHA: ${{ needs.verify-tag.outputs.commit }}
+        run: |
+          set -euo pipefail
+          actual="$(git rev-parse HEAD)"
+          if [ "$actual" != "$EXPECTED_SHA" ]; then
+            echo "::error::Checked out $actual, expected verified tag commit $EXPECTED_SHA"
+            exit 1
+          fi
 
       - name: Download signed-binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: signed-binaries
           path: bundle/_in/binaries
 
       - name: Download Helm chart
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: helm-chart
           path: bundle/_in/helm
@@ -562,7 +716,7 @@ jobs:
           echo "zipfile=bundle/sealkeeper-deploy-${VERSION}.zip"    >> "$GITHUB_OUTPUT"
 
       - name: Upload bundle artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: deploy-bundle
           path: |
@@ -579,11 +733,12 @@ jobs:
     runs-on: ubuntu-latest
     needs: [verify-tag, build-image, assemble-bundle]
     timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: read
     steps:
-      - uses: actions/checkout@v4
-
       - name: Download bundle
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: deploy-bundle
           path: bundle
@@ -622,7 +777,7 @@ jobs:
           echo "SK_IMAGE=${repo}:${VERSION}" >> "$EXTRACT/.env"
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.repository_owner }}
@@ -685,9 +840,11 @@ jobs:
     runs-on: ubuntu-latest
     needs: [verify-tag, build-image]
     timeout-minutes: 5
+    permissions:
+      packages: read
     steps:
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.repository_owner }}
@@ -698,7 +855,7 @@ jobs:
           VERSION: ${{ needs.verify-tag.outputs.version }}
         run: |
           set -euo pipefail
-          repo=$(echo "ghcr.io/${{ github.repository_owner }}/sealkeeper" | tr '[:upper:]' '[:lower:]')
+          repo=$(printf '%s' "$IMAGE_REPO" | tr '[:upper:]' '[:lower:]')
           docker pull "${repo}:${VERSION}"
           docker run -d --rm --name sk-smoke -p 8443:8443 \
             -e SK_MODE=eval \
@@ -712,6 +869,7 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # 9. Publish GitHub Release (gated on all upstream jobs including smokes)
+  #    Protected environment: creates the Release and pushes the Helm chart.
   # ---------------------------------------------------------------------------
   release:
     name: Publish GitHub Release
@@ -727,29 +885,30 @@ jobs:
       - smoke-bundle
       - smoke-image
     timeout-minutes: 8
+    environment: release
+    permissions:
+      contents: write # create GitHub Release, upload assets
     steps:
-      - uses: actions/checkout@v4
-
       - name: Download signed binaries + SBOMs
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: signed-binaries
           path: release-assets/binaries
 
       - name: Download image SBOM
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: sbom-image
           path: release-assets/sbom
 
       - name: Download Helm chart
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: helm-chart
           path: release-assets/helm
 
       - name: Download deployment bundle
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: deploy-bundle
           path: release-assets/bundle
@@ -760,7 +919,7 @@ jobs:
           IMAGE_DIGEST: ${{ needs.build-image.outputs.image_digest }}
         run: |
           set -euo pipefail
-          repo=$(echo "ghcr.io/${{ github.repository_owner }}/sealkeeper" | tr '[:upper:]' '[:lower:]')
+          repo=$(printf '%s' "$IMAGE_REPO" | tr '[:upper:]' '[:lower:]')
           cat > release-notes.md <<EOF
           # SealKeeper ${VERSION}
 
@@ -796,7 +955,7 @@ jobs:
           EOF
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           tag_name: ${{ needs.verify-tag.outputs.version }}
           name: ${{ needs.verify-tag.outputs.version }}
@@ -819,7 +978,7 @@ jobs:
           # actual push target depends on the Pages/S3/OCI choice that is not
           # yet pinned. We leave the secret-based push out and add a TODO so the
           # release does not silently no-op.
-          HELM_REPO_URL: ${{ secrets.HELM_REPO_URL }}      # TODO: configure HELM_REPO_URL (e.g. oci://ghcr.io/${{ github.repository_owner }}/charts)
+          HELM_REPO_URL: ${{ secrets.HELM_REPO_URL }}      # TODO: configure HELM_REPO_URL (e.g. oci://ghcr.io/<owner>/charts)
           HELM_REPO_USER: ${{ secrets.HELM_REPO_USER }}    # TODO: configure HELM_REPO_USER if HTTP basic auth
           HELM_REPO_TOKEN: ${{ secrets.HELM_REPO_TOKEN }}  # TODO: configure HELM_REPO_TOKEN
         run: |

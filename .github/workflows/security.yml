@@ -23,7 +23,10 @@ env:
   GO_VERSION: "1.25"
   NODE_VERSION: "20"
   IMAGE_REF: ghcr.io/${{ github.repository_owner }}/sealkeeper:latest
-  TRIVY_VERSION: "0.58.0"
+  # Pinned release asset + SHA-256 (kept in lockstep with release.yml).
+  # 0.58.0 assets are no longer downloadable upstream.
+  TRIVY_VERSION: "0.75.0"
+  TRIVY_SHA256: "b6d7b944b6cbf4e7de5b4bc6c3635900c50fed53b64b77b99a5fbc3136cd1d5d"
 
 jobs:
   deps-rescan:
@@ -91,19 +94,24 @@ jobs:
 
       - name: Compute lowercase image ref
         id: ref
-        run: echo "ref=$(echo '${{ env.IMAGE_REF }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+        run: echo "ref=$(printf '%s' "$IMAGE_REF" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
 
-      - name: Install Trivy
+      - name: Install Trivy (pinned + checksum)
         run: |
           set -euo pipefail
-          curl -sSL -o trivy.deb https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.deb
+          curl -sSfL -o trivy.deb "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.deb"
+          echo "${TRIVY_SHA256}  trivy.deb" | sha256sum -c -
           sudo dpkg -i trivy.deb
 
       - name: Pull latest image (best-effort)
-        run: docker pull "${{ steps.ref.outputs.ref }}" || echo "::warning::cannot pull ${{ steps.ref.outputs.ref }} — first release pending?"
+        env:
+          REF: ${{ steps.ref.outputs.ref }}
+        run: docker pull "$REF" || echo "::warning::cannot pull $REF — first release pending?"
 
       - name: Trivy scan (HIGH/CRITICAL)
         id: trivy
+        env:
+          REF: ${{ steps.ref.outputs.ref }}
         run: |
           set -euo pipefail
           set +e
@@ -113,7 +121,7 @@ jobs:
             --no-progress \
             --format sarif \
             --output trivy.sarif \
-            "${{ steps.ref.outputs.ref }}"
+            "$REF"
           rc=$?
           set -e
           if [ "$rc" -ne 0 ]; then echo "findings=true" >> "$GITHUB_OUTPUT"; else echo "findings=false" >> "$GITHUB_OUTPUT"; fi
