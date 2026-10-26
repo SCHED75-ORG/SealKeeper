@@ -101,11 +101,11 @@ func TestEntropyMatchesJSCalculator(t *testing.T) {
 		js := got[i]
 		switch {
 		case js.OK != (err == nil):
-			t.Errorf("case %d %s %s:\n  JS ok=%v (%s)\n  Go err=%v", i, c.gen, c.params, js.OK, js.Error, err)
+			t.Errorf("case %d %s %s:\n  JS ok=%v (%s)\n  Go err=%v", i, c.gen, clip(c.params), js.OK, js.Error, err)
 		case js.OK:
 			accepted++
 			if fmt.Sprint(rep) != fmt.Sprint(js.Report) {
-				t.Errorf("case %d %s %s:\n  JS %+v\n  Go %+v", i, c.gen, c.params, js.Report, rep)
+				t.Errorf("case %d %s %s:\n  JS %+v\n  Go %+v", i, c.gen, clip(c.params), js.Report, rep)
 			}
 		}
 	}
@@ -189,7 +189,30 @@ func fixedCorpus() []crossCase {
 		{GeneratorG1, `{"library":["one two","three four"],"transforms":[[]]}`},
 		{GeneratorG1, `{"library":["one two","three four"],"corpusSize":2}`},
 		{GeneratorG1, `{"library":["one two","three four"],"corpusSize":3}`},
+		// A corpus large enough to clear B1 (> 125k citations) must not
+		// overflow the JS call stack: Go accepts it, so must the bundle.
+		{GeneratorG1, `{"library":` + bigCorpus(130000) + `}`},
 	}
+}
+
+// clip shortens a case's parameters for a failure message.
+func clip(s string) string {
+	if len(s) > 300 {
+		return s[:300] + "…"
+	}
+	return s
+}
+
+// bigCorpus returns n distinct citations as a JSON array.
+func bigCorpus(n int) string {
+	b := []byte("[")
+	for i := 0; i < n; i++ {
+		if i > 0 {
+			b = append(b, ',')
+		}
+		b = fmt.Appendf(b, "%q", fmt.Sprintf("Citation numero %d du corpus", i))
+	}
+	return string(append(b, ']'))
 }
 
 var crossCitations = []string{

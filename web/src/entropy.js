@@ -241,7 +241,7 @@ function entropyG1(p) {
     });
     const sizes = new Map();
     for (let i = 0; i < parent.length; i++) sizes.set(find(i), (sizes.get(find(i)) ?? 0) + 1);
-    return LOG2(p.citations.length / Math.max(...sizes.values()));
+    return LOG2(p.citations.length / maxOf(sizes.values()));
   }
 
   /**
@@ -285,7 +285,7 @@ function entropyG1(p) {
       for (const ch of s.toLowerCase()) bits += perKey.get(ch) ?? 0;
       return bits;
     };
-    return minOver(p.citations, (c) => Math.min(...citationViews(c).map(bitsOf)));
+    return minOver(p.citations, (c) => minOver(citationViews(c), bitsOf));
   }
 }
 
@@ -346,14 +346,14 @@ function caseBits(candidates, multiWord, startCased, hasCased) {
     partitions.push(base);
     if (!startCased) partitions.push((m) => (m === "PascalCase" ? "lower" : base(m)));
   }
-  return Math.min(...partitions.map((cls) => uniformMinEntropy(candidates.map(cls))));
+  return minOver(partitions, (cls) => uniformMinEntropy(candidates.map(cls)));
 }
 
 /** -log2(max probability) of a uniform draw over `outcomes` (may repeat). */
 function uniformMinEntropy(outcomes) {
   const counts = new Map();
   for (const o of outcomes) counts.set(o, (counts.get(o) ?? 0) + 1);
-  return LOG2(outcomes.length / Math.max(...counts.values()));
+  return LOG2(outcomes.length / maxOf(counts.values()));
 }
 
 function reverseWords(s) {
@@ -376,6 +376,16 @@ function minOver(list, fn) {
     if (min <= 0) break;
   }
   return min;
+}
+
+/**
+ * Largest value of `values`. A loop, not Math.max(...values): spreading
+ * one argument per element overflows the call stack on a large corpus.
+ */
+function maxOf(values) {
+  let max = -Infinity;
+  for (const v of values) max = Math.max(max, v);
+  return max;
 }
 
 function memoize(fn) {

@@ -138,4 +138,14 @@ describe("calculateEntropy", () => {
     });
     expect(merged.breakdown.map((b) => b.component)).not.toContain("citation-selection");
   });
+
+  it("G1 corpus large enough for B1 does not overflow the call stack", () => {
+    // ~125k citations are needed to clear B1 on corpus size alone; spreading
+    // one argument per citation group used to throw RangeError there.
+    const r = calculateEntropy({
+      generator: "G1",
+      parameters: { library: library(130000, "Citation numero ") },
+    });
+    expect(r.anssiLevels.B1).toBe(true);
+  }, 60_000);
 });
