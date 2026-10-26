@@ -45,6 +45,7 @@ func TestAuditNeverStoresRawRevealToken(t *testing.T) {
 	s.cfg.InstanceDomain = "sk.test"
 	s.SetTokens(tr)
 	r := httptest.NewRequest(http.MethodPost, "/api/v1/request", strings.NewReader(`{"email":"user@example.test"}`))
+	r.Header.Set("Content-Type", "application/json")
 	s.handleRequest(httptest.NewRecorder(), r)
 
 	var tok string
