@@ -583,135 +583,24 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	// after the same latency floor (FR-B.13, see requestmail.go).
 	// Failure information stays in the audit log, never in the response.
 	acceptedResp := func(extra map[string]string) {
-		s.padRequestLatency(r.Context(), start)
-		body := map[string]string{"status": "accepted"}
-		for k, v := range extra {
-			body[k] = v
-		}
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		w.WriteHeader(http.StatusAccepted)
-		_ = json.NewEncoder(w).Encode(body)
+		s.writeAcceptedResponse(w, r, start, extra)
 	}
 
-	// The payload is three short strings; cap it so an attacker can't make
-	// us buffer, hash and audit-log megabytes per request.
-	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
-	var p requestPayload
-	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
-		// Malformed payload is the one case we DO surface — it cannot leak
-		// allowlist info and helps integrators debug client code.
-		http.Error(w, `{"error":"invalid_payload"}`, http.StatusBadRequest)
+	email, ok := s.readRequestEmail(w, r)
+	if !ok {
 		return
 	}
-	if p.Email == "" {
-		http.Error(w, `{"error":"email_required"}`, http.StatusBadRequest)
-		return
-	}
-	// Bare addr-spec only: display names / comments are how CR/LF reached
-	// the To: header. A syntax error reveals nothing about the allowlist.
-	email, err := mail.NormalizeAddress(p.Email)
-	if err != nil {
-		http.Error(w, `{"error":"invalid_email"}`, http.StatusBadRequest)
-		return
-	}
-	if s.tokens == nil {
-		http.Error(w, `{"error":"storage_unavailable"}`, http.StatusServiceUnavailable)
+	pr := s.newPublicRequest(r, email)
+
+	// Rate limit, then domain allowlist, then policy resolution — all
+	// before anything is issued, each refusal answering the identical 202.
+	if !s.admitRequest(r.Context(), pr) {
+		acceptedResp(nil) // FR-B.13
 		return
 	}
 
-	ip := s.clientIP(r)
-	ipHash := s.hashShort(ip)
-	uaHash := s.hashShort(r.UserAgent())
-
-	// FR-B.11..13 — apply rate limits BEFORE issuing anything. The hit is
-	// observable only via the audit log + Prometheus counter.
-	decision := s.limiter.Check(rateLimitKey(email), rateLimitIPKey(ip))
-	if !decision.Allowed {
-		s.rateHits.WithLabelValues(decision.Reason).Inc()
-		s.auditAppend(r.Context(), audit.EventRateLimited, email, decision.Reason, map[string]any{
-			"ip_hash":              ipHash,
-			"ua_hash":              uaHash,
-			"limit_email_per_hour": s.cfg.RateLimitEmailPerHour,
-			"limit_ip_per_hour":    s.cfg.RateLimitIPPerHour,
-		})
-		s.logger.Info("rate-limited request silently dropped",
-			"email", email, "dimension", decision.Reason,
-		)
-		acceptedResp(nil) // identical response — FR-B.13
-		return
-	}
-
-	// FR-C.20..23 — consult the domain allowlist when it has any entries.
-	// An empty table keeps the zero-config eval flow open. A denied domain
-	// is FR-B.9-silent: same response, audit log carries the truth.
-	emailDomain := ""
-	if at := strings.LastIndex(email, "@"); at > 0 && at+1 < len(email) {
-		emailDomain = email[at+1:]
-	}
-	if s.domains != nil {
-		ok, err := s.domains.Allows(r.Context(), emailDomain)
-		if err != nil {
-			s.logger.Error("domains.Allows failed", "err", err)
-			// Fail-safe: deny silently so a database hiccup can't open the gate.
-			acceptedResp(nil)
-			return
-		}
-		if !ok {
-			s.auditAppend(r.Context(), "request.domain_blocked", email, emailDomain, map[string]any{
-				"ip_hash": ipHash,
-				"ua_hash": uaHash,
-			})
-			s.logger.Info("domain not in allowlist — silent drop",
-				"email", email, "domain", emailDomain,
-			)
-			acceptedResp(nil) // FR-B.13
-			return
-		}
-	}
-
-	// FR-C.27..28 — resolve a policy NOW so we never mint a token that
-	// nobody can consume. The resolution honours the elevation lists and
-	// the per-(domain, level) policy mapping.
-	//
-	// Zero-config fallback: when no policies are configured, skip the gate
-	// entirely and let handlePolicy serve the built-in Default. The moment
-	// the admin adds a row the gate activates.
-	if s.policies != nil {
-		count, err := s.policies.Count(r.Context())
-		if err != nil {
-			s.logger.Error("policies.Count failed", "err", err)
-			acceptedResp(nil)
-			return
-		}
-		if count > 0 {
-			if _, err := s.policies.Resolve(r.Context(), email); errors.Is(err, policies.ErrNoPolicy) {
-				s.auditAppend(r.Context(), "request.policy_not_found", email, "", map[string]any{
-					"ip_hash": ipHash,
-					"ua_hash": uaHash,
-				})
-				s.logger.Info("no policy resolved for email — silent drop", "email", email)
-				acceptedResp(nil) // FR-B.13
-				return
-			} else if err != nil {
-				s.logger.Error("policies.Resolve failed", "err", err)
-				acceptedResp(nil) // fail-safe deny
-				return
-			}
-		}
-	}
-
-	tok, err := s.tokens.Issue(r.Context(), tokens.IssueOptions{
-		Email:  email,
-		Domain: emailDomain,
-		IPHash: ipHash,
-		UAHash: uaHash,
-		TTL:    tokens.DefaultTTL,
-	})
-	if err != nil {
-		s.logger.Error("tokens.Issue failed", "err", err)
-		s.auditAppend(r.Context(), "request.issue_failed", email, "", map[string]any{
-			"error": err.Error(),
-		})
+	tok, ok := s.issueRequestToken(r.Context(), pr)
+	if !ok {
 		// Still return 202 — anti-enumeration. The audit log carries the
 		// truth for operators.
 		acceptedResp(nil)
@@ -719,73 +608,17 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	revealURL := strings.TrimRight(s.cfg.BaseURL, "/") + "/reveal/" + tok.Token
-	lang := s.mailLanguage()
-	brand := s.resolveBranding(r.Context())
-
-	var (
-		msg mail.Message
-	)
-	if s.mailTpls != nil {
-		rendered, rerr := s.mailTpls.Render(r.Context(), mailtemplates.KindRevealLink, lang, mailtemplates.Vars{
-			RevealURL:       revealURL,
-			UserEmail:       tok.Email,
-			ExpiresAt:       tok.ExpiresAt,
-			ValidityMinutes: int(tokens.DefaultTTL / time.Minute),
-			InstanceName:    brand.InstanceName,
-			InstanceDomain:  s.cfg.InstanceDomain,
-			ContactURL:      brand.ContactURL,
-		})
-		if rerr != nil {
-			s.logger.Error("mailtemplates.Render failed", "err", rerr)
-			acceptedResp(nil)
-			return
-		}
-		built, aerr := mail.Assemble(mail.AssembleInputs{
-			To:             tok.Email,
-			InstanceDomain: s.cfg.InstanceDomain,
-			Subject:        rendered.Subject,
-			Text:           rendered.Text,
-			HTML:           rendered.HTML,
-		})
-		if aerr != nil {
-			s.logger.Error("mail.Assemble failed", "err", aerr)
-			acceptedResp(nil)
-			return
-		}
-		msg = built
-	} else {
-		built, berr := mail.BuildReveal(mail.RevealInputs{
-			To:              tok.Email,
-			InstanceDomain:  s.cfg.InstanceDomain,
-			RevealURL:       revealURL,
-			ValidityMinutes: int(tokens.DefaultTTL / time.Minute),
-		})
-		if berr != nil {
-			s.logger.Error("mail.BuildReveal failed", "err", berr)
-			acceptedResp(nil)
-			return
-		}
-		msg = built
+	msg, ok := s.buildRevealMessage(r.Context(), tok, revealURL)
+	if !ok {
+		acceptedResp(nil)
+		return
 	}
 
-	// The capture queue is in-memory: write to it directly so the mail is
-	// tagged with its demo owner and eval mode gets the capture id back.
-	// (Setting CaptureIDCallback on the shared sender raced between
-	// concurrent requests.)
-	// Any other sender talks to a relay: it runs in the background so the
-	// relay round trip never shows in the response time (FR-B.13); a
-	// failure is audited as mail.send_failed.
-	sender := s.currentSender()
-	captureID := ""
-	if cs, ok := sender.(*mailer.CaptureSender); ok && cs.Store != nil {
-		captureID = cs.Store.CaptureFor(captureOwner, msg.To, msg.Subject, msg.String())
-	} else {
-		s.sendRevealMail(r.Context(), sender, email, tokenRef(tok.Token), msg)
-	}
+	sender, captureID := s.deliverRevealMail(r.Context(), captureOwner, email, tok, msg)
 
 	s.auditAppend(r.Context(), audit.EventTokenIssued, email, tokenRef(tok.Token), map[string]any{
-		"ip_hash":   ipHash,
-		"ua_hash":   uaHash,
+		"ip_hash":   pr.ipHash,
+		"ua_hash":   pr.uaHash,
 		"domain":    tok.Domain,
 		"transport": sender.Name(),
 	})
@@ -917,26 +750,8 @@ func (s *Server) handlePolicy(w http.ResponseWriter, r *http.Request) {
 // is returned (FR-B.36). The body keeps the token out of every access log.
 func (s *Server) handlePolicyConsume(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
-	if mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err != nil || mt != "application/json" {
-		writeJSONError(w, http.StatusUnsupportedMediaType, "unsupported_media_type",
-			"Send the token as application/json.")
-		return
-	}
-	r.Body = http.MaxBytesReader(w, r.Body, maxPolicyBodyBytes)
-	var p struct {
-		Token string `json:"token"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
-		writeJSONError(w, http.StatusBadRequest, "invalid_payload", "Expected {\"token\":\"…\"}.")
-		return
-	}
-	tokenParam := strings.TrimSpace(p.Token)
-	if tokenParam == "" {
-		writeJSONError(w, http.StatusBadRequest, "token_required", "Missing reveal token.")
-		return
-	}
-	if s.tokens == nil {
-		http.Error(w, `{"error":"storage_unavailable"}`, http.StatusServiceUnavailable)
+	tokenParam, ok := s.readConsumeToken(w, r)
+	if !ok {
 		return
 	}
 	ip := s.clientIP(r)
@@ -952,30 +767,15 @@ func (s *Server) handlePolicyConsume(w http.ResponseWriter, r *http.Request) {
 	// Resolve the policy BEFORE burning the token: if it can't be resolved
 	// (DB error, policy disabled or deleted during the TTL) the user keeps a
 	// working link instead of silently getting the weaker built-in default.
-	var resolved map[string]any
-	if pending, err := s.tokens.Get(r.Context(), tokenParam); err == nil {
-		resolved, err = s.resolvedPolicy(r.Context(), pending.Email)
-		if err != nil {
-			s.logger.Error("policy resolution failed; token left unconsumed", "err", err)
-			writeJSONError(w, http.StatusServiceUnavailable, "policy_unavailable",
-				"Your password policy is temporarily unavailable. Try the link again later.")
-			return
-		}
+	resolved, err := s.resolveBeforeConsume(r.Context(), tokenParam)
+	if err != nil {
+		s.logger.Error("policy resolution failed; token left unconsumed", "err", err)
+		writeJSONError(w, http.StatusServiceUnavailable, "policy_unavailable",
+			"Your password policy is temporarily unavailable. Try the link again later.")
+		return
 	}
 	tok, err := s.tokens.Consume(r.Context(), tokenParam, ipHash, uaHash)
-	switch {
-	case errors.Is(err, tokens.ErrNotFound):
-		writeJSONError(w, http.StatusNotFound, "token_not_found", "Unknown reveal token.")
-		return
-	case errors.Is(err, tokens.ErrExpired):
-		writeJSONError(w, http.StatusGone, "token_expired", "Reveal link expired. Request a new one.")
-		return
-	case errors.Is(err, tokens.ErrConsumed):
-		writeJSONError(w, http.StatusGone, "token_consumed", "Link already used. Request a new one if needed.")
-		return
-	case err != nil:
-		s.logger.Error("tokens.Consume failed", "err", err)
-		http.Error(w, `{"error":"internal"}`, http.StatusInternalServerError)
+	if s.writeConsumeError(w, err) {
 		return
 	}
 
@@ -988,41 +788,8 @@ func (s *Server) handlePolicyConsume(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	consumed := map[string]any{
-		"ip_hash":       ipHash,
-		"ua_hash":       uaHash,
-		"domain":        tok.Domain,
-		"policy_sha256": descriptorSHA256(resolved),
-		"policy_id":     "builtin_default",
-	}
-	if id, ok := resolved["id"]; ok {
-		consumed["policy_id"] = id
-	}
-	s.auditAppend(r.Context(), audit.EventTokenConsumed, tok.Email, tokenRef(tok.Token), consumed)
-
-	// FR-B.39..41 — optional post-consultation notification. It goes out
-	// on the same bounded background workers as the reveal mails: the
-	// policy roundtrip must not wait on SMTP, and Shutdown (WaitMail)
-	// drains it instead of dropping it. Every request-scoped value is
-	// snapshotted first so the worker never reads a cancelled r.Context().
-	if s.shouldNotifyPostConsult(r.Context(), tok.Email) {
-		s.queuePostConsult(r.Context(), postConsultMail{
-			token: tok.Token,
-			email: tok.Email,
-			// The instance language, not the requester's Accept-Language:
-			// whoever triggers the mail must not pick the language the owner
-			// receives (social-engineering lever).
-			lang:     s.mailLanguage(),
-			brand:    s.resolveBranding(r.Context()),
-			consumed: time.Now().UTC(),
-			// FR-B.40: the owner needs the IP and browser themselves to
-			// recognise the access — the keyed hashes kept in the audit
-			// log mean nothing to them. These go into the mail only and
-			// are never stored.
-			ip: s.clientIP(r),
-			ua: mailDisplayText(r.UserAgent(), maxMailUALen),
-		})
-	}
+	s.auditTokenConsumed(r.Context(), tok, resolved, ipHash, uaHash)
+	s.notifyPostConsult(r, tok)
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
