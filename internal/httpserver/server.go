@@ -1219,6 +1219,22 @@ func statusBucket(code int) string {
 }
 
 // ----- reveal page template -------------------------------------------------
+//
+// Session semantics (FR-B.27..32). The session starts when the token is
+// consumed and lasts the policy's sessionTTLSec; the page then drops the
+// proposals and purges the clipboard. Regeneration is bounded by
+// regenerateLimit. Both are enforced in the page only: generation is
+// client-side, so after the consume there is no server round trip left to
+// gate, and a caller holding the policy can run the public generator at
+// will — which yields no access. The server-side guarantees are the
+// single-use link (atomic consume) and the audit trail. For the same
+// reason the user_sessions table (migration 0002) is not written: nothing
+// would ever read a row back.
+//
+// Secret hygiene: no-store (no disk cache; most browsers then skip the
+// back/forward cache too), translate="no" on the passwords (no page
+// translation round trip), and pagehide clears the DOM and the clipboard.
+// There is no form field, so browser autofill never sees a password.
 
 const revealHTML = `<!doctype html>
 <html lang="fr"><head>
@@ -1285,15 +1301,100 @@ const revealHTML = `<!doctype html>
   <p class="err">Unknown reveal link. Please request a new one.</p>
 {{ else }}
   <p>Click the button below to reveal your password proposals. The link is single-use; once consumed it can no longer be re-opened.</p>
-  <p><button id="decode-btn" type="button">Décoder</button></p>
+  <p id="decode-row"><button id="decode-btn" type="button">Décoder</button></p>
+  <p id="countdown" data-testid="countdown" aria-live="polite" hidden></p>
   <div id="proposals" data-testid="proposals" hidden></div>
+  <p id="regen-row" hidden><button id="regen-btn" type="button" class="secondary">Nouvelles propositions</button></p>
+  <p id="clip-note" hidden><small>Le presse-papier est vidé 30 s après la copie et à la fermeture de la page.</small></p>
+  <p id="expired" data-testid="expired" class="err" hidden>Session expirée. Les propositions ont été effacées ; demandez un nouveau lien si nécessaire.</p>
   <p id="error" class="err" hidden></p>
   <script src="/static/sealkeeper-generation.umd.js"></script>
   <script nonce="{{ $.CSPNonce }}">
+    // Session rules (FR-B.27..32) live in the bundle (web/src/reveal.js),
+    // which also documents what the server can and cannot enforce once
+    // generation runs in the browser.
     const token = {{ .Token }};
-    const btn = document.getElementById('decode-btn');
-    const out = document.getElementById('proposals');
-    const errEl = document.getElementById('error');
+    const G = window.SealKeeper.Generation;
+    const R = window.SealKeeper.Reveal;
+    const $ = (id) => document.getElementById(id);
+    const btn = $('decode-btn'), out = $('proposals'), errEl = $('error');
+    const countdown = $('countdown'), regenRow = $('regen-row'), regenBtn = $('regen-btn');
+    const guard = R.createClipboardGuard({ clipboard: navigator.clipboard, permissions: navigator.permissions });
+    let session = null, descriptor = null, ticker = null, closed = false;
+
+    function card(p) {
+      const c = document.createElement('div');
+      c.className = 'card';
+      c.dataset.testid = 'proposal';
+      const pwd = document.createElement('div');
+      pwd.className = 'pwd notranslate';
+      pwd.dataset.testid = 'password';
+      pwd.setAttribute('translate', 'no'); // never sent to a page-translation service
+      pwd.textContent = p.password;
+      const meta = document.createElement('div');
+      const badge = document.createElement('span');
+      badge.className = 'badge';
+      badge.dataset.testid = 'anssi';
+      badge.textContent = p.anssiLevel;
+      const bits = document.createElement('small');
+      bits.textContent = ' ' + p.entropyBits.toFixed(1) + ' bits';
+      meta.append(badge, bits);
+      const gauge = document.createElement('div');
+      gauge.className = 'gauge';
+      const fill = document.createElement('div');
+      fill.style.width = Math.min(100, p.entropyBits) + '%';
+      gauge.append(fill);
+      const row = document.createElement('p');
+      row.style.marginTop = '0.5rem';
+      const copy = document.createElement('button');
+      copy.type = 'button';
+      copy.className = 'secondary';
+      copy.textContent = 'Copier';
+      copy.addEventListener('click', async () => {
+        if (closed || session.expired()) return close();
+        try {
+          await guard.copy(p.password);
+          copy.textContent = 'Copié'; // FR-B.31
+        } catch (e) {
+          copy.textContent = 'Copie impossible';
+        }
+        setTimeout(() => { copy.textContent = 'Copier'; }, 2000);
+      });
+      row.append(copy);
+      c.append(pwd, meta, gauge, row);
+      return c;
+    }
+
+    function show(proposals) {
+      out.replaceChildren(...proposals.map(card));
+      out.hidden = false;
+      const left = G.regenerationsLeft(descriptor);
+      if (regenRow.hidden && left > 0 && !closed) regenRow.hidden = false; // never shown for a limit of 0
+      regenBtn.disabled = left === 0;
+      regenBtn.textContent = 'Nouvelles propositions (' + left + ')';
+    }
+
+    function tick() {
+      if (!session || closed) return;
+      if (session.expired()) return close();
+      const label = 'Temps restant : ' + session.label();
+      if (countdown.textContent !== label) countdown.textContent = label;
+    }
+
+    // close ends the session (TTL reached or page left): the proposals
+    // leave the DOM and the clipboard is purged.
+    function close() {
+      if (closed) return;
+      closed = true;
+      clearInterval(ticker);
+      void guard.purge();
+      out.replaceChildren();
+      out.hidden = true;
+      regenRow.hidden = true;
+      countdown.hidden = true;
+      $('clip-note').hidden = true;
+      $('expired').hidden = false;
+    }
 
     btn.addEventListener('click', async () => {
       btn.disabled = true; btn.textContent = '…';
@@ -1305,29 +1406,42 @@ const revealHTML = `<!doctype html>
         }
         const body = await r.json();
         const policy = body.policy ? body.policy : body;
+        // The session starts when the token is consumed (FR-B.29).
+        session = R.createRevealSession({ ttlSec: R.sessionTTLSec(policy) });
         // Honour the operator's generator, proposal count and parameters.
-        const descriptor = window.SealKeeper.Generation.descriptorFromPolicy(policy);
-        const proposals = await window.SealKeeper.Generation.generate(descriptor);
-        out.hidden = false;
-        out.innerHTML = proposals.map((p, i) => '<div class="card" data-testid="proposal">' +
-          '<div class="pwd" data-testid="password">' + escapeHtml(p.password) + '</div>' +
-          '<div><span class="badge" data-testid="anssi">' + p.anssiLevel + '</span> ' +
-          '<small>' + p.entropyBits.toFixed(1) + ' bits</small></div>' +
-          '<div class="gauge"><div style="width:' + Math.min(100, p.entropyBits) + '%"></div></div>' +
-          '<p style="margin-top:0.5rem"><button type="button" class="secondary" data-copy="' + i + '">Copier</button></p>' +
-          '</div>').join('');
-        out.querySelectorAll('[data-copy]').forEach((b, i) => b.addEventListener('click', async () => {
-          await navigator.clipboard.writeText(proposals[i].password);
-          b.textContent = 'Copié';
-          setTimeout(() => { b.textContent = 'Copier'; navigator.clipboard.writeText(''); }, 30000);
-        }));
+        descriptor = G.descriptorFromPolicy(policy);
+        const proposals = await G.generate(descriptor);
+        if (closed) return;
+        $('decode-row').hidden = true;
+        countdown.hidden = false;
+        $('clip-note').hidden = false;
+        show(proposals);
+        tick();
+        ticker = setInterval(tick, 1000);
       } catch (e) {
         errEl.hidden = false;
         errEl.textContent = e.message || String(e);
       }
     });
 
-    function escapeHtml(s){ return s.replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','\'':'&#39;','"':'&quot;'}[c])); }
+    regenBtn.addEventListener('click', async () => {
+      if (closed || session.expired()) return close();
+      try {
+        show(await G.regenerate(descriptor)); // bounded by regenerateLimit (FR-B.27)
+      } catch (e) {
+        regenBtn.disabled = true;
+      }
+    });
+
+    // Timers are throttled in background tabs: catch up on return, and
+    // retry a clipboard purge the unfocused document could not write.
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') { tick(); void guard.resume(); }
+    });
+    window.addEventListener('focus', () => { tick(); void guard.resume(); });
+    // Leaving the page ends the session, so a back/forward-cache snapshot
+    // never holds the proposals.
+    window.addEventListener('pagehide', () => { if (session) close(); });
   </script>
 {{ end }}
 </main></body></html>`
