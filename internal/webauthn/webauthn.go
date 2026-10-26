@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-webauthn/webauthn/protocol"
@@ -78,9 +79,59 @@ type AdminIdentity struct {
 
 // Repo persists credentials and runs ceremonies via the go-webauthn library.
 type Repo struct {
-	db  *sql.DB
-	wa  *gowebauthn.WebAuthn
-	now func() time.Time
+	db         *sql.DB
+	wa         *gowebauthn.WebAuthn
+	now        func() time.Time
+	challenges *loginChallenges
+}
+
+// loginChallengeTTL bounds how long an issued assertion challenge can be
+// redeemed. It matches the step-up window of the login flow.
+const loginChallengeTTL = 5 * time.Minute
+
+// loginChallenges is the server-side record of every assertion challenge
+// BeginLogin issued and FinishLogin has not yet spent. The client-held
+// session blob is only used to name the challenge: the SessionData that
+// is verified, its owner and its expiry all come from here, and the entry
+// is deleted on the first FinishLogin attempt, so a captured (blob,
+// assertion) pair cannot be replayed, even for authenticators whose
+// signature counter stays at 0. Process-local, like the pending-login
+// store in the HTTP layer: SealKeeper ships as a single binary.
+type loginChallenges struct {
+	mu    sync.Mutex
+	items map[string]loginChallenge
+}
+
+type loginChallenge struct {
+	adminID   int64
+	session   gowebauthn.SessionData
+	expiresAt time.Time
+}
+
+// put records a freshly issued challenge and drops expired ones so the
+// map cannot grow without bound when FinishLogin is never reached.
+func (c *loginChallenges) put(now time.Time, adminID int64, sd gowebauthn.SessionData) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for k := range c.items {
+		if now.After(c.items[k].expiresAt) {
+			delete(c.items, k)
+		}
+	}
+	c.items[sd.Challenge] = loginChallenge{adminID: adminID, session: sd, expiresAt: now.Add(loginChallengeTTL)}
+}
+
+// take removes the challenge and returns its SessionData when it is still
+// live and was issued to adminID. The entry is spent either way.
+func (c *loginChallenges) take(now time.Time, adminID int64, challenge string) (gowebauthn.SessionData, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e, ok := c.items[challenge]
+	delete(c.items, challenge)
+	if !ok || now.After(e.expiresAt) || e.adminID != adminID {
+		return gowebauthn.SessionData{}, false
+	}
+	return e.session, true
 }
 
 // Config tunes the relying-party identity. RPID must be the effective domain
@@ -131,7 +182,8 @@ func NewRepo(db *sql.DB, cfg Config) (*Repo, error) {
 	if err != nil {
 		return nil, fmt.Errorf("webauthn: %w", err)
 	}
-	return &Repo{db: db, wa: wa, now: time.Now}, nil
+	return &Repo{db: db, wa: wa, now: time.Now,
+		challenges: &loginChallenges{items: make(map[string]loginChallenge)}}, nil
 }
 
 // WithClock for tests.
@@ -315,6 +367,7 @@ func (r *Repo) BeginLogin(ctx context.Context, who AdminIdentity) (options, sess
 	if err != nil {
 		return nil, nil, err
 	}
+	r.challenges.put(r.now(), who.ID, *sd)
 	return options, session, nil
 }
 
@@ -329,14 +382,25 @@ func (r *Repo) BeginLogin(ctx context.Context, who AdminIdentity) (options, sess
 // ErrCloneDetected and leave the stored counter untouched; the returned
 // Credential then carries only CredentialID and AdminID, for the audit
 // trail.
+//
+// The client blob only names the challenge. The SessionData that is
+// verified comes from the server-side record, which this call spends
+// whatever the outcome: an unknown, expired, already used or foreign
+// challenge yields ErrSessionMissing.
 func (r *Repo) FinishLogin(ctx context.Context, who AdminIdentity, sessionJSON []byte, req *http.Request) (Credential, error) {
 	if len(sessionJSON) == 0 {
 		return Credential{}, ErrSessionMissing
 	}
-	sd, err := parseSession(sessionJSON)
+	client, err := parseSession(sessionJSON)
 	if err != nil {
 		return Credential{}, err
 	}
+	sd, ok := r.challenges.take(r.now(), who.ID, client.Challenge)
+	if !ok {
+		return Credential{}, ErrSessionMissing
+	}
+	// The stored session decides; user verification stays mandatory.
+	sd.UserVerification = protocol.VerificationRequired
 	user, err := r.loadUser(ctx, who, true)
 	if err != nil {
 		return Credential{}, err

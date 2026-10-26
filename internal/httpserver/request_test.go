@@ -40,6 +40,7 @@ func TestHandleRequestDerivesDomainServerSide(t *testing.T) {
 	s.SetTokens(tokens.NewRepo(db))
 	body := `{"email":"User@Example.TEST","domain":"forged.example","subject":"forged-subject"}`
 	r := httptest.NewRequest(http.MethodPost, "/api/v1/request", strings.NewReader(body))
+	r.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	s.handleRequest(w, r)
 	if w.Code != http.StatusAccepted {
