@@ -172,12 +172,28 @@ func parseDSN(dsn string) (Dialect, string, string, error) {
 		if u.RawQuery != "" {
 			path += "?" + u.RawQuery
 		}
-		return DialectSQLite, "sqlite", path, nil
+		return DialectSQLite, "sqlite", sqliteForeignKeys(path), nil
 	case strings.HasPrefix(dsn, "file:"), dsn == ":memory:":
-		return DialectSQLite, "sqlite", dsn, nil
+		return DialectSQLite, "sqlite", sqliteForeignKeys(dsn), nil
 	default:
 		return "", "", "", fmt.Errorf("storage.Open: unrecognised DSN scheme in %q", dsn)
 	}
+}
+
+// sqliteForeignKeys turns PRAGMA foreign_keys on for every pooled SQLite
+// connection. Without it SQLite parses the schema's REFERENCES … ON DELETE
+// clauses but never enforces them, whereas Postgres always does — deleting
+// an admin would cascade to its sessions on one dialect only. A DSN that
+// already sets foreign_keys keeps its own value.
+func sqliteForeignKeys(dataSource string) string {
+	if strings.Contains(dataSource, "foreign_keys") {
+		return dataSource
+	}
+	sep := "?"
+	if strings.Contains(dataSource, "?") {
+		sep = "&"
+	}
+	return dataSource + sep + "_pragma=foreign_keys(1)"
 }
 
 // ----------------------------------------------------------------------------
