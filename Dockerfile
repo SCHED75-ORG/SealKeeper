@@ -13,6 +13,28 @@
 #   OCI labels are set in release.yml at push time (org.opencontainers.image.*).
 # =============================================================================
 
+# ---------- 0) JS generation bundle ----------
+# The reveal page and the admin entropy preview load
+# /static/sealkeeper-generation.umd.js. web/dist is gitignored, so the bundle
+# MUST be built here from web/src + the committed lockfile — otherwise a fresh
+# checkout (release.yml) ships an image with an empty /app/web.
+# DECISION: node image pinned by multi-arch index digest (reproducible input);
+#   run on $BUILDPLATFORM because the output is architecture-independent JS.
+#   `npm ci --ignore-scripts` installs exactly package-lock.json and runs no
+#   dependency lifecycle scripts. Only web/ manifests + sources are copied so a
+#   developer's local node_modules or stale dist can never leak in.
+FROM --platform=$BUILDPLATFORM node:22.22.3-alpine3.22@sha256:cd7807368cf24826297cbad5dca1a44972ccfd770647db52a8c7589eb4599ac8 AS webbuild
+
+WORKDIR /web
+
+COPY web/package.json web/package-lock.json ./
+RUN npm ci --ignore-scripts --no-audit --no-fund
+
+COPY web/vite.config.js ./
+COPY web/src ./src
+RUN npm run build \
+ && test -s dist/sealkeeper-generation.umd.js
+
 # ---------- 1) Builder ----------
 FROM golang:1.26.10-alpine3.23 AS builder
 
@@ -34,10 +56,9 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 # Copy sources
 COPY . .
 
-# Guarantee the JS bundle path exists so the runtime COPY layer succeeds even
-# when the JS bundle has not been built yet. Migrations are embedded into the
-# binary via go:embed (see internal/storage/migrations) and need no copy.
-RUN mkdir -p /src/web/dist
+# Migrations are embedded into the binary via go:embed (see
+# internal/storage/migrations) and need no copy. The JS bundle comes from the
+# webbuild stage, never from the build context.
 
 # Build args (set by buildx from --platform and by the release workflow)
 ARG TARGETOS=linux
@@ -86,8 +107,8 @@ WORKDIR /app
 COPY --from=builder --chown=65532:65532 /out/sealkeeper /usr/local/bin/sealkeeper
 COPY --from=builder --chown=65532:65532 /out/healthcheck /usr/local/bin/healthcheck
 
-# Static assets and migrations live next to the binary
-COPY --from=builder --chown=65532:65532 /src/web/dist /app/web
+# JS generation bundle, built from source in the webbuild stage
+COPY --from=webbuild --chown=65532:65532 /web/dist /app/web
 
 EXPOSE 8443
 

@@ -20,7 +20,8 @@ permissions:
   issues: write
 
 env:
-  GO_VERSION: "1.25"
+  GO_VERSION: "1.26.10"
+  GOVULNCHECK_VERSION: "v1.9.0"
   NODE_VERSION: "20"
 
 jobs:
@@ -122,7 +123,7 @@ jobs:
 
       - name: govulncheck
         run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
+          go install "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}"
           govulncheck ./...
 
       - name: npm audit (web)
