@@ -336,6 +336,22 @@ func TestSMTPSenderRequiresHost(t *testing.T) {
 	}
 }
 
+// An unknown TLS mode used to be accepted here and only fail inside
+// Send ("unknown TLS mode"); construction now refuses it.
+func TestSMTPSenderRejectsUnknownTLSMode(t *testing.T) {
+	t.Parallel()
+	for _, mode := range []mailer.TLSMode{"STARTTLS", "tls", "ssl", "none"} {
+		if _, err := mailer.NewSMTPSender(mailer.SMTPConfig{Host: "smtp.example.net", TLS: mode}); err == nil {
+			t.Errorf("TLS mode %q: expected a construction error", mode)
+		}
+	}
+	for _, mode := range []mailer.TLSMode{"", mailer.TLSAuto, mailer.TLSStartTLS, mailer.TLSImplicit, mailer.TLSDisable} {
+		if _, err := mailer.NewSMTPSender(mailer.SMTPConfig{Host: "smtp.example.net", TLS: mode}); err != nil {
+			t.Errorf("TLS mode %q: unexpected error %v", mode, err)
+		}
+	}
+}
+
 func TestSMTPSenderRejectsEmptyRecipient(t *testing.T) {
 	t.Parallel()
 	f := newFakeSMTP(t)

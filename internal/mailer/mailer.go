@@ -123,8 +123,13 @@ func NewSMTPSender(cfg SMTPConfig) (*SMTPSender, error) {
 			cfg.Port = 587
 		}
 	}
-	if cfg.TLS == "" {
+	switch cfg.TLS {
+	case "":
 		cfg.TLS = TLSAuto
+	case TLSAuto, TLSStartTLS, TLSImplicit, TLSDisable:
+	default:
+		// Refuse here rather than fail every Send with "unknown TLS mode".
+		return nil, fmt.Errorf("mailer.NewSMTPSender: unknown TLS mode %q", cfg.TLS)
 	}
 	if cfg.Timeout == 0 {
 		cfg.Timeout = 30 * time.Second

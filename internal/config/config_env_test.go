@@ -59,6 +59,31 @@ func TestLoad_MailLanguage(t *testing.T) {
 	}
 }
 
+// An unknown SMTP TLS mode used to load cleanly and only fail at send
+// time ("unknown TLS mode"), silently dropping every reveal mail.
+func TestLoad_SMTPTLS(t *testing.T) {
+	for _, val := range []string{"STARTTLS-only", "tls", "ssl", "none", "true"} {
+		t.Run("refuses "+val, func(t *testing.T) {
+			evalEnv(t)
+			t.Setenv("SK_SMTP_TLS", val)
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), "SK_SMTP_TLS") {
+				t.Fatalf("SK_SMTP_TLS=%q: err = %v, want a refusal naming SK_SMTP_TLS", val, err)
+			}
+		})
+	}
+	cases := map[string]string{"": "", "auto": "auto", " STARTTLS ": "starttls", "Implicit": "implicit", "disable": "disable"}
+	for in, want := range cases {
+		t.Run("accepts "+in, func(t *testing.T) {
+			evalEnv(t)
+			t.Setenv("SK_SMTP_TLS", in)
+			cfg, err := Load()
+			if err != nil || cfg.SMTPTLS != want {
+				t.Fatalf("SK_SMTP_TLS=%q: SMTPTLS = %q, err = %v; want %q, nil", in, cfg.SMTPTLS, err, want)
+			}
+		})
+	}
+}
+
 func TestLoad_AdminSessionKnobs(t *testing.T) {
 	evalEnv(t)
 	t.Setenv("SK_ADMIN_SESSION_TTL_SECONDS", "3600")

@@ -179,6 +179,7 @@ func Load() (Config, error) {
 		cfg.LibrariesDir = "data/libraries"
 	}
 	cfg.MailLanguage = strings.ToLower(strings.TrimSpace(cfg.MailLanguage))
+	cfg.SMTPTLS = strings.ToLower(strings.TrimSpace(cfg.SMTPTLS))
 
 	if err := cfg.validate(); err != nil {
 		return cfg, err
@@ -324,7 +325,21 @@ func (c Config) validate() error {
 	default:
 		return fmt.Errorf("invalid SK_MAIL_LANGUAGE %q (want \"en\" or \"fr\")", c.MailLanguage)
 	}
+	if err := checkSMTPTLS(c.SMTPTLS); err != nil {
+		return err
+	}
 	return c.validateLimits()
+}
+
+// checkSMTPTLS refuses an unknown SMTP TLS mode at boot. The mailer only
+// rejects it at send time, so every reveal mail would fail silently
+// behind the always-202 public answer. Keep in sync with mailer.TLSMode.
+func checkSMTPTLS(mode string) error {
+	switch mode {
+	case "", "auto", "starttls", "implicit", "disable":
+		return nil
+	}
+	return fmt.Errorf("invalid SK_SMTP_TLS %q (want \"auto\", \"starttls\", \"implicit\" or \"disable\")", mode)
 }
 
 // validateLimits checks the numeric knobs. Durations have a one-minute
