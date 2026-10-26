@@ -32,6 +32,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -874,27 +875,24 @@ func (s *Server) handlePolicy(w http.ResponseWriter, r *http.Request) {
 		"domain":  tok.Domain,
 	})
 
-	// FR-B.39..41 — optional post-consultation notification. Fire and
-	// forget: the assertion-policy roundtrip must not wait on SMTP, and
-	// the requester already has the secret in front of them by the time
-	// the mail goes out. We snapshot every request-scoped value before
-	// detaching the context so the goroutine doesn't reach into a
-	// cancelled r.Context().
+	// FR-B.39..41 — optional post-consultation notification. It goes out
+	// on the same bounded background workers as the reveal mails: the
+	// policy roundtrip must not wait on SMTP, and Shutdown (WaitMail)
+	// drains it instead of dropping it. Every request-scoped value is
+	// snapshotted first so the worker never reads a cancelled r.Context().
 	if s.shouldNotifyPostConsult(r.Context(), tok.Email) {
-		lang := mailtemplates.PickLanguage(r.Header.Get("Accept-Language"))
-		brand := s.resolveBranding(r.Context())
-		// dispatchPostConsult intentionally detaches from r.Context() —
-		// the request returns before SMTP finishes and cancelling the
-		// goroutine would lose the audit-trail mail.
-		// #nosec G118 -- fire-and-forget by design
-		go s.dispatchPostConsult(postConsultMail{
+		s.queuePostConsult(r.Context(), postConsultMail{
 			token:    tok.Token,
 			email:    tok.Email,
-			lang:     lang,
-			brand:    brand,
+			lang:     mailtemplates.PickLanguage(r.Header.Get("Accept-Language")),
+			brand:    s.resolveBranding(r.Context()),
 			consumed: time.Now().UTC(),
-			ipHash:   ipHash,
-			uaHash:   uaHash,
+			// FR-B.40: the owner needs the IP and browser themselves to
+			// recognise the access — the keyed hashes kept in the audit
+			// log mean nothing to them. These go into the mail only and
+			// are never stored.
+			ip: s.clientIP(r),
+			ua: mailDisplayText(r.UserAgent(), maxMailUALen),
 		})
 	}
 
@@ -930,8 +928,56 @@ type postConsultMail struct {
 	lang     string
 	brand    branding.Branding
 	consumed time.Time
-	ipHash   string
-	uaHash   string
+	ip       string
+	ua       string
+}
+
+// maxMailUALen caps the User-Agent quoted in the post-consultation mail.
+const maxMailUALen = 200
+
+// mailDisplayText makes caller-controlled text safe to quote in a mail
+// body: control characters are dropped and the result is capped at max
+// runes.
+func mailDisplayText(v string, maxRunes int) string {
+	var b strings.Builder
+	n := 0
+	for _, c := range v {
+		if unicode.IsControl(c) {
+			continue
+		}
+		if n == maxRunes {
+			b.WriteString("…")
+			break
+		}
+		b.WriteRune(c)
+		n++
+	}
+	return b.String()
+}
+
+// queuePostConsult hands m to a background mail worker tracked by
+// mailWG, so Shutdown waits for it. When every worker is busy the mail
+// is dropped and audited rather than delaying the policy response.
+func (s *Server) queuePostConsult(ctx context.Context, m postConsultMail) {
+	select {
+	case s.mailSlots <- struct{}{}:
+	default:
+		s.logger.Error("mail queue full — post-consultation mail dropped")
+		s.auditAppend(ctx, "mail.post_consult_failed", m.email, tokenRef(m.token), map[string]any{
+			"stage": "queue",
+			"error": "mail queue full",
+		})
+		return
+	}
+	s.mailWG.Add(1)
+	// Detached from the request context on purpose: the response is
+	// written before the relay answers.
+	// #nosec G118 -- bounded by mailSlots, drained by WaitMail
+	go func() {
+		defer s.mailWG.Done()
+		defer func() { <-s.mailSlots }()
+		s.dispatchPostConsult(m)
+	}()
 }
 
 // dispatchPostConsult renders the post_consultation template and sends
@@ -949,8 +995,8 @@ func (s *Server) dispatchPostConsult(m postConsultMail) {
 		InstanceDomain:     s.cfg.InstanceDomain,
 		ContactURL:         m.brand.ContactURL,
 		ConsultedAt:        m.consumed.Format(time.RFC3339),
-		ConsultedIP:        m.ipHash,
-		ConsultedUserAgent: m.uaHash,
+		ConsultedIP:        m.ip,
+		ConsultedUserAgent: m.ua,
 	})
 	if err != nil {
 		s.logger.Error("post-consultation render failed", "err", err)
