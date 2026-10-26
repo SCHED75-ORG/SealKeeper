@@ -2123,8 +2123,9 @@ func sameOriginPOST(next http.Handler) http.Handler {
 
 // requireCurrentPassword is the step-up for credential changes: a stolen
 // session cookie alone must not let an attacker replace the password, the
-// e-mail or the security keys and lock the operator out. Returns the
-// error slug to show when the check fails.
+// e-mail or the security keys, nor create, disable or delete operator
+// accounts, and lock the operator out. Returns the error slug to show when
+// the check fails.
 func (s *Server) requireCurrentPassword(r *http.Request) (string, bool) {
 	a, _, _ := adminFromCtx(r)
 	err := s.adminRepo.VerifyPassword(r.Context(), a.ID, r.FormValue("current_password"))
@@ -3334,6 +3335,10 @@ func (s *Server) handleAdminAdminAdd(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/admin/admins?err=demo_readonly", http.StatusSeeOther)
 		return
 	}
+	if slug, ok := s.requireCurrentPassword(r); !ok {
+		http.Redirect(w, r, "/admin/admins?err="+slug, http.StatusSeeOther)
+		return
+	}
 	email := strings.TrimSpace(r.FormValue("email"))
 	pwd, err := opaqueToken(15) // 20-char URL-safe random; satisfies ≥ 12.
 	if err != nil {
@@ -3367,6 +3372,10 @@ func (s *Server) handleAdminAdminToggle(w http.ResponseWriter, r *http.Request) 
 	a, _, _ := adminFromCtx(r)
 	if err := r.ParseForm(); err != nil || !s.checkSessionCSRF(r) {
 		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if slug, ok := s.requireCurrentPassword(r); !ok {
+		http.Redirect(w, r, "/admin/admins?err="+slug, http.StatusSeeOther)
 		return
 	}
 	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
@@ -3404,6 +3413,10 @@ func (s *Server) handleAdminAdminDelete(w http.ResponseWriter, r *http.Request) 
 	a, _, _ := adminFromCtx(r)
 	if err := r.ParseForm(); err != nil || !s.checkSessionCSRF(r) {
 		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if slug, ok := s.requireCurrentPassword(r); !ok {
+		http.Redirect(w, r, "/admin/admins?err="+slug, http.StatusSeeOther)
 		return
 	}
 	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
@@ -4011,6 +4024,7 @@ const adminAdminsTpl = `{{define "admins.html"}}{{template "header" .}}
       {{ if ne .ID $.Admin.ID }}
         <form method="POST" action="/admin/admins/{{ .ID }}/toggle" style="display:inline">
           <input type="hidden" name="csrf_token" value="{{ $.CSRF }}">
+          <input name="current_password" type="password" required autocomplete="current-password" placeholder="Your password" aria-label="Your current password" style="width:auto;display:inline-block">
           <button type="submit" class="secondary">{{ if .Disabled }}Re-enable{{ else }}Disable{{ end }}</button>
         </form>
         <details style="display:inline-block;margin-left:0.5rem"><summary>Delete</summary>
@@ -4018,6 +4032,7 @@ const adminAdminsTpl = `{{define "admins.html"}}{{template "header" .}}
             <input type="hidden" name="csrf_token" value="{{ $.CSRF }}">
             <label>Type <code>{{ .Email }}</code> to confirm:</label>
             <input name="confirm" type="text" required style="width:auto;display:inline-block">
+            <input name="current_password" type="password" required autocomplete="current-password" placeholder="Your password" aria-label="Your current password" style="width:auto;display:inline-block">
             <button type="submit" style="background:#991b1b;border-color:#991b1b">Delete</button>
           </form>
         </details>
@@ -4035,6 +4050,8 @@ const adminAdminsTpl = `{{define "admins.html"}}{{template "header" .}}
   <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
   <label for="add-email">Email</label>
   <input id="add-email" name="email" type="email" required autocomplete="off">
+  <label for="cp-add">Your current password</label>
+  <input id="cp-add" name="current_password" type="password" required autocomplete="current-password">
   <p style="margin-top:1rem"><button type="submit">Create admin</button></p>
 </form>
 </main>
