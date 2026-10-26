@@ -25,6 +25,11 @@
   },
   "packageRules": [
     {
+      "description": "Supply-chain cooling-off: wait 7 days before proposing a new release (vulnerability fixes bypass this via vulnerabilityAlerts)",
+      "matchPackageNames": ["*"],
+      "minimumReleaseAge": "7 days"
+    },
+    {
       "description": "Group Go module updates",
       "matchManagers": ["gomod"],
       "groupName": "go modules",
