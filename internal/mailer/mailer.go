@@ -108,6 +108,8 @@ type SMTPSender struct {
 }
 
 // SMTPDialer is the dial primitive — extracted so tests can hand in a fake.
+// A dialer must keep ctx in force on the returned client's connection for the
+// whole transaction (see bindConnToContext), since net/smtp ignores contexts.
 type SMTPDialer func(ctx context.Context, addr string) (*smtp.Client, error)
 
 // NewSMTPSender returns a Sender for the configured relay.
@@ -314,11 +316,32 @@ func (a loginAuth) Next(fromServer []byte, more bool) ([]byte, error) {
 
 // ----- default dialer -------------------------------------------------------
 
-// defaultDial honours context cancellation by using net.Dialer.
+// bindConnToContext makes ctx govern the whole SMTP transaction on conn, not
+// just the dial: net/smtp has no context support, so a relay that accepts TCP
+// and then stalls would otherwise block every later read or write forever.
+// The conn gets ctx's deadline (Send derives it as min(caller deadline,
+// now+Timeout)), and is closed when ctx is cancelled so a blocked read
+// returns at once. Send cancels its ctx on return, which also closes conn.
+func bindConnToContext(ctx context.Context, conn net.Conn) error {
+	if deadline, ok := ctx.Deadline(); ok {
+		if err := conn.SetDeadline(deadline); err != nil {
+			_ = conn.Close()
+			return err
+		}
+	}
+	context.AfterFunc(ctx, func() { _ = conn.Close() })
+	return nil
+}
+
+// defaultDial honours context cancellation by using net.Dialer, and binds the
+// connection to ctx for the rest of the transaction.
 func defaultDial(ctx context.Context, addr string) (*smtp.Client, error) {
 	d := &net.Dialer{Timeout: 30 * time.Second}
 	conn, err := d.DialContext(ctx, "tcp", addr)
 	if err != nil {
+		return nil, err
+	}
+	if err := bindConnToContext(ctx, conn); err != nil {
 		return nil, err
 	}
 	host, _, _ := net.SplitHostPort(addr)
@@ -332,6 +355,9 @@ func defaultTLSDial(serverName string, insecure bool, timeout time.Duration) SMT
 		d := &net.Dialer{Timeout: timeout}
 		conn, err := d.DialContext(ctx, "tcp", addr)
 		if err != nil {
+			return nil, err
+		}
+		if err := bindConnToContext(ctx, conn); err != nil {
 			return nil, err
 		}
 		host, _, _ := net.SplitHostPort(addr)

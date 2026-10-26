@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/smtp"
 	"strings"
@@ -480,5 +481,110 @@ func TestSMTPSenderAutoAllowsPlaintextLoopbackRelay(t *testing.T) {
 	s = s.WithDialer(dialerFor(t, f))
 	if err := s.Send(context.Background(), sampleMessage(t)); err != nil {
 		t.Fatalf("Send to loopback relay: %v", err)
+	}
+}
+
+// stallingRelay accepts TCP connections and then never answers past an
+// optional greeting: a hung MTA or a middlebox that blackholes after the
+// handshake. It drains what the client writes so the client blocks on read.
+func stallingRelay(t *testing.T, greeting string) int {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	var mu sync.Mutex
+	var conns []net.Conn
+	t.Cleanup(func() {
+		_ = l.Close()
+		mu.Lock()
+		defer mu.Unlock()
+		for _, c := range conns {
+			_ = c.Close()
+		}
+	})
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			conns = append(conns, c)
+			mu.Unlock()
+			if greeting != "" {
+				_, _ = c.Write([]byte(greeting))
+			}
+			go func() { _, _ = io.Copy(io.Discard, c) }()
+		}
+	}()
+	return l.Addr().(*net.TCPAddr).Port
+}
+
+// A relay that accepts TCP and then stalls must not pin the caller: Send
+// is bounded by min(ctx deadline, Timeout) and interrupted by ctx
+// cancellation for the whole transaction, not just during dial.
+func TestSMTPSenderBoundedByStallingRelay(t *testing.T) {
+	t.Parallel()
+	background := func() (context.Context, context.CancelFunc) {
+		return context.WithCancel(context.Background())
+	}
+	cases := []struct {
+		name     string
+		greeting string
+		timeout  time.Duration
+		ctx      func() (context.Context, context.CancelFunc)
+	}{
+		{name: "silent relay, Timeout bound", timeout: 300 * time.Millisecond, ctx: background},
+		{
+			name:    "silent relay, ctx deadline bound",
+			timeout: time.Minute,
+			ctx: func() (context.Context, context.CancelFunc) {
+				return context.WithTimeout(context.Background(), 300*time.Millisecond)
+			},
+		},
+		{
+			name:    "silent relay, ctx cancelled",
+			timeout: time.Minute,
+			ctx: func() (context.Context, context.CancelFunc) {
+				ctx, cancel := context.WithCancel(context.Background())
+				time.AfterFunc(300*time.Millisecond, cancel)
+				return ctx, cancel
+			},
+		},
+		{
+			name:     "greets then stalls on EHLO",
+			greeting: "220 stall.test ESMTP\r\n",
+			timeout:  300 * time.Millisecond,
+			ctx:      background,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			s, err := mailer.NewSMTPSender(mailer.SMTPConfig{
+				Host:    "127.0.0.1",
+				Port:    stallingRelay(t, c.greeting),
+				TLS:     mailer.TLSDisable,
+				Timeout: c.timeout,
+			})
+			if err != nil {
+				t.Fatalf("NewSMTPSender: %v", err)
+			}
+			ctx, cancel := c.ctx()
+			defer cancel()
+			msg := sampleMessage(t)
+			done := make(chan error, 1)
+			start := time.Now()
+			go func() { done <- s.Send(ctx, msg) }()
+			select {
+			case err := <-done:
+				if err == nil {
+					t.Fatal("Send against a stalling relay returned nil")
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatalf("Send still blocked after %v against a stalling relay", time.Since(start))
+			}
+		})
 	}
 }
