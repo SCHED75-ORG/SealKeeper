@@ -258,3 +258,38 @@ func TestImportHonoursActiveColumn(t *testing.T) {
 		t.Errorf("expected inactive, got active=true")
 	}
 }
+
+// FR-C.23: FindMatchingIssued keeps a disabled domain resolvable for links
+// already issued, while an active row (even a wildcard) still wins and
+// FindMatching keeps refusing the disabled one.
+func TestFindMatchingIssuedFallsBackToInactiveRow(t *testing.T) {
+	t.Parallel()
+	r, _ := newRepo(t)
+	ctx := context.Background()
+	exact, err := r.Create(ctx, "paris.corp.test", "", true, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.SetActive(ctx, exact.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.FindMatching(ctx, "paris.corp.test"); !errors.Is(err, domains.ErrNotFound) {
+		t.Fatalf("FindMatching on a disabled row = %v, want ErrNotFound", err)
+	}
+	got, err := r.FindMatchingIssued(ctx, "paris.corp.test")
+	if err != nil || got.ID != exact.ID {
+		t.Fatalf("FindMatchingIssued = %+v, %v, want the disabled exact row", got, err)
+	}
+
+	wild, err := r.Create(ctx, "*.corp.test", "", true, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err = r.FindMatchingIssued(ctx, "paris.corp.test")
+	if err != nil || got.ID != wild.ID {
+		t.Fatalf("FindMatchingIssued = %+v, %v, want the active wildcard first", got, err)
+	}
+	if _, err := r.FindMatchingIssued(ctx, "other.test"); !errors.Is(err, domains.ErrNotFound) {
+		t.Fatalf("FindMatchingIssued(unknown) = %v, want ErrNotFound", err)
+	}
+}

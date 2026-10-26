@@ -224,6 +224,22 @@ func (r *Repo) Count(ctx context.Context) (int64, error) {
 // wildcard (deepest suffix) wins over a shallower one. Inactive rows are
 // skipped. Returns ErrNotFound when nothing applies.
 func (r *Repo) FindMatching(ctx context.Context, emailDomain string) (Domain, error) {
+	return r.findMatching(ctx, emailDomain, false)
+}
+
+// FindMatchingIssued is FindMatching for a link that was already issued:
+// an active row still wins, but when none matches any more the most
+// specific inactive row is returned, so disabling a domain does not
+// break links sent before (FR-C.23). Never use it to admit a request.
+func (r *Repo) FindMatchingIssued(ctx context.Context, emailDomain string) (Domain, error) {
+	row, err := r.findMatching(ctx, emailDomain, false)
+	if !errors.Is(err, ErrNotFound) {
+		return row, err
+	}
+	return r.findMatching(ctx, emailDomain, true)
+}
+
+func (r *Repo) findMatching(ctx context.Context, emailDomain string, includeInactive bool) (Domain, error) {
 	d := strings.ToLower(strings.TrimSpace(emailDomain))
 	if d == "" {
 		return Domain{}, ErrNotFound
@@ -241,7 +257,7 @@ func (r *Repo) FindMatching(ctx context.Context, emailDomain string) (Domain, er
 		if err != nil {
 			return Domain{}, err
 		}
-		if row.Active {
+		if row.Active || includeInactive {
 			return row, nil
 		}
 	}

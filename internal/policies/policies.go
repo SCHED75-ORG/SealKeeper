@@ -237,12 +237,29 @@ func (r *Repo) Resolve(ctx context.Context, email string) (Policy, error) {
 	if r.domains == nil {
 		return Policy{}, ErrNoPolicy
 	}
+	return r.resolve(ctx, email, r.domains.FindMatching)
+}
+
+// ResolveIssued is Resolve for a link that was already issued: a domain
+// disabled since then still resolves to its policy (FR-C.23), while the
+// policy itself must still be active (FR-C.35). Never use it to admit a
+// new request — that is Resolve's job.
+func (r *Repo) ResolveIssued(ctx context.Context, email string) (Policy, error) {
+	if r.domains == nil {
+		return Policy{}, ErrNoPolicy
+	}
+	return r.resolve(ctx, email, r.domains.FindMatchingIssued)
+}
+
+func (r *Repo) resolve(ctx context.Context, email string,
+	findDomain func(context.Context, string) (domains.Domain, error),
+) (Policy, error) {
 	emailLower := strings.ToLower(strings.TrimSpace(email))
 	at := strings.LastIndex(emailLower, "@")
 	if at <= 0 || at+1 >= len(emailLower) {
 		return Policy{}, ErrNoPolicy
 	}
-	dom, err := r.domains.FindMatching(ctx, emailLower[at+1:])
+	dom, err := findDomain(ctx, emailLower[at+1:])
 	if errors.Is(err, domains.ErrNotFound) {
 		return Policy{}, ErrNoPolicy
 	}

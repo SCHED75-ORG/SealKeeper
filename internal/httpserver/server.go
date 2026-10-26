@@ -843,7 +843,7 @@ func (s *Server) shouldNotifyPostConsult(ctx context.Context, email string) bool
 	if s.policies == nil || s.mailTpls == nil {
 		return false
 	}
-	pol, err := s.policies.Resolve(ctx, email)
+	pol, err := s.policies.ResolveIssued(ctx, email)
 	if err != nil {
 		return false
 	}
@@ -979,7 +979,9 @@ func (s *Server) resolvedPolicy(ctx context.Context, email string) (map[string]a
 	if s.policies == nil {
 		return policyDefaultMap(), nil
 	}
-	row, err := s.policies.Resolve(ctx, email)
+	// Only consume paths call this: the token was admitted at issue time,
+	// so a domain disabled since then must not break it (FR-C.23).
+	row, err := s.policies.ResolveIssued(ctx, email)
 	if errors.Is(err, policies.ErrNoPolicy) {
 		n, cerr := s.policies.Count(ctx)
 		if cerr != nil {

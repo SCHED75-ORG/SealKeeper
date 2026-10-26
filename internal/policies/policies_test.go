@@ -319,3 +319,35 @@ func TestValidateForRevealMatchesBundle(t *testing.T) {
 		})
 	}
 }
+
+// FR-C.23 / FR-C.35: ResolveIssued serves a link issued before its domain
+// was disabled, but a disabled policy still resolves to nothing.
+func TestResolveIssuedIgnoresDisabledDomainNotDisabledPolicy(t *testing.T) {
+	t.Parallel()
+	r := newRig(t)
+	ctx := context.Background()
+	d, _ := r.domains.Create(ctx, "example.com", "", true, nil)
+	p, err := r.policies.Create(ctx, policies.CreateInputs{
+		DomainID: d.ID, ANSSILevel: elevations.LevelB1, Name: "B1",
+		Generator: policies.GeneratorG2, ParamsJSON: g2Params, Active: true,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.domains.SetActive(ctx, d.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.policies.Resolve(ctx, "user@example.com"); !errors.Is(err, policies.ErrNoPolicy) {
+		t.Fatalf("Resolve on a disabled domain = %v, want ErrNoPolicy", err)
+	}
+	got, err := r.policies.ResolveIssued(ctx, "user@example.com")
+	if err != nil || got.ID != p.ID {
+		t.Fatalf("ResolveIssued = %+v, %v, want policy %d", got, err, p.ID)
+	}
+	if err := r.policies.SetActive(ctx, p.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.policies.ResolveIssued(ctx, "user@example.com"); !errors.Is(err, policies.ErrNoPolicy) {
+		t.Fatalf("ResolveIssued on a disabled policy = %v, want ErrNoPolicy", err)
+	}
+}
