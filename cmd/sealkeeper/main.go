@@ -297,36 +297,7 @@ func runMigrate(args []string) int {
 
 	switch sub {
 	case "up":
-		// An unreadable version (fresh database) counts as 0.
-		before, _ := store.SchemaVersion(ctx)
-		applied, err := store.MigrateUpApplied(ctx)
-		if err != nil {
-			logger.Error("migrate up failed", "err", err)
-			return 1
-		}
-		v, _ := store.SchemaVersion(ctx)
-		// Seal the audit head anchor right after migration 0014 so a
-		// migrated legacy log is anchored before anything else runs: only
-		// the process that applied 0014 may take the legacy rows under the
-		// key (see audit.SealAnchor).
-		if cfg.MasterSecret != "" {
-			auditRepo, err := openAuditRepo(ctx, cfg, store.DB(), logger, applied)
-			if err != nil {
-				logger.Error("audit init failed", "err", err)
-				return 1
-			}
-			if v != before {
-				if _, err := auditRepo.Append(ctx, "schema.migrated", "cli", "",
-					map[string]any{"from_version": before, "to_version": v, "dialect": string(store.Dialect())}); err != nil {
-					logger.Error("audit append failed", "err", err)
-				}
-			}
-		}
-		logger.Info("migrate up complete",
-			"dialect", string(store.Dialect()),
-			"schema_version", v,
-			"database_url", redactDSN(cfg.DatabaseURL),
-		)
+		return runMigrateUp(ctx, cfg, store, logger)
 	case "status":
 		v, err := store.SchemaVersion(ctx)
 		if err != nil {
@@ -341,6 +312,52 @@ func runMigrate(args []string) int {
 	default:
 		fmt.Fprintf(os.Stderr, "unknown migrate sub-command %q (want: up | status)\n", sub)
 		return 2
+	}
+	return 0
+}
+
+// runMigrateUp applies pending migrations, then (when a master secret is
+// configured) opens the keyed audit chain and records the schema change.
+func runMigrateUp(ctx context.Context, cfg config.Config, store storage.Store, logger *slog.Logger) int {
+	// An unreadable version (fresh database) counts as 0.
+	before, _ := store.SchemaVersion(ctx)
+	applied, err := store.MigrateUpApplied(ctx)
+	if err != nil {
+		logger.Error("migrate up failed", "err", err)
+		return 1
+	}
+	v, _ := store.SchemaVersion(ctx)
+	// Seal the audit head anchor right after migration 0014 so a
+	// migrated legacy log is anchored before anything else runs: only
+	// the process that applied 0014 may take the legacy rows under the
+	// key (see audit.SealAnchor).
+	if cfg.MasterSecret != "" {
+		if code := auditMigration(ctx, cfg, store, logger, applied, before, v); code != 0 {
+			return code
+		}
+	}
+	logger.Info("migrate up complete",
+		"dialect", string(store.Dialect()),
+		"schema_version", v,
+		"database_url", redactDSN(cfg.DatabaseURL),
+	)
+	return 0
+}
+
+// auditMigration opens the audit repo (sealing the anchor when this
+// process applied 0014) and appends schema.migrated when the version
+// moved. An append failure is logged, not fatal.
+func auditMigration(ctx context.Context, cfg config.Config, store storage.Store, logger *slog.Logger, applied []int64, before, v int64) int {
+	auditRepo, err := openAuditRepo(ctx, cfg, store.DB(), logger, applied)
+	if err != nil {
+		logger.Error("audit init failed", "err", err)
+		return 1
+	}
+	if v != before {
+		if _, err := auditRepo.Append(ctx, "schema.migrated", "cli", "",
+			map[string]any{"from_version": before, "to_version": v, "dialect": string(store.Dialect())}); err != nil {
+			logger.Error("audit append failed", "err", err)
+		}
 	}
 	return 0
 }
