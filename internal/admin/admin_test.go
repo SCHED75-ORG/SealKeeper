@@ -135,6 +135,94 @@ func TestDeleteLastActiveGuard(t *testing.T) {
 	}
 }
 
+func TestLastActiveGuardMissingAdmin(t *testing.T) {
+	t.Parallel()
+	r := newRepo(t)
+	ctx := context.Background()
+	if _, err := r.Create(ctx, "keep@example.test", "supersecret-12chars"); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := r.SetDisabled(ctx, 9999, true); !errors.Is(err, admin.ErrNotFound) {
+		t.Errorf("SetDisabled(missing) = %v, want ErrNotFound", err)
+	}
+	if err := r.Delete(ctx, 9999); !errors.Is(err, admin.ErrNotFound) {
+		t.Errorf("Delete(missing) = %v, want ErrNotFound", err)
+	}
+}
+
+// SK-26: two admins disabling or deleting each other at the same moment
+// must not both succeed. Before the guard was atomic, every round ended
+// with zero active admins.
+func TestLastActiveGuardIsAtomic(t *testing.T) {
+	t.Parallel()
+	ops := map[string]func(r *admin.Repo, ctx context.Context, id int64) error{
+		"disable": func(r *admin.Repo, ctx context.Context, id int64) error { return r.SetDisabled(ctx, id, true) },
+		"delete":  func(r *admin.Repo, ctx context.Context, id int64) error { return r.Delete(ctx, id) },
+	}
+	for name, op := range ops {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			r := newRepo(t)
+			ctx := context.Background()
+			ids := make([]int64, 2)
+			for k := range ids {
+				a, err := r.Create(ctx, fmt.Sprintf("%s%d@example.test", name, k), "supersecret-12chars")
+				if err != nil {
+					t.Fatalf("Create: %v", err)
+				}
+				ids[k] = a.ID
+			}
+			for round := 0; round < 25; round++ {
+				start := make(chan struct{})
+				errs := make([]error, 2)
+				var wg sync.WaitGroup
+				for k := range ids {
+					wg.Add(1)
+					go func() {
+						defer wg.Done()
+						<-start
+						errs[k] = op(r, ctx, ids[k])
+					}()
+				}
+				close(start)
+				wg.Wait()
+
+				active, err := r.ActiveCount(ctx)
+				if err != nil {
+					t.Fatalf("ActiveCount: %v", err)
+				}
+				if active != 1 {
+					t.Fatalf("round %d: active = %d after errs %v, want 1", round, active, errs)
+				}
+				ok := 0
+				for k, e := range errs {
+					switch {
+					case e == nil:
+						ok++
+						// Restore two active admins for the next round.
+						if name == "disable" {
+							if err := r.SetDisabled(ctx, ids[k], false); err != nil {
+								t.Fatalf("re-enable: %v", err)
+							}
+						} else {
+							a, err := r.Create(ctx, fmt.Sprintf("%s-r%d@example.test", name, round), "supersecret-12chars")
+							if err != nil {
+								t.Fatalf("Create: %v", err)
+							}
+							ids[k] = a.ID
+						}
+					case !errors.Is(e, admin.ErrLastActiveAdmin):
+						t.Fatalf("round %d: unexpected error %v", round, e)
+					}
+				}
+				if ok != 1 {
+					t.Fatalf("round %d: %d operations succeeded, want exactly 1", round, ok)
+				}
+			}
+		})
+	}
+}
+
 func TestListReturnsCreatedAdmins(t *testing.T) {
 	t.Parallel()
 	r := newRepo(t)

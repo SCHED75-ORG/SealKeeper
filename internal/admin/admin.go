@@ -227,71 +227,92 @@ func (r *Repo) ActiveCount(ctx context.Context) (int64, error) {
 
 // SetDisabled toggles disabled_at. Disabling the last active admin is
 // refused with ErrLastActiveAdmin so an operator can't lock everyone out.
-// Sessions of a disabled admin are NOT revoked here — the existing
-// LookupSession surface checks disabled_at on every load.
+// The guard and the write are one atomic step (see guardedLastActive), so
+// two admins disabling each other at the same moment cannot both succeed.
+// Disabling also revokes the admin's sessions.
 func (r *Repo) SetDisabled(ctx context.Context, adminID int64, disabled bool) error {
-	if disabled {
-		active, err := r.ActiveCount(ctx)
-		if err != nil {
-			return err
-		}
-		row, err := r.loadByID(ctx, adminID)
-		if err != nil {
-			return err
-		}
-		if row.DisabledAt == nil && active <= 1 {
-			return ErrLastActiveAdmin
-		}
-	}
 	now := r.now().UTC()
-	var newDisabled any
-	if disabled {
-		newDisabled = now
+	if !disabled {
+		res, err := r.db.ExecContext(ctx,
+			rebind(r.db, `UPDATE admins SET disabled_at = NULL, updated_at = ? WHERE id = ?`),
+			now, adminID)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return ErrNotFound
+		}
+		return nil
 	}
-	res, err := r.db.ExecContext(ctx,
-		rebind(r.db, `UPDATE admins SET disabled_at = ?, updated_at = ? WHERE id = ?`),
-		newDisabled, now, adminID)
-	if err != nil {
+	if err := r.guardedLastActive(ctx, adminID,
+		`UPDATE admins SET disabled_at = ?, updated_at = ? WHERE id = ? AND `+lastActiveCond,
+		now, now, adminID, adminID); err != nil {
 		return err
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return ErrNotFound
-	}
-	if disabled {
-		// Revoke, not just suspend: re-enabling the account must not revive
-		// sessions (possibly stolen ones) issued before it was disabled.
-		return r.RevokeOtherSessions(ctx, adminID, "")
-	}
-	return nil
+	// Revoke, not just suspend: re-enabling the account must not revive
+	// sessions (possibly stolen ones) issued before it was disabled.
+	return r.RevokeOtherSessions(ctx, adminID, "")
 }
 
 // Delete removes an admin row outright. Refuses to delete the last
-// active admin (same safeguard as SetDisabled). The caller is expected
-// to revoke the deleted admin's sessions afterwards — admin_sessions
-// uses ON DELETE CASCADE so they vanish in the same statement.
+// active admin (same atomic safeguard as SetDisabled). admin_sessions
+// uses ON DELETE CASCADE so the admin's sessions vanish in the same
+// statement.
 func (r *Repo) Delete(ctx context.Context, adminID int64) error {
-	row, err := r.loadByID(ctx, adminID)
+	return r.guardedLastActive(ctx, adminID,
+		`DELETE FROM admins WHERE id = ? AND `+lastActiveCond, adminID, adminID)
+}
+
+// lastActiveCond holds when the target row (bound twice, as the outer id
+// and the subquery's excluded id) is either already disabled or not the
+// only active admin.
+const lastActiveCond = `(disabled_at IS NOT NULL
+	OR (SELECT COUNT(*) FROM admins a2 WHERE a2.disabled_at IS NULL AND a2.id <> ?) > 0)`
+
+// guardedLastActive runs a disable/delete statement whose WHERE clause
+// carries lastActiveCond, and maps "no row touched" to ErrNotFound or
+// ErrLastActiveAdmin.
+//
+// SQLite: one UPDATE/DELETE takes the database write lock before it
+// reads, so the count it sees cannot change under it.
+//
+// Postgres (READ COMMITTED): the subquery alone is not enough — two
+// statements updating different rows would each count the other as still
+// active. Locking every active row first serialises them: the second
+// transaction waits, skips the row the first one disabled or deleted,
+// and its UPDATE/DELETE then runs on a fresh snapshot that sees it.
+func (r *Repo) guardedLastActive(ctx context.Context, adminID int64, stmt string, args ...any) error {
+	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	if row.DisabledAt == nil {
-		active, err := r.ActiveCount(ctx)
-		if err != nil {
+	defer func() { _ = tx.Rollback() }()
+	if storage.IsPostgres(r.db) {
+		if _, err := tx.ExecContext(ctx,
+			`SELECT id FROM admins WHERE disabled_at IS NULL ORDER BY id FOR UPDATE`); err != nil {
 			return err
 		}
-		if active <= 1 {
-			return ErrLastActiveAdmin
-		}
 	}
-	res, err := r.db.ExecContext(ctx,
-		rebind(r.db, `DELETE FROM admins WHERE id = ?`), adminID)
+	res, err := tx.ExecContext(ctx, rebind(r.db, stmt), args...)
 	if err != nil {
 		return err
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return ErrNotFound
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
 	}
-	return nil
+	if n == 0 {
+		var exists int64
+		if err := tx.QueryRowContext(ctx,
+			rebind(r.db, `SELECT COUNT(*) FROM admins WHERE id = ?`), adminID).Scan(&exists); err != nil {
+			return err
+		}
+		if exists == 0 {
+			return ErrNotFound
+		}
+		return ErrLastActiveAdmin
+	}
+	return tx.Commit()
 }
 
 // Count returns the number of admins on file. Bootstrap uses this to decide

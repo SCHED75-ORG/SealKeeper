@@ -81,7 +81,7 @@ Commands:
   serve      Run the HTTP server (default if no command given)
   migrate    Apply database migrations (forward-only)
   backup     Create or restore a backup
-  admin      Manage administrator accounts (list, reset-password)
+  admin      Manage administrator accounts (list, reset-password, enable)
   version    Print build metadata
   help       Show this message
 
@@ -447,17 +447,19 @@ func bootstrapAdminIfNeeded(ctx context.Context, repo *admin.Repo, logger *slog.
 
 func runAdmin(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: sealkeeper admin <reset-password|list>")
+		fmt.Fprintln(os.Stderr, "usage: sealkeeper admin <reset-password|enable|list>")
 		return 2
 	}
 	switch args[0] {
 	case "reset-password":
 		return runAdminResetPassword(args[1:])
+	case "enable":
+		return runAdminEnable(args[1:])
 	case "list":
 		return runAdminList(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown admin subcommand %q\n", args[0])
-		fmt.Fprintln(os.Stderr, "usage: sealkeeper admin <reset-password|list>")
+		fmt.Fprintln(os.Stderr, "usage: sealkeeper admin <reset-password|enable|list>")
 		return 2
 	}
 }
@@ -547,6 +549,50 @@ func runAdminResetPassword(args []string) int {
 	fmt.Println("================================================================")
 	fmt.Println("Next sign-in will force a password change + fresh TOTP enrolment.")
 	fmt.Println("Existing sessions of this admin have been revoked.")
+	if a.Disabled {
+		fmt.Println("This account is disabled: run 'sealkeeper admin enable --email " + a.Email + "' to sign in.")
+	}
+	return 0
+}
+
+// runAdminEnable clears disabled_at on one admin. It is the way back when
+// no active admin is left to re-enable anyone from the console.
+func runAdminEnable(args []string) int {
+	fs := flag.NewFlagSet("admin enable", flag.ExitOnError)
+	email := fs.String("email", "", "email of the admin to re-enable (required)")
+	_ = fs.Parse(args)
+	if *email == "" {
+		fmt.Fprintln(os.Stderr, "--email is required")
+		return 2
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	repo, cleanup, err := openAdminRepo(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "admin enable: %v\n", err)
+		return 1
+	}
+	defer cleanup()
+
+	a, err := repo.FindByEmail(ctx, *email)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "admin enable: %v\n", err)
+		return 1
+	}
+	if !a.Disabled {
+		fmt.Printf("%s is already active\n", a.Email)
+		return 0
+	}
+	if err := repo.SetDisabled(ctx, a.ID, false); err != nil {
+		fmt.Fprintf(os.Stderr, "admin enable: %v\n", err)
+		return 1
+	}
+	if _, err := audit.NewRepo(repo.DB()).Append(ctx, "admin.enabled", "cli", a.Email,
+		map[string]any{"admin_id": a.ID, "via": "cli"}); err != nil {
+		fmt.Fprintf(os.Stderr, "admin enable: audit append failed: %v\n", err)
+	}
+	fmt.Printf("%s re-enabled\n", a.Email)
 	return 0
 }
 
