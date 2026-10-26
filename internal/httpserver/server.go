@@ -657,7 +657,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	revealURL := strings.TrimRight(s.cfg.BaseURL, "/") + "/reveal/" + tok.Token
-	lang := mailtemplates.PickLanguage(r.Header.Get("Accept-Language"))
+	lang := s.mailLanguage()
 	brand := s.resolveBranding(r.Context())
 
 	var (
@@ -881,7 +881,7 @@ func (s *Server) handlePolicy(w http.ResponseWriter, r *http.Request) {
 	// detaching the context so the goroutine doesn't reach into a
 	// cancelled r.Context().
 	if s.shouldNotifyPostConsult(r.Context(), tok.Email) {
-		lang := mailtemplates.PickLanguage(r.Header.Get("Accept-Language"))
+		lang := s.mailLanguage()
 		brand := s.resolveBranding(r.Context())
 		// dispatchPostConsult intentionally detaches from r.Context() —
 		// the request returns before SMTP finishes and cancelling the
@@ -905,6 +905,17 @@ func (s *Server) handlePolicy(w http.ResponseWriter, r *http.Request) {
 		"expires_at": tok.ExpiresAt.Format(time.RFC3339),
 		"issued_at":  tok.IssuedAt.Format(time.RFC3339),
 	})
+}
+
+// mailLanguage is the template language for outbound mail. It is the
+// instance setting, never the HTTP client's Accept-Language: the public
+// form lets anyone request a mail for someone else, and the reveal page
+// may be opened by someone other than the owner.
+func (s *Server) mailLanguage() string {
+	if s.cfg.MailLanguage == "" {
+		return "en"
+	}
+	return s.cfg.MailLanguage
 }
 
 // shouldNotifyPostConsult resolves the policy for the consultation's

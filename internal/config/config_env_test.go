@@ -38,6 +38,27 @@ func TestLoad_RejectsMalformedEnv(t *testing.T) {
 	}
 }
 
+// The mail language is an instance setting (never the requester's
+// Accept-Language); an unsupported value is refused, not ignored.
+func TestLoad_MailLanguage(t *testing.T) {
+	evalEnv(t)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.MailLanguage != "en" {
+		t.Errorf("default MailLanguage = %q, want en", cfg.MailLanguage)
+	}
+	t.Setenv("SK_MAIL_LANGUAGE", " FR ")
+	if cfg, err = Load(); err != nil || cfg.MailLanguage != "fr" {
+		t.Errorf("SK_MAIL_LANGUAGE=FR: %q, %v", cfg.MailLanguage, err)
+	}
+	t.Setenv("SK_MAIL_LANGUAGE", "de")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "SK_MAIL_LANGUAGE") {
+		t.Errorf("SK_MAIL_LANGUAGE=de: err = %v, want a refusal", err)
+	}
+}
+
 func TestLoad_AdminSessionKnobs(t *testing.T) {
 	evalEnv(t)
 	t.Setenv("SK_ADMIN_SESSION_TTL_SECONDS", "3600")

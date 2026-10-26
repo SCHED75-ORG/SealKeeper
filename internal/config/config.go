@@ -86,6 +86,12 @@ type Config struct {
 	// reveal-mail Message-ID. Derived from SK_BASE_URL when empty.
 	InstanceDomain string `yaml:"instance_domain"`
 
+	// MailLanguage picks the reveal and post-consultation mail templates
+	// ("en" or "fr"). It is an instance setting on purpose: the request
+	// form is public, so the requester's Accept-Language must not choose
+	// what the target mailbox receives.
+	MailLanguage string `yaml:"mail_language"`
+
 	// Rate limits (FR-B.11..13). 0 disables the corresponding limiter.
 	RateLimitEmailPerHour int `yaml:"rate_limit_email_per_hour"`
 	RateLimitIPPerHour    int `yaml:"rate_limit_ip_per_hour"`
@@ -124,6 +130,7 @@ func Defaults() Config {
 		MaintenanceMode:         false,
 		RateLimitEmailPerHour:   3,  // FR-B.11
 		RateLimitIPPerHour:      10, // FR-B.12
+		MailLanguage:            "en",
 	}
 }
 
@@ -169,6 +176,7 @@ func Load() (Config, error) {
 	if cfg.LibrariesDir == "" {
 		cfg.LibrariesDir = "data/libraries"
 	}
+	cfg.MailLanguage = strings.ToLower(strings.TrimSpace(cfg.MailLanguage))
 
 	if err := cfg.validate(); err != nil {
 		return cfg, err
@@ -230,6 +238,7 @@ func applyEnv(cfg *Config) error {
 	getBool(&cfg.IntegrationsAllowPrivate, "SK_INTEGRATIONS_ALLOW_PRIVATE")
 	getString(&cfg.WebDir, "SK_WEB_DIR")
 	getString(&cfg.InstanceDomain, "SK_INSTANCE_DOMAIN")
+	getString(&cfg.MailLanguage, "SK_MAIL_LANGUAGE")
 	getInt(&cfg.RateLimitEmailPerHour, "SK_RATE_LIMIT_EMAIL_PER_HOUR")
 	getInt(&cfg.RateLimitIPPerHour, "SK_RATE_LIMIT_IP_PER_HOUR")
 	getString(&cfg.LibrariesDir, "SK_LIBRARIES_DIR")
@@ -299,6 +308,12 @@ func (c Config) validate() error {
 	}
 	if _, err := c.TrustedProxyPrefixes(); err != nil {
 		return err
+	}
+	// Keep in sync with mailtemplates.SupportedLanguages.
+	switch c.MailLanguage {
+	case "en", "fr":
+	default:
+		return fmt.Errorf("invalid SK_MAIL_LANGUAGE %q (want \"en\" or \"fr\")", c.MailLanguage)
 	}
 	return c.validateLimits()
 }

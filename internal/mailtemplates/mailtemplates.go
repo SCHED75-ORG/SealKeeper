@@ -330,31 +330,6 @@ func canonLang(lang string) string {
 	return lang
 }
 
-// PickLanguage returns the first language code in `acceptLanguage` that the
-// templates support, defaulting to "en". Skeleton-grade Accept-Language
-// parser: splits on commas, strips q= weights, lowercases, accepts only the
-// language subtag (`fr-FR` → `fr`).
-func PickLanguage(acceptLanguage string) string {
-	if acceptLanguage == "" {
-		return "en"
-	}
-	supported := map[string]bool{}
-	for _, l := range SupportedLanguages() {
-		supported[l] = true
-	}
-	for _, part := range strings.Split(acceptLanguage, ",") {
-		raw := part
-		if i := strings.Index(part, ";"); i > 0 {
-			raw = part[:i]
-		}
-		lang := canonLang(raw)
-		if supported[lang] {
-			return lang
-		}
-	}
-	return "en"
-}
-
 func nullableInt(p *int64) any {
 	if p == nil {
 		return nil

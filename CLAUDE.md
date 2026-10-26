@@ -183,6 +183,7 @@ Key env vars:
 | `SK_DATABASE_URL`                | sqlite in eval         | `postgres://…` or `sqlite://…`                              |
 | `SK_MASTER_SECRET`               | auto in eval only      | base64 32 bytes — **pin in production AND across rebuilds** |
 | `SK_INSTANCE_DOMAIN`             | derived from BaseURL   | From-address host, WebAuthn RPID                            |
+| `SK_MAIL_LANGUAGE`               | `en`                   | `en` / `fr`: language of every outbound mail. Never taken from the requester's Accept-Language |
 | `SK_BOOTSTRAP_ADMIN_PASSWORD`    | random 20-char         | **Eval-only** override; ≥ 12 chars                          |
 | `SK_RATE_LIMIT_*`                | 3/h email, 10/h IP     | Demo mode forces 1/1                                        |
 | `SK_SMTP_*`                      | unset                  | Env-wired sender; overridden at runtime by `/admin/smtp`    |

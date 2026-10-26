@@ -186,26 +186,6 @@ func TestRenderTemplateInlineWorksWithoutDB(t *testing.T) {
 	}
 }
 
-// ----- PickLanguage ---------------------------------------------------------
-
-func TestPickLanguage(t *testing.T) {
-	t.Parallel()
-	cases := map[string]string{
-		"":                           "en",
-		"fr":                         "fr",
-		"fr-FR":                      "fr",
-		"fr-FR,fr;q=0.9,en;q=0.8":    "fr",
-		"de-DE,de;q=0.9,en;q=0.8":    "en",
-		"es-MX,es;q=0.9,fr-FR;q=0.5": "fr",
-		"x-klingon":                  "en",
-	}
-	for accept, want := range cases {
-		if got := mailtemplates.PickLanguage(accept); got != want {
-			t.Errorf("PickLanguage(%q) = %q, want %q", accept, got, want)
-		}
-	}
-}
-
 // ----- List -----------------------------------------------------------------
 
 func TestListShowsEveryKnownPair(t *testing.T) {
