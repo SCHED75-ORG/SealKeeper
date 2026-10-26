@@ -155,6 +155,12 @@ var rawTextBypasses = []struct{ name, html string }{
 	{"css url with comment", `<p style="background:ur/**/l(https://evil.test/p)">x</p>` + safeHTML},
 	{"css url with space", `<p style="background:url (https://evil.test/p)">x</p>` + safeHTML},
 	{"css image-set", `<p style="background:image-set('https://evil.test/p' 1x)">x</p>` + safeHTML},
+	// Comment markers inside CSS strings: a real parser reads "/*" as a
+	// string, so stripping it as a comment used to hide what sits between.
+	{"css url between quoted comment markers", `<p style="font-family:'/*';background-image:url(https://evil.test/p);color:'*/'">x</p>` + safeHTML},
+	{"css style url between quoted comment markers", `<style>p{font-family:"/*"} body{background-image:url(https://evil.test/p)} p{font-family:"*/"}</style>` + safeHTML},
+	{"css import between quoted comment markers", `<style>p{font-family:"/*"} @import "https://evil.test/x.css"; p{font-family:"*/"}</style>` + safeHTML},
+	{"css unterminated comment", `<p style="color:red;/* background:url(https://evil.test/p)">x</p>` + safeHTML},
 }
 
 func TestUpsertRejectsRawTextBypasses(t *testing.T) {
