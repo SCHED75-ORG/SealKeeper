@@ -8,8 +8,9 @@
 //	GET  /version                 — build metadata
 //	GET  /                        — landing page (HTML stub)
 //	POST /api/v1/request          — issue a reveal token + capture/send mail
-//	GET  /api/v1/policy           — public policy; single-use consumption
-//	                                when ?token=… is supplied (FR-B.36)
+//	GET  /api/v1/policy           — public default policy (?token= refused)
+//	POST /api/v1/policy           — single-use consumption, token in the
+//	                                JSON body, never the URL (FR-B.36)
 //	GET  /reveal/{token}          — reveal page HTML (loads UMD bundle)
 //	GET  /static/*                — JS bundle + assets (config.WebDir)
 //	GET  /__captured_mail         — eval mail queue; demo: caller's own mail
@@ -26,6 +27,7 @@ import (
 	"fmt"
 	htmltemplate "html/template"
 	"log/slog"
+	"mime"
 	"net"
 	"net/http"
 	"net/netip"
@@ -369,6 +371,7 @@ func (s *Server) Router() http.Handler {
 
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Get("/policy", s.handlePolicy)
+		r.Post("/policy", s.handlePolicyConsume)
 		r.Post("/request", s.handleRequest)
 	})
 
@@ -813,13 +816,45 @@ func remoteHost(remoteAddr string) string {
 	return remoteAddr
 }
 
-// handlePolicy serves /api/v1/policy. With ?token=… present, the token is
-// consumed atomically and the policy is returned. Without a token, returns
-// the default policy descriptor (for documentation / Swagger).
+// maxPolicyBodyBytes caps the POST /api/v1/policy body: one 43-char token
+// plus JSON framing.
+const maxPolicyBodyBytes = 1 << 10
+
+// handlePolicy serves GET /api/v1/policy: the default policy descriptor
+// (for documentation / Swagger). A ?token=… is refused, never consumed:
+// URLs end up in proxy, ingress and SIEM access logs, where a live token
+// is a bearer credential anyone reading them could use first. Tokens are
+// consumed by POST only (handlePolicyConsume).
 func (s *Server) handlePolicy(w http.ResponseWriter, r *http.Request) {
-	tokenParam := strings.TrimSpace(r.URL.Query().Get("token"))
+	if r.URL.Query().Has("token") {
+		writeJSONError(w, http.StatusBadRequest, "token_in_query",
+			"Reveal tokens are not accepted in the URL. POST {\"token\":\"…\"} to /api/v1/policy.")
+		return
+	}
+	policy.Handler().ServeHTTP(w, r)
+}
+
+// handlePolicyConsume serves POST /api/v1/policy with a JSON body
+// {"token":"…"}: the token is consumed atomically and the resolved policy
+// is returned (FR-B.36). The body keeps the token out of every access log.
+func (s *Server) handlePolicyConsume(w http.ResponseWriter, r *http.Request) {
+	defer r.Body.Close()
+	if mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err != nil || mt != "application/json" {
+		writeJSONError(w, http.StatusUnsupportedMediaType, "unsupported_media_type",
+			"Send the token as application/json.")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxPolicyBodyBytes)
+	var p struct {
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid_payload", "Expected {\"token\":\"…\"}.")
+		return
+	}
+	tokenParam := strings.TrimSpace(p.Token)
 	if tokenParam == "" {
-		policy.Handler().ServeHTTP(w, r)
+		writeJSONError(w, http.StatusBadRequest, "token_required", "Missing reveal token.")
 		return
 	}
 	if s.tokens == nil {
@@ -1252,7 +1287,13 @@ const revealHTML = `<!doctype html>
     btn.addEventListener('click', async () => {
       btn.disabled = true; btn.textContent = '…';
       try {
-        const r = await fetch('/api/v1/policy?token=' + encodeURIComponent(token));
+        // Token in the body, never the URL: URLs land in access logs.
+        const r = await fetch('/api/v1/policy', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token: token }),
+          cache: 'no-store',
+        });
         if (!r.ok) {
           const j = await r.json().catch(() => ({}));
           throw new Error(j.detail || ('HTTP ' + r.status));

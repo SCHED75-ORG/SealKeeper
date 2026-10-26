@@ -121,7 +121,8 @@ Twelve migrations under `internal/storage/migrations/{postgres,sqlite}/`. Each m
 | GET    | `/version`                      | Build metadata                                             |
 | GET    | `/`                             | Landing + request form                                     |
 | POST   | `/api/v1/request`               | Issue reveal token, send email (always 202 — FR-B.13)      |
-| GET    | `/api/v1/policy`                | Returns default policy. With `?token=X` it **consumes** the token atomically and returns the typed policy. |
+| GET    | `/api/v1/policy`                | Returns default policy. A `?token=` is refused (400 `token_in_query`) and never consumed — URLs land in proxy/SIEM access logs. |
+| POST   | `/api/v1/policy`                | Body `{"token":"…"}` (application/json): **consumes** the token atomically and returns the typed policy. |
 | GET    | `/reveal/{token}`               | Reveal page HTML; the JS bundle does the actual consumption |
 | GET    | `/static/*`                     | JS bundle + assets (origin: `cfg.WebDir`)                  |
 | GET    | `/static/branding/logo`         | Inline logo blob streamed from the branding repo           |

@@ -56,7 +56,7 @@ export { calculateEntropy } from "./entropy.js";
 
 /**
  * Builds the generate() descriptor from the `policy` object returned by
- * GET /api/v1/policy?token=… . Two shapes reach the reveal page:
+ * POST /api/v1/policy {token}. Two shapes reach the reveal page:
  *   - a resolved admin policy (`generator`, `proposalCount`, `parameters`):
  *     passed through untouched so proposals honour what the operator set;
  *   - the built-in default (`generators: [...]`, no admin policy yet):
