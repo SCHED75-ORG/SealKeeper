@@ -78,6 +78,7 @@ func (s *Server) registerAdminRoutes(r chi.Router) {
 		r.Post("/logout", s.handleAdminLogout)
 		r.Group(func(r chi.Router) {
 			r.Use(s.adminRequireSession)
+			r.Use(s.demoReadOnly) // FR-H.79 — see demo.go
 			r.Get("/setup", s.handleAdminSetupGet)
 			r.Post("/setup", s.handleAdminSetupPost)
 			r.Get("/dashboard", s.handleAdminDashboard)
@@ -1981,7 +1982,7 @@ func (s *Server) handleAdminCapturedMail(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "captured-mail is only available in eval or demo mode", http.StatusNotFound)
 		return
 	}
-	items := s.mail.Snapshot()
+	items := s.capturedMailFor(r)
 	s.renderAdmin(w, "captured", map[string]any{
 		"Admin":      a,
 		"Session":    sess,

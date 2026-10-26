@@ -12,7 +12,7 @@
 //	                                when ?token=… is supplied (FR-B.36)
 //	GET  /reveal/{token}          — reveal page HTML (loads UMD bundle)
 //	GET  /static/*                — JS bundle + assets (config.WebDir)
-//	GET  /__captured_mail         — eval-only mail queue
+//	GET  /__captured_mail         — eval mail queue; demo: caller's own mail
 package httpserver
 
 import (
@@ -367,9 +367,13 @@ func (s *Server) Router() http.Handler {
 		r.Handle("/static/*", http.StripPrefix("/static/", fs))
 	}
 
-	// /__captured_mail is the in-memory mail viewer used by both eval
-	// mode and the public demo (FR-H.79 — capture-only SMTP).
-	if s.cfg.IsEval() || s.cfg.IsDemo() {
+	// /__captured_mail is the in-memory mail viewer (FR-H.17 / FR-H.79 —
+	// capture-only SMTP). Eval mode shows the whole queue; a public demo
+	// only the caller's own mail (see demo.go). Never in production.
+	switch {
+	case s.cfg.IsDemo():
+		r.Method(http.MethodGet, "/__captured_mail", s.mail.ScopedHandler(s.demoCaptureOwner))
+	case s.cfg.IsEval():
 		r.Method(http.MethodGet, "/__captured_mail", s.mail.Handler())
 	}
 
@@ -496,6 +500,7 @@ type requestPayload struct {
 
 func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
+	captureOwner := s.demoCaptureHandle(w, r)
 
 	// FR-B.7 invariant — every code path below returns the SAME 202 body.
 	// Failure information stays in the audit log, never in the response.
@@ -684,14 +689,14 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		msg = built
 	}
 
-	// Capture-with-callback lets us surface the eval-mode capture id without
-	// the handler caring which Sender it is talking to.
+	// The capture queue is in-memory: write to it directly so the mail is
+	// tagged with its demo owner and eval mode gets the capture id back.
+	// (Setting CaptureIDCallback on the shared sender raced between
+	// concurrent requests.)
 	captureID := ""
-	if cs, ok := s.sender.(*mailer.CaptureSender); ok {
-		cs.CaptureIDCallback = func(id string) { captureID = id }
-	}
-
-	if err := s.sender.Send(r.Context(), msg); err != nil {
+	if cs, ok := s.sender.(*mailer.CaptureSender); ok && cs.Store != nil {
+		captureID = cs.Store.CaptureFor(captureOwner, msg.To, msg.Subject, msg.String())
+	} else if err := s.sender.Send(r.Context(), msg); err != nil {
 		s.logger.Error("mail send failed", "transport", s.sender.Name(), "err", err)
 		s.auditAppend(r.Context(), "mail.send_failed", email, tokenRef(tok.Token), map[string]any{
 			"transport": s.sender.Name(),
