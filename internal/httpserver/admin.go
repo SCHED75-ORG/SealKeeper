@@ -1680,7 +1680,7 @@ func samplePreviewVars(instance string) mailtemplates.Vars {
 
 func templateVarsDocumentation() []map[string]string {
 	return []map[string]string{
-		{"name": ".RevealURL", "doc": "Absolute URL the user clicks to land on /reveal/{token}."},
+		{"name": ".RevealURL", "doc": "Absolute URL the user clicks to land on /reveal/{token}. Use it only as a bare {{ .RevealURL }}: the whole href of an <a> in HTML, on its own in the text body, never in the subject. Remote images, stylesheets and CSS url() are refused."},
 		{"name": ".UserEmail", "doc": "Recipient email address (lowercased)."},
 		{"name": ".ExpiresAt", "doc": "Token expiry timestamp (time.Time)."},
 		{"name": ".ValidityMinutes", "doc": "Convenience integer matching the TTL."},

@@ -2,6 +2,7 @@ package mailtemplates_test
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"strings"
 	"testing"
@@ -14,6 +15,12 @@ import (
 
 func newRepo(t *testing.T) *mailtemplates.Repo {
 	t.Helper()
+	r, _ := newRepoDB(t)
+	return r
+}
+
+func newRepoDB(t *testing.T) (*mailtemplates.Repo, *sql.DB) {
+	t.Helper()
 	dsn := storagetest.DSN(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -25,7 +32,7 @@ func newRepo(t *testing.T) *mailtemplates.Repo {
 		t.Fatalf("MigrateUp: %v", err)
 	}
 	t.Cleanup(func() { _ = s.Close() })
-	return mailtemplates.NewRepo(s.DB())
+	return mailtemplates.NewRepo(s.DB()), s.DB()
 }
 
 // ----- defaults -------------------------------------------------------------
