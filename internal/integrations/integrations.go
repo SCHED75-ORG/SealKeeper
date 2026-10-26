@@ -15,14 +15,18 @@
 package integrations
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/sched75/sealkeeper/internal/cryptobox"
 	"github.com/sched75/sealkeeper/internal/storage"
 )
 
@@ -43,6 +47,9 @@ var (
 	ErrAlreadyExists = errors.New("integrations: name already exists")
 	ErrInvalidKind   = errors.New("integrations: invalid kind")
 	ErrInvalidConfig = errors.New("integrations: invalid config json")
+	// ErrNoCryptobox is returned by Create when the Repo was built without
+	// a cryptobox: credentials must never be persisted in clear.
+	ErrNoCryptobox = errors.New("integrations: cryptobox required to store credentials")
 )
 
 // Integration is the row view consumed by handlers and dispatcher.
@@ -51,16 +58,46 @@ type Integration struct {
 	Name             string
 	Kind             Kind
 	Enabled          bool
-	ConfigJSON       json.RawMessage // opaque; sink factory parses
+	ConfigJSON       json.RawMessage // decrypted in memory; never render it back
 	FiltersJSON      json.RawMessage // {"event_types": ["prefix1.","prefix2."]}
 	CreatedByAdminID *int64
 	CreatedAt        time.Time
 	UpdatedAt        time.Time
+
+	// ConfigErr is set when the sealed config could not be opened (master
+	// secret rotated, tampered row). BuildSink refuses such a row.
+	ConfigErr error
 }
 
 // Filters is the parsed form of FiltersJSON.
 type Filters struct {
 	EventTypes []string `json:"event_types"`
+}
+
+// ParseFilters strictly decodes a filters_json blob: unknown keys, wrong
+// types, trailing data and blank entries are rejected (ErrInvalidConfig).
+// An empty blob, `{}` or an empty event_types list means "forward
+// everything" — but only when written that way on purpose; a malformed
+// filter must never silently widen into forward-everything.
+func ParseFilters(raw json.RawMessage) (Filters, error) {
+	var f Filters
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return f, nil
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&f); err != nil {
+		return Filters{}, fmt.Errorf("%w: filters_json: %s", ErrInvalidConfig, err.Error())
+	}
+	if dec.More() {
+		return Filters{}, fmt.Errorf("%w: filters_json: trailing data", ErrInvalidConfig)
+	}
+	for _, p := range f.EventTypes {
+		if strings.TrimSpace(p) == "" {
+			return Filters{}, fmt.Errorf("%w: filters_json: blank event_types entry", ErrInvalidConfig)
+		}
+	}
+	return f, nil
 }
 
 // Matches reports whether `eventType` should be forwarded to a sink with
@@ -85,14 +122,20 @@ func (f Filters) Matches(eventType string) bool {
 	return false
 }
 
-// Repo persists integrations.
+// Repo persists integrations. The kind-specific config (URLs, bearer
+// tokens, HEC token, Sentinel shared key, basic-auth password, API keys)
+// is stored AES-256-GCM-sealed in config_enc under a per-row AAD; the
+// legacy clear config_json column is kept at '{}'.
 type Repo struct {
 	db  *sql.DB
+	box *cryptobox.Box
 	now func() time.Time
 }
 
-// NewRepo binds a Repo to a *sql.DB.
-func NewRepo(db *sql.DB) *Repo { return &Repo{db: db, now: time.Now} }
+// NewRepo binds a Repo to a *sql.DB and the instance cryptobox.
+func NewRepo(db *sql.DB, box *cryptobox.Box) *Repo {
+	return &Repo{db: db, box: box, now: time.Now}
+}
 
 // WithClock for tests.
 func (r *Repo) WithClock(now func() time.Time) *Repo {
@@ -110,8 +153,11 @@ type CreateInputs struct {
 	FiltersJSON string
 }
 
-// Create inserts a new integration. Validates that the kind is known and
-// that the JSON blobs parse.
+// Create inserts a new integration. Validates that the kind is known, that
+// the config parses and points somewhere sane for its kind, and that the
+// filters decode strictly. The config is sealed with the row's AAD, which
+// needs the id: the row is inserted disabled with an empty config, then
+// sealed and enabled in a second statement (deleted again on failure).
 func (r *Repo) Create(ctx context.Context, in CreateInputs, adminID *int64) (Integration, error) {
 	if err := validateKind(in.Kind); err != nil {
 		return Integration{}, err
@@ -119,17 +165,25 @@ func (r *Repo) Create(ctx context.Context, in CreateInputs, adminID *int64) (Int
 	if err := validateJSONObject(in.ConfigJSON, "config_json"); err != nil {
 		return Integration{}, err
 	}
+	if err := validateKindConfig(in.Kind, json.RawMessage(canonJSON(in.ConfigJSON))); err != nil {
+		return Integration{}, err
+	}
 	if err := validateJSONObject(in.FiltersJSON, "filters_json"); err != nil {
 		return Integration{}, err
+	}
+	if _, err := ParseFilters(json.RawMessage(in.FiltersJSON)); err != nil {
+		return Integration{}, err
+	}
+	if r.box == nil {
+		return Integration{}, ErrNoCryptobox
 	}
 	now := r.now().UTC()
 	const q = `INSERT INTO integrations
 		(name, kind, enabled, config_json, filters_json, created_by_admin_id, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+		VALUES (?, ?, ?, '{}', ?, ?, ?, ?)`
 	id, err := storage.InsertReturningID(ctx, r.db, q,
-		strings.TrimSpace(in.Name), string(in.Kind), in.Enabled,
-		canonJSON(in.ConfigJSON), canonJSON(in.FiltersJSON),
-		nullableInt(adminID), now, now,
+		strings.TrimSpace(in.Name), string(in.Kind), false,
+		canonJSON(in.FiltersJSON), nullableInt(adminID), now, now,
 	)
 	if err != nil {
 		if storage.IsUniqueViolation(err) {
@@ -137,7 +191,51 @@ func (r *Repo) Create(ctx context.Context, in CreateInputs, adminID *int64) (Int
 		}
 		return Integration{}, fmt.Errorf("integrations.Create: %w", err)
 	}
+	if err := r.sealConfig(ctx, id, canonJSON(in.ConfigJSON), in.Enabled); err != nil {
+		_, _ = r.db.ExecContext(ctx, rebind(r.db, "DELETE FROM integrations WHERE id = ?"), id)
+		return Integration{}, fmt.Errorf("integrations.Create: %w", err)
+	}
 	return r.Get(ctx, id)
+}
+
+// sealConfig encrypts `config` under the row AAD and stores it, clearing
+// the legacy clear column and setting the enabled flag.
+func (r *Repo) sealConfig(ctx context.Context, id int64, config string, enabled bool) error {
+	enc, err := r.box.Seal([]byte(config), integrationAAD(id))
+	if err != nil {
+		return fmt.Errorf("seal config: %w", err)
+	}
+	_, err = r.db.ExecContext(ctx, rebind(r.db,
+		`UPDATE integrations SET config_enc = ?, config_json = '{}', enabled = ? WHERE id = ?`),
+		enc, enabled, id)
+	return err
+}
+
+// SealLegacyConfigs encrypts every row still carrying its config in the
+// clear config_json column (rows created before migration 0015). Run once
+// at boot; idempotent. Returns the number of rows sealed.
+func (r *Repo) SealLegacyConfigs(ctx context.Context) (int, error) {
+	if r.box == nil {
+		return 0, ErrNoCryptobox
+	}
+	todo, err := r.listLegacy(ctx)
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, l := range todo {
+		enc, err := r.box.Seal([]byte(canonJSON(l.cfg)), integrationAAD(l.id))
+		if err != nil {
+			return n, fmt.Errorf("integrations.SealLegacyConfigs: %w", err)
+		}
+		if _, err := r.db.ExecContext(ctx, rebind(r.db,
+			`UPDATE integrations SET config_enc = ?, config_json = '{}'
+				WHERE id = ? AND config_enc IS NULL`), enc, l.id); err != nil {
+			return n, fmt.Errorf("integrations.SealLegacyConfigs: %w", err)
+		}
+		n++
+	}
+	return n, nil
 }
 
 // SetEnabled toggles the enabled flag.
@@ -155,9 +253,34 @@ func (r *Repo) Delete(ctx context.Context, id int64) error {
 	return err
 }
 
+type legacyConfig struct {
+	id  int64
+	cfg string
+}
+
+// listLegacy reads the clear rows first (and closes the cursor) so the
+// UPDATEs below don't contend with an open result set on SQLite.
+func (r *Repo) listLegacy(ctx context.Context) ([]legacyConfig, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT id, config_json FROM integrations WHERE config_enc IS NULL`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []legacyConfig
+	for rows.Next() {
+		var l legacyConfig
+		if err := rows.Scan(&l.id, &l.cfg); err != nil {
+			return nil, err
+		}
+		out = append(out, l)
+	}
+	return out, rows.Err()
+}
+
 // Get returns one row by id.
 func (r *Repo) Get(ctx context.Context, id int64) (Integration, error) {
-	return scan(r.db.QueryRowContext(ctx, rebind(r.db, selectQ+" WHERE id = ?"), id))
+	return r.scan(r.db.QueryRowContext(ctx, rebind(r.db, selectQ+" WHERE id = ?"), id))
 }
 
 // List returns every row in name order.
@@ -169,7 +292,7 @@ func (r *Repo) List(ctx context.Context) ([]Integration, error) {
 	defer func() { _ = rows.Close() }()
 	var out []Integration
 	for rows.Next() {
-		row, err := scan(rows)
+		row, err := r.scan(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -187,7 +310,7 @@ func (r *Repo) ListEnabled(ctx context.Context) ([]Integration, error) {
 	defer func() { _ = rows.Close() }()
 	var out []Integration
 	for rows.Next() {
-		row, err := scan(rows)
+		row, err := r.scan(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -198,22 +321,23 @@ func (r *Repo) ListEnabled(ctx context.Context) ([]Integration, error) {
 
 // ----- internals ------------------------------------------------------------
 
-const selectQ = `SELECT id, name, kind, enabled, config_json, filters_json,
+const selectQ = `SELECT id, name, kind, enabled, config_json, config_enc, filters_json,
 	created_by_admin_id, created_at, updated_at FROM integrations`
 
 type rowScanner interface{ Scan(dest ...any) error }
 
-func scan(rs rowScanner) (Integration, error) {
+func (r *Repo) scan(rs rowScanner) (Integration, error) {
 	var (
 		i          Integration
 		kindStr    string
 		configStr  string
+		configEnc  []byte
 		filtersStr string
 		createdBy  sql.NullInt64
 		createdAt  any
 		updatedAt  any
 	)
-	err := rs.Scan(&i.ID, &i.Name, &kindStr, &i.Enabled, &configStr, &filtersStr,
+	err := rs.Scan(&i.ID, &i.Name, &kindStr, &i.Enabled, &configStr, &configEnc, &filtersStr,
 		&createdBy, &createdAt, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Integration{}, ErrNotFound
@@ -222,7 +346,20 @@ func scan(rs rowScanner) (Integration, error) {
 		return Integration{}, err
 	}
 	i.Kind = Kind(kindStr)
-	i.ConfigJSON = json.RawMessage(configStr)
+	switch {
+	case len(configEnc) == 0:
+		// Legacy clear row not yet sealed by SealLegacyConfigs.
+		i.ConfigJSON = json.RawMessage(configStr)
+	case r.box == nil:
+		i.ConfigErr = ErrNoCryptobox
+	default:
+		pt, err := r.box.Open(configEnc, integrationAAD(i.ID))
+		if err != nil {
+			i.ConfigErr = fmt.Errorf("decrypt config: %w", err)
+		} else {
+			i.ConfigJSON = json.RawMessage(pt)
+		}
+	}
 	i.FiltersJSON = json.RawMessage(filtersStr)
 	if createdBy.Valid {
 		v := createdBy.Int64
@@ -258,6 +395,13 @@ func validateJSONObject(raw, label string) error {
 		return fmt.Errorf("%w: %s must be a JSON object", ErrInvalidConfig, label)
 	}
 	return nil
+}
+
+// integrationAAD binds a sealed config to its row, so a blob copied to
+// another integration (or to another encrypted column) refuses to open.
+func integrationAAD(id int64) []byte {
+	h := sha256.Sum256([]byte("sealkeeper-integration:" + strconv.FormatInt(id, 10)))
+	return h[:]
 }
 
 func canonJSON(s string) string {

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
+	"strings"
 	"time"
 )
 
@@ -45,48 +47,91 @@ type Sink interface {
 	Send(ctx context.Context, ev Event) error
 }
 
-// BuildSink returns a Sink for the given Integration row. Returns
+// BuildSink returns a Sink for the given Integration row. Every network
+// connection the sink opens is checked against `pol` (SSRF guard). Returns
 // ErrInvalidKind for unknown kinds and ErrInvalidConfig when the row's
-// config_json cannot be parsed.
-func BuildSink(row Integration) (Sink, error) {
+// config cannot be parsed, fails validation, or could not be decrypted.
+func BuildSink(row Integration, pol NetPolicy) (Sink, error) {
+	if row.ConfigErr != nil {
+		return nil, fmt.Errorf("%w: %s", ErrInvalidConfig, row.ConfigErr.Error())
+	}
+	if err := validateKindConfig(row.Kind, row.ConfigJSON); err != nil {
+		return nil, err
+	}
 	switch row.Kind {
 	case KindWebhook:
 		var cfg WebhookConfig
-		if err := unmarshalConfig(row.ConfigJSON, &cfg); err != nil {
-			return nil, err
-		}
-		return newWebhookSink(row.Name, cfg), nil
-
+		_ = unmarshalConfig(row.ConfigJSON, &cfg) // validated above
+		return newWebhookSink(row.Name, cfg, pol), nil
 	case KindSplunk:
 		var cfg SplunkConfig
-		if err := unmarshalConfig(row.ConfigJSON, &cfg); err != nil {
-			return nil, err
-		}
-		return newSplunkSink(row.Name, cfg), nil
-
+		_ = unmarshalConfig(row.ConfigJSON, &cfg)
+		return newSplunkSink(row.Name, cfg, pol), nil
 	case KindSentinel:
 		var cfg SentinelConfig
-		if err := unmarshalConfig(row.ConfigJSON, &cfg); err != nil {
-			return nil, err
-		}
-		return newSentinelSink(row.Name, cfg), nil
-
+		_ = unmarshalConfig(row.ConfigJSON, &cfg)
+		return newSentinelSink(row.Name, cfg, pol), nil
 	case KindElastic:
 		var cfg ElasticConfig
-		if err := unmarshalConfig(row.ConfigJSON, &cfg); err != nil {
-			return nil, err
-		}
-		return newElasticSink(row.Name, cfg), nil
-
+		_ = unmarshalConfig(row.ConfigJSON, &cfg)
+		return newElasticSink(row.Name, cfg, pol), nil
 	case KindSyslog:
 		var cfg SyslogConfig
-		if err := unmarshalConfig(row.ConfigJSON, &cfg); err != nil {
-			return nil, err
-		}
-		return newSyslogSink(row.Name, cfg), nil
-
+		_ = unmarshalConfig(row.ConfigJSON, &cfg)
+		return newSyslogSink(row.Name, cfg, pol), nil
 	default:
 		return nil, fmt.Errorf("%w: %q", ErrInvalidKind, row.Kind)
+	}
+}
+
+// validateKindConfig parses `raw` into the kind's config struct and checks
+// the fields that steer where the sink connects: http(s) URL with a host,
+// Sentinel workspace GUID, syslog host:port + network. Run at Create and
+// again at BuildSink so rows stored before the check cannot bypass it.
+func validateKindConfig(kind Kind, raw json.RawMessage) error {
+	switch kind {
+	case KindWebhook:
+		var cfg WebhookConfig
+		if err := unmarshalConfig(raw, &cfg); err != nil {
+			return err
+		}
+		return validateHTTPURL(cfg.URL, "webhook")
+	case KindSplunk:
+		var cfg SplunkConfig
+		if err := unmarshalConfig(raw, &cfg); err != nil {
+			return err
+		}
+		return validateHTTPURL(cfg.URL, "splunk")
+	case KindSentinel:
+		var cfg SentinelConfig
+		if err := unmarshalConfig(raw, &cfg); err != nil {
+			return err
+		}
+		if !sentinelWorkspaceRe.MatchString(cfg.WorkspaceID) {
+			return fmt.Errorf("%w: sentinel: workspace_id must be a GUID", ErrInvalidConfig)
+		}
+		return nil
+	case KindElastic:
+		var cfg ElasticConfig
+		if err := unmarshalConfig(raw, &cfg); err != nil {
+			return err
+		}
+		return validateHTTPURL(cfg.URL, "elastic")
+	case KindSyslog:
+		var cfg SyslogConfig
+		if err := unmarshalConfig(raw, &cfg); err != nil {
+			return err
+		}
+		host, port, err := net.SplitHostPort(strings.TrimSpace(cfg.Address))
+		if err != nil || host == "" || port == "" {
+			return fmt.Errorf("%w: syslog: address must be host:port", ErrInvalidConfig)
+		}
+		if cfg.Network != "" && cfg.Network != "udp" && cfg.Network != "tcp" {
+			return fmt.Errorf("%w: syslog: network must be udp or tcp", ErrInvalidConfig)
+		}
+		return nil
+	default:
+		return fmt.Errorf("%w: %q", ErrInvalidKind, kind)
 	}
 }
 

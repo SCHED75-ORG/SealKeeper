@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -33,8 +35,8 @@ type webhookSink struct {
 	c    *http.Client
 }
 
-func newWebhookSink(name string, cfg WebhookConfig) *webhookSink {
-	return &webhookSink{name: name, cfg: cfg, c: httpClient(cfg.TimeoutSec)}
+func newWebhookSink(name string, cfg WebhookConfig, pol NetPolicy) *webhookSink {
+	return &webhookSink{name: name, cfg: cfg, c: pol.httpClient(cfg.TimeoutSec)}
 }
 
 func (s *webhookSink) Name() string { return s.name }
@@ -84,8 +86,8 @@ type splunkSink struct {
 	c    *http.Client
 }
 
-func newSplunkSink(name string, cfg SplunkConfig) *splunkSink {
-	return &splunkSink{name: name, cfg: cfg, c: httpClient(cfg.TimeoutSec)}
+func newSplunkSink(name string, cfg SplunkConfig, pol NetPolicy) *splunkSink {
+	return &splunkSink{name: name, cfg: cfg, c: pol.httpClient(cfg.TimeoutSec)}
 }
 
 func (s *splunkSink) Name() string { return s.name }
@@ -140,8 +142,8 @@ type sentinelSink struct {
 	now  func() time.Time // testable
 }
 
-func newSentinelSink(name string, cfg SentinelConfig) *sentinelSink {
-	return &sentinelSink{name: name, cfg: cfg, c: httpClient(cfg.TimeoutSec), now: time.Now}
+func newSentinelSink(name string, cfg SentinelConfig, pol NetPolicy) *sentinelSink {
+	return &sentinelSink{name: name, cfg: cfg, c: pol.httpClient(cfg.TimeoutSec), now: time.Now}
 }
 
 func (s *sentinelSink) Name() string { return s.name }
@@ -165,8 +167,11 @@ func (s *sentinelSink) Send(ctx context.Context, ev Event) error {
 	_, _ = mac.Write([]byte(stringToSign))
 	signature := base64.StdEncoding.EncodeToString(mac.Sum(nil))
 
-	url := fmt.Sprintf("https://%s.ods.opinsights.azure.com/api/logs?api-version=2016-04-01", s.cfg.WorkspaceID)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if !sentinelWorkspaceRe.MatchString(s.cfg.WorkspaceID) {
+		return fmt.Errorf("%w: sentinel: workspace_id must be a GUID", ErrInvalidConfig)
+	}
+	endpoint := fmt.Sprintf("https://%s.ods.opinsights.azure.com/api/logs?api-version=2016-04-01", s.cfg.WorkspaceID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -197,8 +202,8 @@ type elasticSink struct {
 	c    *http.Client
 }
 
-func newElasticSink(name string, cfg ElasticConfig) *elasticSink {
-	return &elasticSink{name: name, cfg: cfg, c: httpClient(cfg.TimeoutSec)}
+func newElasticSink(name string, cfg ElasticConfig, pol NetPolicy) *elasticSink {
+	return &elasticSink{name: name, cfg: cfg, c: pol.httpClient(cfg.TimeoutSec)}
 }
 
 func (s *elasticSink) Name() string { return s.name }
@@ -224,8 +229,8 @@ func (s *elasticSink) Send(ctx context.Context, ev Event) error {
 	body = append(body, doc...)
 	body = append(body, '\n')
 
-	url := strings.TrimRight(s.cfg.URL, "/") + "/_bulk"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	endpoint := strings.TrimRight(s.cfg.URL, "/") + "/_bulk"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -261,26 +266,59 @@ func elasticDoc(ev Event) map[string]any {
 
 // ----- shared helpers -------------------------------------------------------
 
-func httpClient(timeoutSec int) *http.Client {
-	if timeoutSec <= 0 {
-		timeoutSec = 10
-	}
-	return &http.Client{Timeout: time.Duration(timeoutSec) * time.Second}
-}
-
+// doRequest performs the call and maps any non-2xx answer to an error that
+// carries the status code only. The response body is never surfaced: the
+// error text reaches the admin UI and the audit log (and from there every
+// other sink), so echoing it would turn a sink into an SSRF read primitive.
+// Redirects are not followed (see NetPolicy.httpClient) and count as errors.
 func doRequest(c *http.Client, req *http.Request, label string) error {
 	resp, err := c.Do(req)
 	if err != nil {
 		return fmt.Errorf("%s: do: %w", label, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode >= 400 {
-		// Read up to 512 bytes of the body so a misconfiguration surfaces
-		// in the audit log even when the remote is verbose.
-		bodyHead, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return fmt.Errorf("%s: HTTP %d: %s", label, resp.StatusCode, strings.TrimSpace(string(bodyHead)))
+	// Drain (bounded) so keepalive works, without retaining anything.
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return fmt.Errorf("%s: HTTP %d", label, resp.StatusCode)
 	}
-	_, _ = io.Copy(io.Discard, resp.Body) // drain so keepalive works
+	return nil
+}
+
+// closeIdle releases pooled connections of a sink's HTTP client when the
+// dispatcher retires it (config change, deletion).
+func closeIdle(c *http.Client) {
+	if c != nil {
+		c.CloseIdleConnections()
+	}
+}
+
+func (s *webhookSink) closeIdle()  { closeIdle(s.c) }
+func (s *splunkSink) closeIdle()   { closeIdle(s.c) }
+func (s *sentinelSink) closeIdle() { closeIdle(s.c) }
+func (s *elasticSink) closeIdle()  { closeIdle(s.c) }
+
+// sentinelWorkspaceRe matches a Log Analytics workspace ID (a GUID). The ID
+// is spliced into the ingestion hostname, so anything else ("evil.host/x?")
+// would redirect the signed request to an arbitrary host.
+var sentinelWorkspaceRe = regexp.MustCompile(
+	`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+// validateHTTPURL accepts absolute http(s) URLs with a host and no userinfo.
+func validateHTTPURL(raw, label string) error {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return fmt.Errorf("%w: %s: url: %s", ErrInvalidConfig, label, err.Error())
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("%w: %s: url scheme must be http or https", ErrInvalidConfig, label)
+	}
+	if u.Hostname() == "" {
+		return fmt.Errorf("%w: %s: url has no host", ErrInvalidConfig, label)
+	}
+	if u.User != nil {
+		return fmt.Errorf("%w: %s: credentials in url are not allowed (use the token fields)", ErrInvalidConfig, label)
+	}
 	return nil
 }
 

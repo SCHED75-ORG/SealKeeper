@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net"
 	"os"
 	"strings"
 	"time"
@@ -23,10 +22,11 @@ type SyslogConfig struct {
 type syslogSink struct {
 	name string
 	cfg  SyslogConfig
+	pol  NetPolicy
 }
 
-func newSyslogSink(name string, cfg SyslogConfig) *syslogSink {
-	return &syslogSink{name: name, cfg: cfg}
+func newSyslogSink(name string, cfg SyslogConfig, pol NetPolicy) *syslogSink {
+	return &syslogSink{name: name, cfg: cfg, pol: pol}
 }
 
 func (s *syslogSink) Name() string { return s.name }
@@ -78,8 +78,9 @@ func (s *syslogSink) Send(ctx context.Context, ev Event) error {
 		timeout = 5 * time.Second
 	}
 
-	d := &net.Dialer{Timeout: timeout}
-	conn, err := d.DialContext(ctx, network, s.cfg.Address)
+	// Guarded dialer: the resolved IP is checked against the outbound
+	// policy at connect time (SSRF guard, DNS-rebinding safe).
+	conn, err := s.pol.dialer(timeout).DialContext(ctx, network, s.cfg.Address)
 	if err != nil {
 		return fmt.Errorf("syslog: dial %s/%s: %w", network, s.cfg.Address, err)
 	}

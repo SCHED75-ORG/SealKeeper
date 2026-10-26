@@ -188,8 +188,16 @@ func runServe(args []string) int {
 	srv.SetLibraries(librariesRepo)
 	srv.SetMailTemplates(mailtemplates.NewRepo(store.DB()))
 
-	integrationsRepo := integrations.NewRepo(store.DB())
-	dispatcher := integrations.NewDispatcher(integrationsRepo, logger, 256, 10*time.Second)
+	integrationsRepo := integrations.NewRepo(store.DB(), box)
+	// Seal integration credentials still stored in clear (pre-0015 rows).
+	if n, err := integrationsRepo.SealLegacyConfigs(ctx); err != nil {
+		logger.Error("sealing legacy integration configs failed", "err", err)
+		return 1
+	} else if n > 0 {
+		logger.Info("sealed legacy integration configs", "rows", n)
+	}
+	dispatcher := integrations.NewDispatcher(integrationsRepo, logger, 256, 10*time.Second).
+		WithNetPolicy(integrations.NetPolicy{AllowPrivate: cfg.IntegrationsAllowPrivate})
 	dispatcher.Start(ctx)
 	defer dispatcher.Stop()
 	srv.SetIntegrations(integrationsRepo, dispatcher)

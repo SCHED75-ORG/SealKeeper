@@ -1832,7 +1832,8 @@ func (s *Server) handleAdminIntegrationTest(w http.ResponseWriter, r *http.Reque
 		http.Redirect(w, r, "/admin/integrations?err=not_found", http.StatusSeeOther)
 		return
 	}
-	if err := integrations.TestSink(r.Context(), row, s.cfg.InstanceDomain); err != nil {
+	pol := integrations.NetPolicy{AllowPrivate: s.cfg.IntegrationsAllowPrivate}
+	if err := integrations.TestSink(r.Context(), row, s.cfg.InstanceDomain, pol); err != nil {
 		s.auditAppend(r.Context(), "integration.test_failed", a.Email, row.Name, map[string]any{
 			"error": err.Error(),
 		})
@@ -4049,6 +4050,11 @@ func (s *Server) handleAdminSMTPSave(w http.ResponseWriter, r *http.Request) {
 		TimeoutSeconds: timeout,
 	}
 	if err := s.smtpConfig.Update(r.Context(), in, &a.ID); err != nil {
+		if errors.Is(err, smtpconfig.ErrPasswordRequired) {
+			// SK-23: the stored relay password never follows a new destination.
+			http.Redirect(w, r, "/admin/smtp?err=password_required", http.StatusSeeOther)
+			return
+		}
 		s.logger.Error("smtpconfig.Update failed", "err", err)
 		http.Redirect(w, r,
 			"/admin/smtp?err=internal&details="+url.QueryEscape(err.Error()),
@@ -4157,6 +4163,7 @@ const adminSMTPTpl = `{{define "smtp.html"}}{{template "header" .}}
   <label style="font-weight:400;display:inline-flex;align-items:center;gap:0.5rem;margin-top:0.5rem">
     <input type="checkbox" name="keep_password" checked> Keep current password
   </label>
+  <p style="font-size:0.8125rem;color:#7A7670;margin:0.25rem 0 0">Changing host, port, username, TLS mode or server name requires re-entering the password.</p>
   {{ end }}
 
   <label for="from_addr">From address</label>

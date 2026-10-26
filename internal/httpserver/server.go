@@ -260,6 +260,10 @@ func (s *Server) SetMailTemplates(repo *mailtemplates.Repo) { s.mailTpls = repo 
 func (s *Server) SetIntegrations(repo *integrations.Repo, disp *integrations.Dispatcher) {
 	s.integrations = repo
 	s.dispatcher = disp
+	if disp != nil && s.registry != nil {
+		// Delivered / failed / dropped-per-lane counters (SK-19).
+		_ = s.registry.Register(disp)
+	}
 }
 
 // SetBranding binds the instance-identity repo. When nil the public

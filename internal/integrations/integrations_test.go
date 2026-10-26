@@ -2,6 +2,7 @@ package integrations_test
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"io"
@@ -14,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sched75/sealkeeper/internal/cryptobox"
 	"github.com/sched75/sealkeeper/internal/integrations"
 	"github.com/sched75/sealkeeper/internal/storage"
 	"github.com/sched75/sealkeeper/internal/storage/storagetest"
@@ -52,6 +54,12 @@ func TestFiltersPrefixAndExact(t *testing.T) {
 
 func newRepo(t *testing.T) *integrations.Repo {
 	t.Helper()
+	r, _ := newRepoDB(t)
+	return r
+}
+
+func newRepoDB(t *testing.T) (*integrations.Repo, *sql.DB) {
+	t.Helper()
 	dsn := storagetest.DSN(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -63,7 +71,11 @@ func newRepo(t *testing.T) *integrations.Repo {
 		t.Fatalf("MigrateUp: %v", err)
 	}
 	t.Cleanup(func() { _ = s.Close() })
-	return integrations.NewRepo(s.DB())
+	box, err := cryptobox.New("integrations-test-master-secret")
+	if err != nil {
+		t.Fatalf("cryptobox.New: %v", err)
+	}
+	return integrations.NewRepo(s.DB(), box), s.DB()
 }
 
 func TestCreateRejectsBadKind(t *testing.T) {
@@ -162,7 +174,7 @@ func TestWebhookSinkSendsJSON(t *testing.T) {
 			"timeout_sec": 3
 		}`),
 	}
-	sink, err := integrations.BuildSink(row)
+	sink, err := integrations.BuildSink(row, integrations.TestPolicy)
 	if err != nil {
 		t.Fatalf("BuildSink: %v", err)
 	}
@@ -196,10 +208,13 @@ func TestWebhookSinkSurfacesHTTPErrors(t *testing.T) {
 		Name:       "bad",
 		Kind:       integrations.KindWebhook,
 		ConfigJSON: json.RawMessage(`{"url":"` + srv.URL + `"}`),
-	})
+	}, integrations.TestPolicy)
 	err := sink.Send(context.Background(), integrations.NewEvent(0, "x", "", "", nil, "", "", time.Now()))
 	if err == nil || !strings.Contains(err.Error(), "HTTP 400") {
 		t.Fatalf("err = %v, want HTTP 400", err)
+	}
+	if strings.Contains(err.Error(), "nope") {
+		t.Fatalf("err = %v leaks the remote response body", err)
 	}
 }
 
@@ -225,7 +240,7 @@ func TestSplunkSinkBuildsHECEnvelope(t *testing.T) {
 			"sourcetype": "sk:audit"
 		}`),
 	}
-	sink, err := integrations.BuildSink(row)
+	sink, err := integrations.BuildSink(row, integrations.TestPolicy)
 	if err != nil {
 		t.Fatalf("BuildSink: %v", err)
 	}
@@ -260,7 +275,7 @@ func TestSyslogSinkWritesRFC5424UDP(t *testing.T) {
 			"app_name": "sealkeeper-test"
 		}`),
 	}
-	sink, err := integrations.BuildSink(row)
+	sink, err := integrations.BuildSink(row, integrations.TestPolicy)
 	if err != nil {
 		t.Fatalf("BuildSink: %v", err)
 	}
@@ -317,7 +332,7 @@ func TestDispatcherFansOutToEnabledOnly(t *testing.T) {
 	mkRow("on-2", true)
 	mkRow("off", false)
 
-	d := integrations.NewDispatcher(repo, nil, 8, 2*time.Second)
+	d := integrations.NewDispatcher(repo, nil, 8, 2*time.Second).WithNetPolicy(integrations.TestPolicy)
 	d.Start(ctx)
 	t.Cleanup(d.Stop)
 
@@ -343,13 +358,14 @@ func TestDispatcherDropsOnFullBuffer(t *testing.T) {
 	t.Parallel()
 	repo := newRepo(t)
 	d := integrations.NewDispatcher(repo, nil, 1, time.Second)
-	// Don't Start — channel stays full so subsequent Pushes drop.
-	d.Push(integrations.NewEvent(1, "x", "", "", nil, "", "", time.Now())) // fills buffer
+	// Don't Start — the bulk lane stays full so subsequent Pushes drop.
+	d.Push(integrations.NewEvent(1, "request.rate_limited", "", "", nil, "", "", time.Now())) // fills buffer
 	for i := 0; i < 5; i++ {
-		d.Push(integrations.NewEvent(int64(i+2), "x", "", "", nil, "", "", time.Now()))
+		d.Push(integrations.NewEvent(int64(i+2), "request.rate_limited", "", "", nil, "", "", time.Now()))
 	}
-	if got := d.Stats().Drops; got < 5 {
-		t.Fatalf("Drops = %d, want ≥ 5", got)
+	st := d.Stats()
+	if st.Drops < 5 || st.DropsBulk < 5 || st.DropsSecurity != 0 {
+		t.Fatalf("Stats = %+v, want ≥ 5 bulk drops and no security drop", st)
 	}
 }
 
@@ -366,7 +382,7 @@ func TestTestSinkSyntheticEvent(t *testing.T) {
 		Name: "tester", Kind: integrations.KindWebhook,
 		ConfigJSON: json.RawMessage(`{"url":"` + srv.URL + `"}`),
 	}
-	if err := integrations.TestSink(context.Background(), row, "sealkeeper.test"); err != nil {
+	if err := integrations.TestSink(context.Background(), row, "sealkeeper.test", integrations.TestPolicy); err != nil {
 		t.Fatalf("TestSink: %v", err)
 	}
 	if !strings.Contains(got, `"event_type":"integration.test"`) {
