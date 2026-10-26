@@ -2,7 +2,10 @@ package policies_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"os"
 	"testing"
 	"time"
 
@@ -234,7 +237,6 @@ func TestResolveElevationSurvivesDomainRowsAndSubaddress(t *testing.T) {
 func TestCreateRejectsGeneratorParamsTheBundleRefuses(t *testing.T) {
 	t.Parallel()
 	r := newRig(t)
-	d, _ := r.domains.Create(context.Background(), "example.com", "", true, nil)
 	for i, in := range []policies.CreateInputs{
 		{Generator: policies.GeneratorG2},
 		{Generator: policies.GeneratorG1, ParamsJSON: `{"library":"dict-42"}`},
@@ -242,10 +244,83 @@ func TestCreateRejectsGeneratorParamsTheBundleRefuses(t *testing.T) {
 		{Generator: policies.GeneratorG2, ParamsJSON: `{"library":["a","b"],"numberOfWords":0}`},
 		{Generator: policies.GeneratorG3, ParamsJSON: `{"length":-4}`},
 		{Generator: policies.GeneratorG3, ParamsJSON: `{"length":12.5}`},
+		// Accepted before, refused by web/src/params.js at reveal time.
+		{Generator: policies.GeneratorG3, ParamsJSON: `{"length":20,"alphabetSize":94}`},
+		{Generator: policies.GeneratorG3, ProposalCount: 100},
+		{Generator: policies.GeneratorG3, RegenerateLimit: 101},
+		{Generator: policies.GeneratorG2, ParamsJSON: `{"library":["a","b","c"],"dictionarySize":7776}`},
+		{Generator: policies.GeneratorG1, ParamsJSON: `{"library":["a b"],"corpusSize":2}`},
+		{Generator: policies.GeneratorG2, ParamsJSON: `{"library":["a"],"separatorOptions":[]}`},
+		{Generator: policies.GeneratorG1, ParamsJSON: `{"library":["a b"],"transforms":[{"code":"T99"}]}`},
 	} {
+		// One domain per case, so a wrongly accepted case cannot mask the next.
+		d, err := r.domains.Create(context.Background(), fmt.Sprintf("bad%d.example.com", i), "", true, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
 		in.DomainID, in.ANSSILevel, in.Name = d.ID, elevations.LevelB1, "x"
 		if _, err := r.policies.Create(context.Background(), in, nil); !errors.Is(err, policies.ErrInvalidShape) {
 			t.Errorf("case %d: err = %v, want ErrInvalidShape", i, err)
 		}
+	}
+}
+
+// Saving and revealing apply the same rules, so valid edge values still save.
+func TestCreateAcceptsWhatTheBundleAccepts(t *testing.T) {
+	t.Parallel()
+	r := newRig(t)
+	ctx := context.Background()
+	for i, in := range []policies.CreateInputs{
+		{Generator: policies.GeneratorG3, ParamsJSON: `{"length":20,"alphabetSize":62}`, ProposalCount: 50, RegenerateLimit: 100},
+		{Generator: policies.GeneratorG3, ParamsJSON: `{"alphabetSize":57,"excludeAmbiguous":true}`},
+		{Generator: policies.GeneratorG2, ParamsJSON: `{"library":["a","b","b"],"dictionarySize":2,"numberOfWords":64}`},
+	} {
+		d, err := r.domains.Create(ctx, fmt.Sprintf("ok%d.example.com", i), "", true, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		in.DomainID, in.ANSSILevel, in.Name = d.ID, elevations.LevelB1, "x"
+		if _, err := r.policies.Create(ctx, in, nil); err != nil {
+			t.Errorf("case %d: %v", i, err)
+		}
+	}
+}
+
+// testdata/reveal_parity.json is also run through generate() by
+// web/tests/reveal-parity.test.js: both sides must agree on every case.
+func TestValidateForRevealMatchesBundle(t *testing.T) {
+	t.Parallel()
+	raw, err := os.ReadFile("testdata/reveal_parity.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cases []struct {
+		Name   string
+		OK     bool
+		Policy struct {
+			Generator       policies.Generator
+			ProposalCount   int
+			RegenerateLimit int
+			Parameters      json.RawMessage
+		}
+	}
+	if err := json.Unmarshal(raw, &cases); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range cases {
+		t.Run(c.Name, func(t *testing.T) {
+			err := policies.ValidateForReveal(policies.Policy{
+				Generator:       c.Policy.Generator,
+				ProposalCount:   c.Policy.ProposalCount,
+				RegenerateLimit: c.Policy.RegenerateLimit,
+				Params:          c.Policy.Parameters,
+			})
+			if (err == nil) != c.OK {
+				t.Fatalf("err = %v, bundle accepts = %v", err, c.OK)
+			}
+			if err != nil && !errors.Is(err, policies.ErrInvalidShape) {
+				t.Fatalf("err = %v, want ErrInvalidShape", err)
+			}
+		})
 	}
 }
