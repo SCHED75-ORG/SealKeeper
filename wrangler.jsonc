@@ -1,0 +1,24 @@
+// Cloudflare Worker "sealkeeper": serves the marketing site (design/) as
+// static assets on sealkeeper.eu and www.sealkeeper.eu. No Worker script:
+// design/_headers sets the security headers (CSP, HSTS, ...), and
+// design/.well-known/security.txt is served as is.
+//
+// Deployed by Cloudflare Workers Builds from main only (PRs get preview
+// URLs), so every site change goes through review, CI and signed commits.
+// The custom domains are declared here so a deploy keeps them attached;
+// the workers.dev route stays off.
+{
+  "name": "sealkeeper",
+  "compatibility_date": "2026-10-01",
+  "workers_dev": false,
+  "preview_urls": true,
+  "routes": [
+    { "pattern": "sealkeeper.eu", "custom_domain": true },
+    { "pattern": "www.sealkeeper.eu", "custom_domain": true }
+  ],
+  "assets": {
+    "directory": "./design",
+    "html_handling": "auto-trailing-slash",
+    "not_found_handling": "none"
+  }
+}
