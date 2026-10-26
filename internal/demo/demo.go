@@ -153,31 +153,8 @@ func (r *Resetter) ResetOnce(ctx context.Context) error {
 	snap := r.snapshot
 	r.mu.Unlock()
 
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("demo: begin: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	for _, q := range wipedTables {
-		if _, err := tx.ExecContext(ctx, q); err != nil {
-			return fmt.Errorf("demo: %s: %w", q, err)
-		}
-	}
-	if snap != nil {
-		for i := len(restoredTables) - 1; i >= 0; i-- {
-			if _, err := tx.ExecContext(ctx, "DELETE FROM "+restoredTables[i]); err != nil {
-				return fmt.Errorf("demo: clear %s: %w", restoredTables[i], err)
-			}
-		}
-		for _, table := range restoredTables {
-			if err := insertRows(ctx, r.db, tx, table, snap[table]); err != nil {
-				return fmt.Errorf("demo: restore %s: %w", table, err)
-			}
-		}
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("demo: commit: %w", err)
+	if err := r.resetTx(ctx, snap); err != nil {
+		return err
 	}
 	if r.mail != nil {
 		r.mail.Reset()
@@ -192,6 +169,47 @@ func (r *Resetter) ResetOnce(ctx context.Context) error {
 			"wiped", len(wipedTables),
 			"restored", snap != nil,
 			"elapsed_ms", time.Since(start).Milliseconds())
+	}
+	return nil
+}
+
+// resetTx runs the wipe and, when snap is non-nil, the snapshot restore
+// inside a single transaction, committing only if every step succeeded.
+func (r *Resetter) resetTx(ctx context.Context, snap map[string]tableRows) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("demo: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	for _, q := range wipedTables {
+		if _, err := tx.ExecContext(ctx, q); err != nil {
+			return fmt.Errorf("demo: %s: %w", q, err)
+		}
+	}
+	if snap != nil {
+		if err := r.restoreSnapshot(ctx, tx, snap); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("demo: commit: %w", err)
+	}
+	return nil
+}
+
+// restoreSnapshot clears the restored tables in reverse order, then
+// re-inserts the boot snapshot rows in forward order, all within tx.
+func (r *Resetter) restoreSnapshot(ctx context.Context, tx *sql.Tx, snap map[string]tableRows) error {
+	for i := len(restoredTables) - 1; i >= 0; i-- {
+		if _, err := tx.ExecContext(ctx, "DELETE FROM "+restoredTables[i]); err != nil {
+			return fmt.Errorf("demo: clear %s: %w", restoredTables[i], err)
+		}
+	}
+	for _, table := range restoredTables {
+		if err := insertRows(ctx, r.db, tx, table, snap[table]); err != nil {
+			return fmt.Errorf("demo: restore %s: %w", table, err)
+		}
 	}
 	return nil
 }
