@@ -719,7 +719,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	revealURL := strings.TrimRight(s.cfg.BaseURL, "/") + "/reveal/" + tok.Token
-	lang := mailtemplates.PickLanguage(r.Header.Get("Accept-Language"))
+	lang := s.mailLanguage()
 	brand := s.resolveBranding(r.Context())
 
 	var (
@@ -988,11 +988,17 @@ func (s *Server) handlePolicyConsume(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	s.auditAppend(r.Context(), audit.EventTokenConsumed, tok.Email, tokenRef(tok.Token), map[string]any{
-		"ip_hash": ipHash,
-		"ua_hash": uaHash,
-		"domain":  tok.Domain,
-	})
+	consumed := map[string]any{
+		"ip_hash":       ipHash,
+		"ua_hash":       uaHash,
+		"domain":        tok.Domain,
+		"policy_sha256": descriptorSHA256(resolved),
+		"policy_id":     "builtin_default",
+	}
+	if id, ok := resolved["id"]; ok {
+		consumed["policy_id"] = id
+	}
+	s.auditAppend(r.Context(), audit.EventTokenConsumed, tok.Email, tokenRef(tok.Token), consumed)
 
 	// FR-B.39..41 — optional post-consultation notification. It goes out
 	// on the same bounded background workers as the reveal mails: the
@@ -1001,9 +1007,12 @@ func (s *Server) handlePolicyConsume(w http.ResponseWriter, r *http.Request) {
 	// snapshotted first so the worker never reads a cancelled r.Context().
 	if s.shouldNotifyPostConsult(r.Context(), tok.Email) {
 		s.queuePostConsult(r.Context(), postConsultMail{
-			token:    tok.Token,
-			email:    tok.Email,
-			lang:     mailtemplates.PickLanguage(r.Header.Get("Accept-Language")),
+			token: tok.Token,
+			email: tok.Email,
+			// The instance language, not the requester's Accept-Language:
+			// whoever triggers the mail must not pick the language the owner
+			// receives (social-engineering lever).
+			lang:     s.mailLanguage(),
 			brand:    s.resolveBranding(r.Context()),
 			consumed: time.Now().UTC(),
 			// FR-B.40: the owner needs the IP and browser themselves to
@@ -1022,6 +1031,17 @@ func (s *Server) handlePolicyConsume(w http.ResponseWriter, r *http.Request) {
 		"expires_at": tok.ExpiresAt.Format(time.RFC3339),
 		"issued_at":  tok.IssuedAt.Format(time.RFC3339),
 	})
+}
+
+// mailLanguage is the template language for outbound mail. It is the
+// instance setting, never the HTTP client's Accept-Language: the public
+// form lets anyone request a mail for someone else, and the reveal page
+// may be opened by someone other than the owner.
+func (s *Server) mailLanguage() string {
+	if s.cfg.MailLanguage == "" {
+		return "en"
+	}
+	return s.cfg.MailLanguage
 }
 
 // shouldNotifyPostConsult resolves the policy for the consultation's
@@ -1186,6 +1206,13 @@ func (s *Server) resolvedPolicy(ctx context.Context, email string) (map[string]a
 	if err := policies.ValidateForReveal(row); err != nil {
 		return nil, fmt.Errorf("policy %d: %w", row.ID, err)
 	}
+	return policyDescriptor(row)
+}
+
+// policyDescriptor is the policy as served to the reveal page. Its
+// fingerprint (descriptorSHA256) is what ties a token.consumed audit row
+// to a policy.created / policy.updated row.
+func policyDescriptor(row policies.Policy) (map[string]any, error) {
 	out := map[string]any{
 		"id":              row.ID,
 		"domain":          row.DomainName,

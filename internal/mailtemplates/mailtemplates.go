@@ -178,7 +178,9 @@ func (r *Repo) Render(ctx context.Context, kind Kind, lang string, vars Vars) (R
 }
 
 // ValidateTemplates parses the three sources and returns ErrParse on any
-// failure. Used by the admin Save handler before persisting.
+// failure, wrapping ErrUnsafe too when a source could leak the reveal
+// token or load remote content (see safety.go). Used by the admin Save
+// and Preview handlers.
 func ValidateTemplates(subject, text, html string) error {
 	if strings.TrimSpace(subject) == "" {
 		return fmt.Errorf("%w: subject is empty", ErrParse)
@@ -192,7 +194,7 @@ func ValidateTemplates(subject, text, html string) error {
 	if _, err := htmltemplate.New("html").Parse(html); err != nil {
 		return fmt.Errorf("%w: html: %s", ErrParse, err.Error())
 	}
-	return nil
+	return checkSafety(subject, text, html)
 }
 
 // ----- internals ------------------------------------------------------------
@@ -255,8 +257,14 @@ func RenderTemplate(tpl Template, vars Vars) (Rendered, error) {
 	return renderTemplate(tpl, vars)
 }
 
+// renderTemplate re-applies the safety rules on every render: a row stored
+// before they existed, or written straight to the DB, never sends the
+// token anywhere but its own link (see safety.go).
 func renderTemplate(tpl Template, vars Vars) (Rendered, error) {
 	out := Rendered{Kind: tpl.Kind, Language: tpl.Language}
+	if err := checkStatic(tpl); err != nil {
+		return out, err
+	}
 
 	subject, err := renderText("subject", tpl.Subject, vars)
 	if err != nil {
@@ -276,6 +284,9 @@ func renderTemplate(tpl Template, vars Vars) (Rendered, error) {
 	}
 	out.HTML = html
 
+	if err := checkRendered(out, vars.RevealURL); err != nil {
+		return Rendered{Kind: tpl.Kind, Language: tpl.Language}, err
+	}
 	return out, nil
 }
 
@@ -317,31 +328,6 @@ func canonLang(lang string) string {
 		lang = lang[:i]
 	}
 	return lang
-}
-
-// PickLanguage returns the first language code in `acceptLanguage` that the
-// templates support, defaulting to "en". Skeleton-grade Accept-Language
-// parser: splits on commas, strips q= weights, lowercases, accepts only the
-// language subtag (`fr-FR` → `fr`).
-func PickLanguage(acceptLanguage string) string {
-	if acceptLanguage == "" {
-		return "en"
-	}
-	supported := map[string]bool{}
-	for _, l := range SupportedLanguages() {
-		supported[l] = true
-	}
-	for _, part := range strings.Split(acceptLanguage, ",") {
-		raw := part
-		if i := strings.Index(part, ";"); i > 0 {
-			raw = part[:i]
-		}
-		lang := canonLang(raw)
-		if supported[lang] {
-			return lang
-		}
-	}
-	return "en"
 }
 
 func nullableInt(p *int64) any {

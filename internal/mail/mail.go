@@ -101,7 +101,10 @@ func Assemble(in AssembleInputs) (Message, error) {
 		return Message{}, err
 	}
 	body := assembleMultipart(boundary, in.Text, in.HTML)
-	msgID := fmt.Sprintf("<%s@%s>", hex.EncodeToString(boundaryBytes(boundary))[:16], in.InstanceDomain)
+	msgID, err := newMessageID(in.InstanceDomain)
+	if err != nil {
+		return Message{}, err
+	}
 
 	m := Message{
 		From:    sender,
@@ -165,7 +168,10 @@ func BuildReveal(in RevealInputs) (Message, error) {
 	}
 	body := assembleMultipart(boundary, textBody, htmlBody)
 
-	msgID := fmt.Sprintf("<%s@%s>", hex.EncodeToString(boundaryBytes(boundary))[:16], in.InstanceDomain)
+	msgID, err := newMessageID(in.InstanceDomain)
+	if err != nil {
+		return Message{}, err
+	}
 
 	m := Message{
 		From:    sender,
@@ -328,7 +334,17 @@ func newBoundary() (string, error) {
 	return "----=_SK_" + hex.EncodeToString(b), nil
 }
 
-func boundaryBytes(b string) []byte { return []byte(b) }
+// newMessageID returns a globally unique Message-ID with 128 random bits,
+// independent of the MIME boundary. (It used to be cut from the hex of
+// the boundary's constant prefix, so every mail shared one Message-ID and
+// receivers could deduplicate a fresh reveal mail away.)
+func newMessageID(domain string) (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("<%s@%s>", hex.EncodeToString(b), domain), nil
+}
 
 func sortedKeys(m map[string]string) []string {
 	out := make([]string, 0, len(m))

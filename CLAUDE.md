@@ -187,6 +187,7 @@ Key env vars:
 | `SK_DATABASE_URL`                | sqlite in eval         | `postgres://…` or `sqlite://…`                              |
 | `SK_MASTER_SECRET`               | auto in eval only      | base64 32 bytes — **pin in production AND across rebuilds** |
 | `SK_INSTANCE_DOMAIN`             | derived from BaseURL   | From-address host, WebAuthn RPID                            |
+| `SK_MAIL_LANGUAGE`               | `en`                   | `en` / `fr`: language of every outbound mail. Never taken from the requester's Accept-Language |
 | `SK_BOOTSTRAP_ADMIN_PASSWORD`    | random 20-char         | **Eval-only** override; ≥ 12 chars                          |
 | `SK_RATE_LIMIT_*`                | 3/h email, 10/h IP     | Demo mode forces 1/1                                        |
 | `SK_SMTP_*`                      | unset                  | Env-wired sender; overridden at runtime by `/admin/smtp`    |
@@ -414,6 +415,7 @@ A running list of things that have tripped Claude or a human in this codebase. *
 19. **`SK_MODE=demo` is a startup error.** Demo is `SK_DEMO_MODE=true` on top of `eval` or `production` (§5).
 20. **The audit chain is keyed.** Writing `audit_log` rows with a zero or wrong key (e.g. a CLI path built without `audit.DeriveKey`) turns the `/admin/audit` badge red — see §3.
 21. **CRLF checkouts on Windows.** With `core.autocrlf=true`, `gofmt -l` and `yamllint` flag every file for line endings even when the committed (LF) content is clean. Check a file with `tr -d '\r' < f | gofmt -l`; edit tools that write LF into a CRLF file are fine, git normalises on commit.
+22. **Mail templates are a token-exfiltration surface.** `mailtemplates/safety.go` enforces, at save time *and* on every render: `{{ .RevealURL }}` only as a bare action, the whole `href` of an `<a>` in HTML, standalone in text, never in the subject; no variables / `{{ . }}` / sub-templates. The rendered HTML is checked against an **allowlist** of elements/attributes (tokenizer + scripting-disabled `html.Parse`), never a denylist: x/net/html tokenizes `noscript`/`xmp`/`noembed`/`noframes`/`plaintext` as raw text while mail clients parse their content as markup, so a denylist was bypassed. Only `<title>`/`<style>` raw text is allowed, with no `<` inside; no CSS `url()`/at-rules but `@media`/escapes; `<img src>` only bitmap `data:` or `cid:`. Errors wrap `ErrParse` + `ErrUnsafe`. Sender identity, Message-ID and SPF/DKIM/DMARC: `docs/security/mail-authentication.md`.
 
 ---
 
