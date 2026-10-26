@@ -110,24 +110,23 @@ func (r *Repo) Create(ctx context.Context, in CreateInputs, adminID *int64) (Pol
 		 proposal_count, regenerate_limit, session_ttl_seconds,
 		 notify_on_consult, active, created_by_admin_id, created_at, updated_at)
 		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`
-	res, err := r.db.ExecContext(ctx, rebind(r.db, q),
+	id, err := storage.InsertReturningID(ctx, r.db, q,
 		in.DomainID, string(in.ANSSILevel), strings.TrimSpace(in.Name), string(in.Generator),
 		canonJSON(in.ParamsJSON),
 		defaultInt(in.ProposalCount, 5),
 		defaultInt(in.RegenerateLimit, 3),
 		defaultInt(in.SessionTTLSeconds, 900),
-		boolInt(in.NotifyOnConsult),
-		boolInt(in.Active),
+		in.NotifyOnConsult,
+		in.Active,
 		nullableInt(adminID),
 		now, now,
 	)
 	if err != nil {
-		if isUniqueViolation(err) {
+		if storage.IsUniqueViolation(err) {
 			return Policy{}, ErrAlreadyExists
 		}
 		return Policy{}, fmt.Errorf("policies.Create: %w", err)
 	}
-	id, _ := res.LastInsertId()
 	return r.Get(ctx, id)
 }
 
@@ -147,8 +146,8 @@ func (r *Repo) Update(ctx context.Context, id int64, in CreateInputs) error {
 		defaultInt(in.ProposalCount, 5),
 		defaultInt(in.RegenerateLimit, 3),
 		defaultInt(in.SessionTTLSeconds, 900),
-		boolInt(in.NotifyOnConsult),
-		boolInt(in.Active),
+		in.NotifyOnConsult,
+		in.Active,
 		now, id,
 	)
 	return err
@@ -159,7 +158,7 @@ func (r *Repo) SetActive(ctx context.Context, id int64, active bool) error {
 	now := r.now().UTC()
 	_, err := r.db.ExecContext(ctx,
 		rebind(r.db, `UPDATE policies SET active = ?, updated_at = ? WHERE id = ?`),
-		boolInt(active), now, id)
+		active, now, id)
 	return err
 }
 
@@ -264,13 +263,12 @@ func scan(rs rowScanner) (Policy, error) {
 	var (
 		p                                    Policy
 		level, gen, name, params, domainName string
-		notify, active                       int64
 		createdBy                            sql.NullInt64
 		createdAt, updatedAt                 any
 	)
 	err := rs.Scan(&p.ID, &p.DomainID, &domainName, &level, &name, &gen, &params,
 		&p.ProposalCount, &p.RegenerateLimit, &p.SessionTTLSeconds,
-		&notify, &active, &createdBy, &createdAt, &updatedAt)
+		&p.NotifyOnConsult, &p.Active, &createdBy, &createdAt, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Policy{}, ErrNotFound
 	}
@@ -282,8 +280,6 @@ func scan(rs rowScanner) (Policy, error) {
 	p.Name = name
 	p.Generator = Generator(gen)
 	p.Params = json.RawMessage(params)
-	p.NotifyOnConsult = notify != 0
-	p.Active = active != 0
 	if createdBy.Valid {
 		v := createdBy.Int64
 		p.CreatedByAdminID = &v
@@ -353,25 +349,11 @@ func defaultInt(v, def int) int {
 	return v
 }
 
-func boolInt(b bool) int {
-	if b {
-		return 1
-	}
-	return 0
-}
-
 func nullableInt(p *int64) any {
 	if p == nil {
 		return nil
 	}
 	return *p
-}
-
-func isUniqueViolation(err error) bool {
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "unique") ||
-		strings.Contains(msg, "duplicate") ||
-		strings.Contains(msg, "constraint failed")
 }
 
 func rebind(db *sql.DB, query string) string { return storage.Rebind(db, query) }

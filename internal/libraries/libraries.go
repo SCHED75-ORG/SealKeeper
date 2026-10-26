@@ -139,7 +139,7 @@ func (r *Repo) Upload(ctx context.Context, in UploadInputs) (Library, Report, er
 		(name, kind, language, description, sha256, entry_count, size_bytes, file_path,
 		 system_flag, created_by_admin_id, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-	res, err := r.db.ExecContext(ctx, rebind(r.db, ins),
+	id, err := storage.InsertReturningID(ctx, r.db, ins,
 		strings.TrimSpace(in.Name),
 		string(in.Kind),
 		strings.ToLower(strings.TrimSpace(in.Language)),
@@ -148,7 +148,7 @@ func (r *Repo) Upload(ctx context.Context, in UploadInputs) (Library, Report, er
 		report.EntryCount,
 		int64(len(raw)),
 		relPath,
-		boolInt(in.System),
+		in.System,
 		nullableInt(in.AdminID),
 		now, now,
 	)
@@ -157,7 +157,6 @@ func (r *Repo) Upload(ctx context.Context, in UploadInputs) (Library, Report, er
 		_ = os.Remove(abs)
 		return Library{}, report, fmt.Errorf("libraries.Upload: insert: %w", err)
 	}
-	id, _ := res.LastInsertId()
 	lib, err := r.Get(ctx, id)
 	return lib, report, err
 }
@@ -260,12 +259,11 @@ func scan(rs rowScanner) (Library, error) {
 	var (
 		lib                  Library
 		kind                 string
-		system               int64
 		createdBy            sql.NullInt64
 		createdAt, updatedAt any
 	)
 	err := rs.Scan(&lib.ID, &lib.Name, &kind, &lib.Language, &lib.Description,
-		&lib.SHA256, &lib.EntryCount, &lib.SizeBytes, &lib.FilePath, &system,
+		&lib.SHA256, &lib.EntryCount, &lib.SizeBytes, &lib.FilePath, &lib.System,
 		&createdBy, &createdAt, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Library{}, ErrNotFound
@@ -274,7 +272,6 @@ func scan(rs rowScanner) (Library, error) {
 		return Library{}, err
 	}
 	lib.Kind = Kind(kind)
-	lib.System = system != 0
 	if createdBy.Valid {
 		v := createdBy.Int64
 		lib.CreatedByAdminID = &v
@@ -307,13 +304,6 @@ func (r *sliceReader) Read(p []byte) (int, error) {
 }
 
 func readerFromBytes(b []byte) *sliceReader { return &sliceReader{b: b} }
-
-func boolInt(b bool) int {
-	if b {
-		return 1
-	}
-	return 0
-}
 
 func nullableInt(p *int64) any {
 	if p == nil {

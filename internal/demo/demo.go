@@ -66,7 +66,7 @@ func (r *Resetter) ResetOnce(ctx context.Context) {
 		"DELETE FROM elevations",
 		"DELETE FROM policies",
 		"DELETE FROM domains",
-		"DELETE FROM libraries WHERE system_flag = 0",
+		"DELETE FROM libraries WHERE system_flag = FALSE",
 	}
 	var failures int
 	start := time.Now()

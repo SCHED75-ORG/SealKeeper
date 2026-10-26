@@ -118,19 +118,18 @@ func (r *Repo) Create(ctx context.Context, name, description string, active bool
 	now := r.now().UTC()
 	const q = `INSERT INTO domains (name, description, active, created_by_admin_id, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?)`
-	res, err := r.db.ExecContext(ctx, rebind(r.db, q),
-		canon, strings.TrimSpace(description), boolInt(active), nullableInt(adminID), now, now,
+	id, err := storage.InsertReturningID(ctx, r.db, q,
+		canon, strings.TrimSpace(description), active, nullableInt(adminID), now, now,
 	)
 	if err != nil {
 		// SQLite + Postgres both surface uniqueness as a generic constraint
 		// violation — sniff the message rather than chase per-driver error
 		// types here.
-		if isUniqueViolation(err) {
+		if storage.IsUniqueViolation(err) {
 			return Domain{}, ErrAlreadyExists
 		}
 		return Domain{}, fmt.Errorf("domains.Create: %w", err)
 	}
-	id, _ := res.LastInsertId()
 	return Domain{
 		ID: id, Name: canon, Description: description, Active: active,
 		CreatedByAdminID: adminID, CreatedAt: now, UpdatedAt: now,
@@ -171,7 +170,7 @@ func (r *Repo) SetActive(ctx context.Context, id int64, active bool) error {
 	now := r.now().UTC()
 	_, err := r.db.ExecContext(ctx,
 		rebind(r.db, `UPDATE domains SET active = ?, updated_at = ? WHERE id = ?`),
-		boolInt(active), now, id,
+		active, now, id,
 	)
 	return err
 }
@@ -263,7 +262,7 @@ func (r *Repo) Allows(ctx context.Context, emailDomain string) (bool, error) {
 		placeholders[i] = "?"
 		args[i] = c
 	}
-	q := `SELECT COUNT(*) FROM domains WHERE active = 1 AND name IN (` + strings.Join(placeholders, ",") + `)`
+	q := `SELECT COUNT(*) FROM domains WHERE active = TRUE AND name IN (` + strings.Join(placeholders, ",") + `)`
 	var hits int64
 	if err := r.db.QueryRowContext(ctx, rebind(r.db, q), args...).Scan(&hits); err != nil {
 		return false, err
@@ -362,18 +361,16 @@ type rowScanner interface{ Scan(dest ...any) error }
 func scan(rs rowScanner) (Domain, error) {
 	var (
 		d                    Domain
-		active               int64
 		createdBy            sql.NullInt64
 		createdAt, updatedAt any
 	)
-	err := rs.Scan(&d.ID, &d.Name, &d.Description, &active, &createdBy, &createdAt, &updatedAt)
+	err := rs.Scan(&d.ID, &d.Name, &d.Description, &d.Active, &createdBy, &createdAt, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Domain{}, ErrNotFound
 	}
 	if err != nil {
 		return Domain{}, err
 	}
-	d.Active = active != 0
 	if createdBy.Valid {
 		v := createdBy.Int64
 		d.CreatedByAdminID = &v
@@ -387,25 +384,11 @@ func scan(rs rowScanner) (Domain, error) {
 	return d, nil
 }
 
-func boolInt(b bool) int {
-	if b {
-		return 1
-	}
-	return 0
-}
-
 func nullableInt(p *int64) any {
 	if p == nil {
 		return nil
 	}
 	return *p
-}
-
-func isUniqueViolation(err error) bool {
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "unique") ||
-		strings.Contains(msg, "duplicate") ||
-		strings.Contains(msg, "constraint failed")
 }
 
 func rebind(db *sql.DB, query string) string { return storage.Rebind(db, query) }

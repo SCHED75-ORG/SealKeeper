@@ -81,16 +81,15 @@ func (r *Repo) Create(ctx context.Context, domainID int64, email string, level L
 	const q = `INSERT INTO elevations
 		(domain_id, email, level, reason, created_by_admin_id, created_at)
 		VALUES (?, ?, ?, ?, ?, ?)`
-	res, err := r.db.ExecContext(ctx, rebind(r.db, q),
+	id, err := storage.InsertReturningID(ctx, r.db, q,
 		domainID, email, string(level), strings.TrimSpace(reason), nullableInt(adminID), now,
 	)
 	if err != nil {
-		if isUniqueViolation(err) {
+		if storage.IsUniqueViolation(err) {
 			return Elevation{}, ErrAlreadyExists
 		}
 		return Elevation{}, fmt.Errorf("elevations.Create: %w", err)
 	}
-	id, _ := res.LastInsertId()
 	return Elevation{
 		ID:               id,
 		DomainID:         domainID,
@@ -304,13 +303,6 @@ func nullableInt(p *int64) any {
 		return nil
 	}
 	return *p
-}
-
-func isUniqueViolation(err error) bool {
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "unique") ||
-		strings.Contains(msg, "duplicate") ||
-		strings.Contains(msg, "constraint failed")
 }
 
 func rebind(db *sql.DB, query string) string { return storage.Rebind(db, query) }

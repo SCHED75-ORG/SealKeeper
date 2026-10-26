@@ -126,18 +126,17 @@ func (r *Repo) Create(ctx context.Context, in CreateInputs, adminID *int64) (Int
 	const q = `INSERT INTO integrations
 		(name, kind, enabled, config_json, filters_json, created_by_admin_id, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-	res, err := r.db.ExecContext(ctx, rebind(r.db, q),
-		strings.TrimSpace(in.Name), string(in.Kind), boolInt(in.Enabled),
+	id, err := storage.InsertReturningID(ctx, r.db, q,
+		strings.TrimSpace(in.Name), string(in.Kind), in.Enabled,
 		canonJSON(in.ConfigJSON), canonJSON(in.FiltersJSON),
 		nullableInt(adminID), now, now,
 	)
 	if err != nil {
-		if isUniqueViolation(err) {
+		if storage.IsUniqueViolation(err) {
 			return Integration{}, ErrAlreadyExists
 		}
 		return Integration{}, fmt.Errorf("integrations.Create: %w", err)
 	}
-	id, _ := res.LastInsertId()
 	return r.Get(ctx, id)
 }
 
@@ -146,7 +145,7 @@ func (r *Repo) SetEnabled(ctx context.Context, id int64, enabled bool) error {
 	now := r.now().UTC()
 	_, err := r.db.ExecContext(ctx,
 		rebind(r.db, `UPDATE integrations SET enabled = ?, updated_at = ? WHERE id = ?`),
-		boolInt(enabled), now, id)
+		enabled, now, id)
 	return err
 }
 
@@ -181,7 +180,7 @@ func (r *Repo) List(ctx context.Context) ([]Integration, error) {
 
 // ListEnabled returns enabled rows only — used by the dispatcher hot path.
 func (r *Repo) ListEnabled(ctx context.Context) ([]Integration, error) {
-	rows, err := r.db.QueryContext(ctx, selectQ+" WHERE enabled = 1 ORDER BY id")
+	rows, err := r.db.QueryContext(ctx, selectQ+" WHERE enabled = TRUE ORDER BY id")
 	if err != nil {
 		return nil, err
 	}
@@ -208,14 +207,13 @@ func scan(rs rowScanner) (Integration, error) {
 	var (
 		i          Integration
 		kindStr    string
-		enabled    int64
 		configStr  string
 		filtersStr string
 		createdBy  sql.NullInt64
 		createdAt  any
 		updatedAt  any
 	)
-	err := rs.Scan(&i.ID, &i.Name, &kindStr, &enabled, &configStr, &filtersStr,
+	err := rs.Scan(&i.ID, &i.Name, &kindStr, &i.Enabled, &configStr, &filtersStr,
 		&createdBy, &createdAt, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Integration{}, ErrNotFound
@@ -224,7 +222,6 @@ func scan(rs rowScanner) (Integration, error) {
 		return Integration{}, err
 	}
 	i.Kind = Kind(kindStr)
-	i.Enabled = enabled != 0
 	i.ConfigJSON = json.RawMessage(configStr)
 	i.FiltersJSON = json.RawMessage(filtersStr)
 	if createdBy.Valid {
@@ -270,25 +267,11 @@ func canonJSON(s string) string {
 	return s
 }
 
-func boolInt(b bool) int {
-	if b {
-		return 1
-	}
-	return 0
-}
-
 func nullableInt(p *int64) any {
 	if p == nil {
 		return nil
 	}
 	return *p
-}
-
-func isUniqueViolation(err error) bool {
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "unique") ||
-		strings.Contains(msg, "duplicate") ||
-		strings.Contains(msg, "constraint failed")
 }
 
 func rebind(db *sql.DB, query string) string { return storage.Rebind(db, query) }

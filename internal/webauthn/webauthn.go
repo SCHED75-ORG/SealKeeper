@@ -419,8 +419,7 @@ func (r *Repo) persist(ctx context.Context, adminID int64, friendlyName string, 
 		int64(cred.Authenticator.SignCount), friendlyName,
 		cred.Flags.UserVerified, cred.Flags.BackupEligible, cred.Flags.BackupState, now)
 	if err != nil {
-		if strings.Contains(strings.ToLower(err.Error()), "unique") ||
-			strings.Contains(strings.ToLower(err.Error()), "duplicate") {
+		if storage.IsUniqueViolation(err) {
 			return Credential{}, ErrAlreadyExists
 		}
 		return Credential{}, err

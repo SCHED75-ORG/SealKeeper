@@ -132,14 +132,13 @@ func (r *Repo) Create(ctx context.Context, email, plainPassword string) (Admin, 
 		(email, password_hash, force_password_change, force_totp_enroll, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?)`
 	now := r.now().UTC()
-	res, err := r.db.ExecContext(ctx, rebind(r.db, q), email, string(hash), true, true, now, now)
+	id, err := storage.InsertReturningID(ctx, r.db, q, email, string(hash), true, true, now, now)
 	if err != nil {
-		if isUniqueViolation(err) {
+		if storage.IsUniqueViolation(err) {
 			return Admin{}, ErrAlreadyExists
 		}
 		return Admin{}, fmt.Errorf("admin.Create: insert: %w", err)
 	}
-	id, _ := res.LastInsertId()
 	return Admin{
 		ID:                  id,
 		Email:               email,
@@ -161,7 +160,7 @@ func (r *Repo) ChangeEmail(ctx context.Context, adminID int64, newEmail string) 
 		rebind(r.db, `UPDATE admins SET email = ?, updated_at = ? WHERE id = ?`),
 		newEmail, now, adminID)
 	if err != nil {
-		if isUniqueViolation(err) {
+		if storage.IsUniqueViolation(err) {
 			return ErrAlreadyExists
 		}
 		return err
@@ -262,19 +261,6 @@ func (r *Repo) Delete(ctx context.Context, adminID int64) error {
 		return ErrNotFound
 	}
 	return nil
-}
-
-// isUniqueViolation sniffs both pgx and SQLite UNIQUE-constraint error
-// strings without dragging the driver-specific error types into this
-// package. Mirrors the same helper used by domains / elevations.
-func isUniqueViolation(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "unique") ||
-		strings.Contains(msg, "duplicate") ||
-		strings.Contains(msg, "23505")
 }
 
 // Count returns the number of admins on file. Bootstrap uses this to decide
@@ -581,7 +567,7 @@ func (r *Repo) LookupSession(ctx context.Context, token string) (Session, Admin,
 		csrfTok                              string
 		adminPK                              int64
 		email                                string
-		forcePwd, forceTOTP                  int64
+		forcePwd, forceTOTP                  bool
 		totpEnc                              []byte
 		disabledAt, lockedUntil, lastLoginAt any
 	)
@@ -626,8 +612,8 @@ func (r *Repo) LookupSession(ctx context.Context, token string) (Session, Admin,
 	a := Admin{
 		ID:                  adminPK,
 		Email:               email,
-		ForcePasswordChange: forcePwd != 0,
-		ForceTOTPEnroll:     forceTOTP != 0,
+		ForcePasswordChange: forcePwd,
+		ForceTOTPEnroll:     forceTOTP,
 		TOTPEnrolled:        len(totpEnc) > 0,
 	}
 	if disabledAt != nil {
@@ -721,12 +707,11 @@ type rowScanner interface{ Scan(dest ...any) error }
 func (r *Repo) scanRow(rs rowScanner) (adminRow, error) {
 	var (
 		row                                  adminRow
-		forcePwd, forceTotp                  int64
 		secretEnc, codesEnc                  []byte
 		lockedUntil, disabledAt, lastLoginAt any
 	)
 	err := rs.Scan(&row.ID, &row.Email, &row.PasswordHash, &secretEnc, &codesEnc,
-		&forcePwd, &forceTotp, &row.FailedAttempts, &lockedUntil, &disabledAt, &lastLoginAt)
+		&row.ForcePasswordChange, &row.ForceTOTPEnroll, &row.FailedAttempts, &lockedUntil, &disabledAt, &lastLoginAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return adminRow{}, ErrNotFound
 	}
@@ -735,8 +720,6 @@ func (r *Repo) scanRow(rs rowScanner) (adminRow, error) {
 	}
 	row.TOTPSecretEnc = secretEnc
 	row.TOTPRecoveryCodesEnc = codesEnc
-	row.ForcePasswordChange = forcePwd != 0
-	row.ForceTOTPEnroll = forceTotp != 0
 	if lockedUntil != nil {
 		if t, err := toTime(lockedUntil); err == nil {
 			t := t

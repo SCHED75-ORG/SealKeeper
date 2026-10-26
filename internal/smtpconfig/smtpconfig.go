@@ -83,12 +83,11 @@ func (r *Repo) Get(ctx context.Context) (Config, error) {
 	var (
 		c            Config
 		pwdEnc       []byte
-		insecure     int64
 		updatedAtCol any
 	)
 	err := r.db.QueryRowContext(ctx, q).Scan(
 		&c.Host, &c.Port, &c.Username, &pwdEnc, &c.FromAddr, &c.TLSMode,
-		&c.ServerName, &insecure, &c.TimeoutSeconds, &updatedAtCol,
+		&c.ServerName, &c.InsecureTLS, &c.TimeoutSeconds, &updatedAtCol,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Config{}, ErrNotConfigured
@@ -99,7 +98,6 @@ func (r *Repo) Get(ctx context.Context) (Config, error) {
 	if !c.Configured() {
 		return c, ErrNotConfigured
 	}
-	c.InsecureTLS = insecure != 0
 	if t, err := toTime(updatedAtCol); err == nil {
 		c.UpdatedAt = t
 	}
@@ -120,10 +118,10 @@ func (r *Repo) Update(ctx context.Context, in UpdateInputs, adminID *int64) erro
 	if strings.TrimSpace(in.Host) == "" {
 		_, err := r.db.ExecContext(ctx, rebind(r.db,
 			`UPDATE smtp_config SET host='', port=587, username='', password_enc=NULL,
-				from_addr='', tls_mode='auto', server_name='', insecure_tls=?,
+				from_addr='', tls_mode='auto', server_name='', insecure_tls=FALSE,
 				timeout_seconds=30, updated_by_admin_id=?, updated_at=?
 				WHERE id = 1`),
-			0, nullableInt(adminID), r.now().UTC())
+			nullableInt(adminID), r.now().UTC())
 		if err != nil {
 			return err
 		}
@@ -177,10 +175,6 @@ func (r *Repo) Update(ctx context.Context, in UpdateInputs, adminID *int64) erro
 	}
 
 	now := r.now().UTC()
-	insecure := 0
-	if in.InsecureTLS {
-		insecure = 1
-	}
 	// Upsert via two-step probe + INSERT/UPDATE — keeps the SQL
 	// portable between SQLite and Postgres without ON CONFLICT clauses.
 	var n int64
@@ -194,7 +188,7 @@ func (r *Repo) Update(ctx context.Context, in UpdateInputs, adminID *int64) erro
 				 insecure_tls, timeout_seconds, updated_by_admin_id, created_at, updated_at)
 				VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
 			in.Host, port, in.Username, pwdEnc, in.FromAddr, tlsMode, in.ServerName,
-			insecure, timeout, nullableInt(adminID), now, now)
+			in.InsecureTLS, timeout, nullableInt(adminID), now, now)
 		return err
 	}
 	_, err := r.db.ExecContext(ctx, rebind(r.db,
@@ -202,7 +196,7 @@ func (r *Repo) Update(ctx context.Context, in UpdateInputs, adminID *int64) erro
 			tls_mode=?, server_name=?, insecure_tls=?, timeout_seconds=?,
 			updated_by_admin_id=?, updated_at=? WHERE id = 1`),
 		in.Host, port, in.Username, pwdEnc, in.FromAddr, tlsMode, in.ServerName,
-		insecure, timeout, nullableInt(adminID), now)
+		in.InsecureTLS, timeout, nullableInt(adminID), now)
 	return err
 }
 
