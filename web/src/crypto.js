@@ -45,13 +45,16 @@ export function cryptoRandomInt(max) {
   if (max > 0xffffffff) {
     throw new RangeError("cryptoRandomInt: max must fit in uint32");
   }
-  // Number of bits we need.
+  // Number of bits we need. `|=` works on signed int32, so for max > 2^31
+  // the mask would read as -1 and `buf[0] & mask` as a negative number;
+  // `>>> 0` brings both back to uint32 (audit js-generation#5).
   let mask = max - 1;
   mask |= mask >>> 1;
   mask |= mask >>> 2;
   mask |= mask >>> 4;
   mask |= mask >>> 8;
   mask |= mask >>> 16;
+  mask >>>= 0;
 
   const buf = new Uint32Array(1);
   // Rejection loop: keep drawing until we land below `max`.
@@ -59,7 +62,7 @@ export function cryptoRandomInt(max) {
   // probability is 0.5, so the loop terminates very quickly.
   for (;;) {
     getCrypto().getRandomValues(buf);
-    const candidate = buf[0] & mask;
+    const candidate = (buf[0] & mask) >>> 0;
     if (candidate < max) return candidate;
   }
 }

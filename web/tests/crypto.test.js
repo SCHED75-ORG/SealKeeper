@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   cryptoCoin,
   cryptoRandomBytes,
@@ -75,5 +75,28 @@ describe("crypto helpers", () => {
     const result = cryptoShuffleInPlace(arr);
     expect(result).toBe(arr); // same reference
     expect(result.sort((a, b) => a - b)).toEqual(before);
+  });
+});
+
+// Audit js-generation#5 (SK-38): the int32 mask overflowed for max > 2^31.
+describe("cryptoRandomInt above 2^31", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("never returns a negative value", () => {
+    vi.spyOn(globalThis.crypto, "getRandomValues").mockImplementation((buf) => {
+      buf[0] = 0xfffffffe;
+      return buf;
+    });
+    expect(cryptoRandomInt(0xffffffff)).toBe(0xfffffffe);
+  });
+
+  it("stays in [0, max) on real draws", () => {
+    for (const max of [0xffffffff, 2 ** 31 + 1]) {
+      for (let i = 0; i < 500; i++) {
+        const v = cryptoRandomInt(max);
+        expect(v).toBeGreaterThanOrEqual(0);
+        expect(v).toBeLessThan(max);
+      }
+    }
   });
 });
