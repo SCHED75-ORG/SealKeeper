@@ -60,6 +60,8 @@ docker compose pull
 docker compose up -d
 ```
 
+Upgrade note — migration 0017 stores reveal tokens as SHA-256 digests only, so a database dump or backup no longer contains usable reveal links. Links still pending when you upgrade (15-minute lifetime) stop working; their recipients request a new one. Upgrade during a quiet window if that matters.
+
 **Stop and remove everything**:
 
 ```bash

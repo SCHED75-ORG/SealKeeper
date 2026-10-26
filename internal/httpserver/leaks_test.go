@@ -33,6 +33,27 @@ func TestMetricsDoNotLabelUnmatchedPaths(t *testing.T) {
 	}
 }
 
+// mailedRevealToken returns the token of the last reveal link rs was
+// handed. The database only holds its digest.
+func mailedRevealToken(t *testing.T, rs *recordSender) string {
+	t.Helper()
+	body := rs.last(t).Body
+	_, after, ok := strings.Cut(body, "/reveal/")
+	if !ok {
+		t.Fatal("no reveal link in the mail")
+	}
+	end := strings.IndexFunc(after, func(c rune) bool {
+		return !strings.ContainsRune("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_", c)
+	})
+	if end < 0 {
+		end = len(after)
+	}
+	if end < 32 {
+		t.Fatalf("reveal token too short: %q", after[:end])
+	}
+	return after[:end]
+}
+
 // Regression (SK-11): the raw single-use reveal token was the audit
 // target, readable by anyone with audit_log or SIEM access.
 func TestAuditNeverStoresRawRevealToken(t *testing.T) {
@@ -44,14 +65,14 @@ func TestAuditNeverStoresRawRevealToken(t *testing.T) {
 	s.SetAudit(ar)
 	s.cfg.InstanceDomain = "sk.test"
 	s.SetTokens(tr)
+	rs := &recordSender{}
+	s.SetSender(rs)
 	r := httptest.NewRequest(http.MethodPost, "/api/v1/request", strings.NewReader(`{"email":"user@example.test"}`))
 	r.Header.Set("Content-Type", "application/json")
 	s.handleRequest(httptest.NewRecorder(), r)
+	s.WaitMail(context.Background())
 
-	var tok string
-	if err := db.QueryRowContext(context.Background(), "SELECT token FROM request_tokens").Scan(&tok); err != nil {
-		t.Fatalf("no token issued: %v", err)
-	}
+	tok := mailedRevealToken(t, rs)
 	rows, err := db.QueryContext(context.Background(), "SELECT COALESCE(target, ''), details_json FROM audit_log")
 	if err != nil {
 		t.Fatal(err)

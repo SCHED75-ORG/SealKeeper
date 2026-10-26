@@ -137,8 +137,14 @@ func TestMigrateUpAppliedReportsVersions(t *testing.T) {
 		t.Fatalf("MigrateUpApplied first run: %v", err)
 	}
 	v, _ := s.SchemaVersion(ctx)
-	if int64(len(applied)) != v || applied[0] != 1 || applied[len(applied)-1] != v || !slices.Contains(applied, 14) {
-		t.Fatalf("applied = %v, want 1..%d", applied, v)
+	// Numbers may skip (a number reserved by a parallel branch): compare
+	// with the files on disk rather than with 1..v.
+	files, err := os.ReadDir(filepath.Join("migrations", "sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(applied) != len(files) || !slices.IsSorted(applied) || applied[0] != 1 || applied[len(applied)-1] != v || !slices.Contains(applied, 14) {
+		t.Fatalf("applied = %v, want every one of the %d migrations up to %d", applied, len(files), v)
 	}
 	again, err := s.MigrateUpApplied(ctx)
 	if err != nil {
