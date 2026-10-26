@@ -186,11 +186,18 @@ Key env vars:
 | `SK_BOOTSTRAP_ADMIN_PASSWORD`    | random 20-char         | **Eval-only** override; ≥ 12 chars                          |
 | `SK_RATE_LIMIT_*`                | 3/h email, 10/h IP     | Demo mode forces 1/1                                        |
 | `SK_SMTP_*`                      | unset                  | Env-wired sender; overridden at runtime by `/admin/smtp`    |
-| `SK_TRUSTED_PROXY_CIDRS`         | unset (Compose: `172.16.0.0/12`) | XFF honoured only from these peers, walked right-to-left; validated at startup |
+| `SK_TRUSTED_PROXY_CIDRS`         | unset (Compose: `172.31.250.10/32`) | XFF honoured only from these peers, walked right-to-left; validated at startup |
 | `SK_LOG_FORMAT` / `SK_LOG_LEVEL` | `json` / `info`        | slog                                                        |
 | `SK_DEMO_MODE`                   | `false`                | Independent toggle (orthogonal to SK_MODE)                  |
-| `SK_MAINTENANCE_MODE`            | `false`                | Reserved                                                    |
+| `SK_ADMIN_SESSION_TTL_SECONDS`   | `28800` (8 h)          | Absolute admin session lifetime; ≥ 60                       |
+| `SK_ADMIN_SESSION_IDLE_SECONDS`  | `1800` (30 min)        | Admin idle timeout; 60 ≤ idle ≤ TTL                         |
+| `SK_MAX_LIBRARY_SIZE_MB`         | `10`                   | Max `/admin/libraries` upload; 1..1024                      |
+| `SK_MAX_ACTIVE_SESSIONS`         | `10000`                | **Not implemented**; a non-default value warns at startup   |
+| `SK_SESSION_TTL_SECONDS`         | `900`                  | **Ignored** (TTL is per policy); non-default value warns   |
+| `SK_MAINTENANCE_MODE`            | `false`                | **Not implemented** — `true` is a startup error             |
 | `SK_INTEGRATIONS_ALLOW_PRIVATE`  | `false`                | Let SIEM sinks dial RFC 1918 / ULA / CGNAT. Loopback, link-local (cloud metadata), unspecified and multicast stay refused; checked on the resolved IP at connect time |
+
+Parsing is strict: a malformed integer, boolean (`true/false/1/0/yes/no/on/off`) or seconds value is a startup error, not a silent fallback to the default (an empty value counts as unset). Unknown keys in the `SK_CONFIG_FILE` YAML are a startup error too (`KnownFields`); YAML durations take Go syntax (`30m`), a bare integer would be nanoseconds and fails the 60 s floor.
 
 **Pinning `SK_MASTER_SECRET` is critical.** TOTP secrets and SMTP relay passwords are AES-256-GCM-wrapped with this key. A rebuild without the env var minted a fresh key in earlier sessions, which left the wrapped TOTP blob unopenable — observed bug, surfaced as the new `admin.ErrTOTPUnrecoverable` (login slug `totp_unrecoverable`).
 
@@ -385,6 +392,9 @@ A running list of things that have tripped Claude or a human in this codebase. *
 11. **Alpine 3.22 is retired for Go 1.26.10.** Use `golang:1.26.10-alpine3.23` (3.21 went the same way at 1.26.3). Same trap will appear at the next Go minor.
 12. **The login error slug `bad_creds` covers three different failures** (unknown email, wrong password, wrong TOTP code) — that's anti-enumeration on purpose. A real internal failure surfaces as `internal`; a master-secret rotation surfaces as `totp_unrecoverable` now.
 13. **gosec `Nosec: N, Issues: 0` is the success line.** Tools shipping a `// #nosec Gxxx -- rationale` exemption still register in the Nosec count.
+14. **Operator passwords are scored, not just length-checked.** `admin.ValidateAdminPassword` requires 16 chars + 3 classes *and* ≥ 100 bits of estimated guessing entropy (`EstimatePasswordEntropy`: dictionary/common words with leet and case variants, product/instance/email words, years, sequences, keyboard walks, repeats; only the first 72 bytes count). Test fixtures like `Strong-Admin-2026!` are refused — use random-looking strings. Generated passwords (`randomPassword`) redraw until they pass.
+15. **Last-active-admin guard must stay one atomic write.** `SetDisabled`/`Delete` carry the "another active admin exists" condition inside the UPDATE/DELETE, and on Postgres lock the active rows (`FOR UPDATE`) first — READ COMMITTED would otherwise let two cross-disables both pass. Recovery from zero active admins: `sealkeeper admin enable --email <e>`.
+16. **WebAuthn clone signal is the RP's job.** go-webauthn only sets `Authenticator.CloneWarning`; `webauthn.Repo.FinishLogin` turns it into `ErrCloneDetected` (audited `admin.webauthn_clone_detected`).
 
 ---
 
