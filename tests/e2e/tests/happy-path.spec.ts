@@ -14,7 +14,9 @@
 import { expect, test } from "@playwright/test";
 
 test.describe("@happy-path public flow", () => {
-  test("landing page advertises the available routes in eval mode", async ({ page }) => {
+  test("landing page advertises the available routes in eval mode", async ({
+    page,
+  }) => {
     const response = await page.goto("/");
     expect(response?.status()).toBe(200);
     await expect(page).toHaveTitle(/SealKeeper/);
@@ -26,7 +28,13 @@ test.describe("@happy-path public flow", () => {
     // tucked under a <details> disclosure widget. Expand it first.
     const opsDetails = page.locator("details");
     await opsDetails.evaluate((el: HTMLDetailsElement) => (el.open = true));
-    for (const path of ["/healthz", "/readyz", "/metrics", "/api/v1/policy", "/version"]) {
+    for (const path of [
+      "/healthz",
+      "/readyz",
+      "/metrics",
+      "/api/v1/policy",
+      "/version",
+    ]) {
       await expect(page.locator(`a[href="${path}"]`)).toBeVisible();
     }
   });
@@ -42,11 +50,23 @@ test.describe("@happy-path public flow", () => {
       generators: expect.arrayContaining(["G1", "G2", "G3"]),
       min_entropy_bits: 80,
       levels: expect.arrayContaining(["standard", "high", "very_high"]),
-      transforms: expect.arrayContaining(["T01", "T02", "T03", "T04", "T05", "T06", "T07", "T08", "T09"]),
+      transforms: expect.arrayContaining([
+        "T01",
+        "T02",
+        "T03",
+        "T04",
+        "T05",
+        "T06",
+        "T07",
+        "T08",
+        "T09",
+      ]),
     });
   });
 
-  test("user request is accepted and the mail is captured in eval mode", async ({ request }) => {
+  test("user request is accepted and the mail is captured in eval mode", async ({
+    request,
+  }) => {
     const email = `happy+${Date.now()}@example.test`;
     const accept = await request.post("/api/v1/request", {
       data: { email, domain: "example.test", subject: "smoke" },
@@ -64,11 +84,16 @@ test.describe("@happy-path public flow", () => {
     // The eval-only mail capture endpoint MUST surface the new entry.
     const mailbox = await request.get("/__captured_mail");
     expect(mailbox.status()).toBe(200);
-    const { items } = (await mailbox.json()) as { items: Array<{ to: string; subject: string }> };
+    const { items } = (await mailbox.json()) as {
+      items: Array<{ to: string; subject: string }>;
+    };
     expect(items.some((m) => m.to === email)).toBe(true);
   });
 
-  test("end-to-end reveal: token → reveal page → JS generates proposals", async ({ page, request }) => {
+  test("end-to-end reveal: token → reveal page → JS generates proposals", async ({
+    page,
+    request,
+  }) => {
     // 1. Request a fresh token via the public API.
     const email = `reveal+${Date.now()}@example.test`;
     const accept = await request.post("/api/v1/request", {
@@ -76,7 +101,9 @@ test.describe("@happy-path public flow", () => {
       headers: { "Content-Type": "application/json" },
     });
     expect(accept.status()).toBe(202);
-    const { debug_reveal_url: revealURL } = (await accept.json()) as { debug_reveal_url: string };
+    const { debug_reveal_url: revealURL } = (await accept.json()) as {
+      debug_reveal_url: string;
+    };
 
     // 2. Open the reveal page; it must show the "Décoder" CTA.
     await page.goto(revealURL);
@@ -91,16 +118,68 @@ test.describe("@happy-path public flow", () => {
     //    visible password and an ANSSI badge.
     const firstProposal = page.locator('[data-testid="proposal"]').first();
     await expect(firstProposal).toBeVisible({ timeout: 5_000 });
-    await expect(firstProposal.locator('[data-testid="password"]').first()).toContainText(/.+/);
-    await expect(firstProposal.locator('[data-testid="anssi"]').first()).toContainText(/B[123]/);
+    await expect(
+      firstProposal.locator('[data-testid="password"]').first(),
+    ).toContainText(/.+/);
+    await expect(
+      firstProposal.locator('[data-testid="anssi"]').first(),
+    ).toContainText(/B[123]/);
   });
 
-  test("@happy-path token is single-use (second consumption returns 410)", async ({ request }) => {
+  // Regression: the reveal page used to discard the resolved admin policy
+  // and always generate 5 default G2 proposals. The policy response is
+  // stubbed so the test needs no admin login / policy setup.
+  test("reveal page honours the resolved admin policy", async ({
+    page,
+    request,
+  }) => {
+    const accept = await request.post("/api/v1/request", {
+      data: { email: `policy+${Date.now()}@example.test` },
+      headers: { "Content-Type": "application/json" },
+    });
+    expect(accept.status()).toBe(202);
+    const { debug_reveal_url: revealURL } = (await accept.json()) as {
+      debug_reveal_url: string;
+    };
+
+    await page.route("**/api/v1/policy?token=*", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          policy: {
+            generator: "G3",
+            proposalCount: 2,
+            anssiLevel: "B3",
+            parameters: { length: 32, blockSize: 8, blockSeparator: "." },
+          },
+        }),
+      }),
+    );
+
+    await page.goto(revealURL);
+    await page.getByRole("button", { name: /Décoder/i }).click();
+
+    const passwords = page.locator('[data-testid="password"]');
+    await expect(passwords).toHaveCount(2, { timeout: 5_000 });
+    for (const text of await passwords.allTextContents()) {
+      expect(text).toMatch(/^[A-Za-z0-9]{8}(\.[A-Za-z0-9]{8}){3}$/);
+    }
+    await expect(page.locator('[data-testid="anssi"]').first()).toContainText(
+      "B3",
+    );
+  });
+
+  test("@happy-path token is single-use (second consumption returns 410)", async ({
+    request,
+  }) => {
     const accept = await request.post("/api/v1/request", {
       data: { email: `single+${Date.now()}@example.test` },
       headers: { "Content-Type": "application/json" },
     });
-    const { debug_reveal_url: url } = (await accept.json()) as { debug_reveal_url: string };
+    const { debug_reveal_url: url } = (await accept.json()) as {
+      debug_reveal_url: string;
+    };
     const token = url.split("/").pop()!;
 
     const first = await request.get(`/api/v1/policy?token=${token}`);
@@ -108,7 +187,9 @@ test.describe("@happy-path public flow", () => {
 
     const second = await request.get(`/api/v1/policy?token=${token}`);
     expect(second.status()).toBe(410);
-    expect(second.headers()["content-type"]).toMatch(/application\/problem\+json/);
+    expect(second.headers()["content-type"]).toMatch(
+      /application\/problem\+json/,
+    );
     const body = await second.json();
     expect(body.title).toBe("token_consumed");
   });
@@ -139,7 +220,9 @@ test.describe("@happy-path public flow", () => {
     }
   });
 
-  test("readiness and liveness endpoints behave per FR-D.49 / FR-D.50", async ({ request }) => {
+  test("readiness and liveness endpoints behave per FR-D.49 / FR-D.50", async ({
+    request,
+  }) => {
     const live = await request.get("/healthz");
     expect(live.status()).toBe(200);
     expect((await live.json()).status).toBe("ok");

@@ -1143,12 +1143,9 @@ const revealHTML = `<!doctype html>
         }
         const body = await r.json();
         const policy = body.policy ? body.policy : body;
-        const wrapped = {
-          generator: (policy.generators && policy.generators[1]) || 'G2',
-          proposalCount: 5,
-          parameters: {}
-        };
-        const proposals = await window.SealKeeper.Generation.generate(wrapped);
+        // Honour the operator's generator, proposal count and parameters.
+        const descriptor = window.SealKeeper.Generation.descriptorFromPolicy(policy);
+        const proposals = await window.SealKeeper.Generation.generate(descriptor);
         out.hidden = false;
         out.innerHTML = proposals.map((p, i) => '<div class="card" data-testid="proposal">' +
           '<div class="pwd" data-testid="password">' + escapeHtml(p.password) + '</div>' +

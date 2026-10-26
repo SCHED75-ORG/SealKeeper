@@ -67,6 +67,31 @@ export async function regenerate(policy) {
 
 export { calculateEntropy } from "./entropy.js";
 
+/**
+ * Builds the generate() descriptor from the `policy` object returned by
+ * GET /api/v1/policy?token=… . Two shapes reach the reveal page:
+ *   - a resolved admin policy (`generator`, `proposalCount`, `parameters`):
+ *     passed through untouched so proposals honour what the operator set;
+ *   - the built-in default (`generators: [...]`, no admin policy yet):
+ *     G2 over the sample dictionary.
+ * An unknown generator is not replaced by a default — generate() rejects
+ * it, so a broken policy fails visibly instead of yielding weaker output.
+ * @param {object} policy
+ * @returns {{generator:string, proposalCount:number, regenerateLimit?:number, parameters:object}}
+ */
+export function descriptorFromPolicy(policy) {
+  if (!policy || typeof policy !== "object") throw new InvalidPolicyDescriptor("not an object");
+  if (policy.generator !== undefined) {
+    return {
+      generator: policy.generator,
+      proposalCount: policy.proposalCount ?? 5,
+      regenerateLimit: policy.regenerateLimit,
+      parameters: policy.parameters ?? {},
+    };
+  }
+  return { generator: "G2", proposalCount: 5, parameters: {} };
+}
+
 async function generateOne(policy, library) {
   switch (policy.generator) {
     case "G1":
@@ -101,7 +126,7 @@ function resolveLibrary(policy) {
 // `window` is undefined in Node, hence the typeof guard.
 // -----------------------------------------------------------------------------
 
-const Generation = { generate, regenerate, calculateEntropy };
+const Generation = { generate, regenerate, calculateEntropy, descriptorFromPolicy };
 
 if (typeof window !== "undefined") {
   window.SealKeeper = window.SealKeeper || {};
