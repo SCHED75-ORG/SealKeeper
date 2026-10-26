@@ -120,7 +120,7 @@ Twelve migrations under `internal/storage/migrations/{postgres,sqlite}/`. Each m
 | GET    | `/metrics`                      | Prometheus exposition (optional bearer)                    |
 | GET    | `/version`                      | Build metadata                                             |
 | GET    | `/`                             | Landing + request form                                     |
-| POST   | `/api/v1/request`               | Issue reveal token, send email (always 202 — FR-B.13)      |
+| POST   | `/api/v1/request`               | Issue reveal token, send email (always 202 — FR-B.13). `application/json` only (415 otherwise) and cross-origin browsers refused (403, `sameOriginPOST`) |
 | GET    | `/api/v1/policy`                | Returns default policy. With `?token=X` it **consumes** the token atomically and returns the typed policy. |
 | GET    | `/reveal/{token}`               | Reveal page HTML; the JS bundle does the actual consumption |
 | GET    | `/static/*`                     | JS bundle + assets (origin: `cfg.WebDir`)                  |

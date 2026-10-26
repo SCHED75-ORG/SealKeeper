@@ -15,6 +15,7 @@ func TestHandleRequestRejectsNonBareEmail(t *testing.T) {
 	s := newClientIPServer(t)
 	body := `{"email":"victim@example.org (x\r\nX-Injected: pwned\r\n\r\n<h1>locked</h1>)"}`
 	r := httptest.NewRequest(http.MethodPost, "/api/v1/request", strings.NewReader(body))
+	r.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	s.handleRequest(w, r)
 	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "invalid_email") {
@@ -27,6 +28,7 @@ func TestHandleRequestCapsBodySize(t *testing.T) {
 	s := newClientIPServer(t)
 	body := `{"email":"a@b.com","subject":"` + strings.Repeat("x", maxRequestBodyBytes) + `"}`
 	r := httptest.NewRequest(http.MethodPost, "/api/v1/request", strings.NewReader(body))
+	r.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	s.handleRequest(w, r)
 	if w.Code != http.StatusBadRequest {

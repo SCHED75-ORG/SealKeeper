@@ -26,6 +26,7 @@ import (
 	"fmt"
 	htmltemplate "html/template"
 	"log/slog"
+	"mime"
 	"net"
 	"net/http"
 	"net/netip"
@@ -369,7 +370,9 @@ func (s *Server) Router() http.Handler {
 
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Get("/policy", s.handlePolicy)
-		r.Post("/request", s.handleRequest)
+		// Cross-origin pages must not mint reveal links from their
+		// visitors' browsers (distributed rate-limit bypass, mail bombing).
+		r.With(sameOriginPOST).Post("/request", s.handleRequest)
 	})
 
 	r.Get("/reveal/{token}", s.handleRevealPage)
@@ -514,6 +517,13 @@ type requestPayload struct {
 
 func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
+	// JSON only: text/plain, form and multipart bodies are CORS "simple
+	// requests" any website can fire without a preflight. Like a malformed
+	// payload, this reveals nothing about the allowlist.
+	if !isJSONContentType(r.Header.Get("Content-Type")) {
+		http.Error(w, `{"error":"unsupported_media_type"}`, http.StatusUnsupportedMediaType)
+		return
+	}
 	start := time.Now()
 	captureOwner := s.demoCaptureHandle(w, r)
 
@@ -1380,6 +1390,13 @@ async function submitRequest(ev){
 document.getElementById('request-form').addEventListener('submit', submitRequest);
 </script>
 </body></html>`
+
+// isJSONContentType reports whether a Content-Type header names
+// application/json (parameters such as charset are allowed).
+func isJSONContentType(v string) bool {
+	mt, _, err := mime.ParseMediaType(v)
+	return err == nil && mt == "application/json"
+}
 
 // rateLimitKey folds sub-addressing ("user+tag@example.org") so the per-email
 // cap cannot be dodged — nor a victim's inbox flooded — by varying the tag.
