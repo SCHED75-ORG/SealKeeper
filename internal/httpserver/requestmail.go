@@ -96,7 +96,8 @@ func (s *Server) sendRevealMail(ctx context.Context, sender mailer.Sender, email
 	}()
 }
 
-// WaitMail blocks until every background reveal mail has been handed to
+// WaitMail blocks until every background mail (reveal links and
+// post-consultation notices) has been handed to
 // the relay (or failed), or ctx ends. Used at shutdown and by tests.
 func (s *Server) WaitMail(ctx context.Context) {
 	done := make(chan struct{})
