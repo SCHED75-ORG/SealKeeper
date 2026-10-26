@@ -17,16 +17,20 @@ import (
 // Design (SK-19):
 //
 //   - Push is non-blocking: the request pipeline never waits on a SIEM.
-//   - Two lanes. Events an unauthenticated caller can generate at will
-//     (request.*, token.*, mail.*, reveal.*, session.*) go to the *bulk*
-//     lane; everything else — admin.*, smtp.*, policy.*, integration.*,
-//     domain.*, unknown types — goes to the *security* lane. Each lane has
-//     its own bounded buffer and the security lane is always drained first,
-//     so a flood of request.rate_limited can fill and drop its own lane but
-//     can neither evict nor delay admin.login_failed. The security lane is
-//     4x larger; it is still bounded so a pathological admin.* storm cannot
-//     exhaust memory.
-//   - One worker goroutine and one pair of bounded queues *per sink*. A
+//   - Three lanes, drained in strict priority order. Events from the
+//     public flow (request.*, token.*, mail.*, reveal.*, session.*) go to
+//     the *bulk* lane. Security events an anonymous caller can still emit
+//     at will (admin.login_failed: a rate-limited POST /admin/login costs
+//     no credential and no bcrypt) go to the *anonymous* lane. Everything
+//     else — events emitted after authentication (admin.created, smtp.*,
+//     policy.*, integration.*, domain.*, …) and unknown types — goes to the
+//     *security* lane. Each lane has its own bounded buffer, so a flood can
+//     fill and drop only its own lane: request.rate_limited can neither
+//     evict nor delay admin.login_failed, and a login_failed flood can
+//     neither evict nor delay admin.created. The security lane is 4x larger
+//     than bulk and the anonymous lane 2x; all are bounded so a
+//     pathological storm cannot exhaust memory.
+//   - One worker goroutine and one set of bounded queues *per sink*. A
 //     slow or black-holed sink backs up and drops only its own queue; the
 //     other sinks keep delivering. Each Send is bounded by the per-send
 //     timeout (context) on top of the sink's own client timeout.
@@ -44,8 +48,7 @@ type Dispatcher struct {
 	bufSize    int
 	pol        NetPolicy
 
-	secCh  chan Event
-	bulkCh chan Event
+	intake [numLanes]chan Event
 
 	wg     sync.WaitGroup
 	cancel context.CancelFunc
@@ -58,28 +61,40 @@ type Dispatcher struct {
 	lastDropLog  atomic.Int64 // unix nanos
 
 	// Metrics (atomic so they're readable from any goroutine without lock).
-	dropsSecurity atomic.Int64
-	dropsBulk     atomic.Int64
-	delivered     atomic.Int64
-	failed        atomic.Int64
+	drops     [numLanes]atomic.Int64
+	delivered atomic.Int64
+	failed    atomic.Int64
 
 	descDelivered *prometheus.Desc
 	descFailed    *prometheus.Desc
 	descDropped   *prometheus.Desc
 }
 
+// Lanes, highest priority first.
 const (
-	laneSecurity = "security"
-	laneBulk     = "bulk"
+	laneSecurity = iota
+	laneAnonymous
+	laneBulk
+	numLanes
+)
 
+var laneNames = [numLanes]string{"security", "anonymous", "bulk"}
+
+// anonymousEvents are the security-relevant event types a caller with no
+// credential and no session can trigger in volume.
+var anonymousEvents = map[string]bool{
+	"admin.login_failed": true,
+}
+
+const (
 	// EventDropsNotice is the synthetic event a sink receives after it
 	// recovers from a period where its queue overflowed.
 	EventDropsNotice = "integration.events_dropped"
 )
 
 // NewDispatcher returns a Dispatcher bound to a Repo. `bufSize` (default
-// 256) sizes every bulk queue; security queues get 4x. `timeoutPer`
-// (default 10s) bounds each individual sink delivery.
+// 256) sizes every bulk queue; security queues get 4x and anonymous queues
+// 2x. `timeoutPer` (default 10s) bounds each individual sink delivery.
 func NewDispatcher(repo *Repo, logger *slog.Logger, bufSize int, timeoutPer time.Duration) *Dispatcher {
 	if bufSize <= 0 {
 		bufSize = 256
@@ -92,8 +107,7 @@ func NewDispatcher(repo *Repo, logger *slog.Logger, bufSize int, timeoutPer time
 		logger:       logger,
 		timeoutPer:   timeoutPer,
 		bufSize:      bufSize,
-		secCh:        make(chan Event, 4*bufSize),
-		bulkCh:       make(chan Event, bufSize),
+		intake:       newLanes(bufSize),
 		refreshEvery: 2 * time.Second,
 		dropLogEvery: 30 * time.Second,
 		workers:      map[int64]*sinkWorker{},
@@ -104,6 +118,15 @@ func NewDispatcher(repo *Repo, logger *slog.Logger, bufSize int, timeoutPer time
 		descDropped: prometheus.NewDesc("sealkeeper_integrations_events_dropped_total",
 			"Audit events dropped because a dispatcher queue was full.", []string{"lane"}, nil),
 	}
+}
+
+// newLanes allocates one bounded queue per lane.
+func newLanes(bufSize int) [numLanes]chan Event {
+	var q [numLanes]chan Event
+	q[laneSecurity] = make(chan Event, 4*bufSize)
+	q[laneAnonymous] = make(chan Event, 2*bufSize)
+	q[laneBulk] = make(chan Event, bufSize)
+	return q
 }
 
 // WithNetPolicy sets the outbound address policy (SSRF guard) applied to
@@ -141,42 +164,52 @@ func IsBulkEvent(eventType string) bool {
 	return false
 }
 
+func laneIndex(eventType string) int {
+	switch {
+	case IsBulkEvent(eventType):
+		return laneBulk
+	case anonymousEvents[eventType]:
+		return laneAnonymous
+	default:
+		return laneSecurity
+	}
+}
+
+// LaneOf names the dispatcher lane an event type is queued in: "bulk",
+// "anonymous" or "security" (the label of the dropped-events metric).
+func LaneOf(eventType string) string { return laneNames[laneIndex(eventType)] }
+
 // Push enqueues `ev` for delivery. Non-blocking — when the event's lane is
 // full the event is dropped and counted.
 func (d *Dispatcher) Push(ev Event) {
-	if IsBulkEvent(ev.EventType) {
-		select {
-		case d.bulkCh <- ev:
-		default:
-			d.noteDrop(laneBulk, "", ev)
-		}
-		return
-	}
+	lane := laneIndex(ev.EventType)
 	select {
-	case d.secCh <- ev:
+	case d.intake[lane] <- ev:
 	default:
-		d.noteDrop(laneSecurity, "", ev)
+		d.noteDrop(lane, "", ev)
 	}
 }
 
 // Stats snapshots the lifetime counters.
 type Stats struct {
-	Delivered     int64
-	Failed        int64
-	Drops         int64 // DropsSecurity + DropsBulk
-	DropsSecurity int64
-	DropsBulk     int64
+	Delivered      int64
+	Failed         int64
+	Drops          int64 // DropsSecurity + DropsAnonymous + DropsBulk
+	DropsSecurity  int64
+	DropsAnonymous int64
+	DropsBulk      int64
 }
 
 // Stats returns a snapshot.
 func (d *Dispatcher) Stats() Stats {
-	sec, bulk := d.dropsSecurity.Load(), d.dropsBulk.Load()
+	sec, anon, bulk := d.drops[laneSecurity].Load(), d.drops[laneAnonymous].Load(), d.drops[laneBulk].Load()
 	return Stats{
-		Delivered:     d.delivered.Load(),
-		Failed:        d.failed.Load(),
-		Drops:         sec + bulk,
-		DropsSecurity: sec,
-		DropsBulk:     bulk,
+		Delivered:      d.delivered.Load(),
+		Failed:         d.failed.Load(),
+		Drops:          sec + anon + bulk,
+		DropsSecurity:  sec,
+		DropsAnonymous: anon,
+		DropsBulk:      bulk,
 	}
 }
 
@@ -191,16 +224,14 @@ func (d *Dispatcher) Describe(ch chan<- *prometheus.Desc) {
 func (d *Dispatcher) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(d.descDelivered, prometheus.CounterValue, float64(d.delivered.Load()))
 	ch <- prometheus.MustNewConstMetric(d.descFailed, prometheus.CounterValue, float64(d.failed.Load()))
-	ch <- prometheus.MustNewConstMetric(d.descDropped, prometheus.CounterValue, float64(d.dropsSecurity.Load()), laneSecurity)
-	ch <- prometheus.MustNewConstMetric(d.descDropped, prometheus.CounterValue, float64(d.dropsBulk.Load()), laneBulk)
+	for lane := range d.drops {
+		ch <- prometheus.MustNewConstMetric(d.descDropped, prometheus.CounterValue,
+			float64(d.drops[lane].Load()), laneNames[lane])
+	}
 }
 
-func (d *Dispatcher) noteDrop(lane, sink string, ev Event) {
-	if lane == laneSecurity {
-		d.dropsSecurity.Add(1)
-	} else {
-		d.dropsBulk.Add(1)
-	}
+func (d *Dispatcher) noteDrop(lane int, sink string, ev Event) {
+	d.drops[lane].Add(1)
 	if d.logger == nil {
 		return
 	}
@@ -212,43 +243,57 @@ func (d *Dispatcher) noteDrop(lane, sink string, ev Event) {
 		return
 	}
 	d.logger.Warn("integrations.Dispatcher: dropping events — queue full",
-		"lane", lane, "sink", sink, "event_type", ev.EventType,
-		"dropped_security_total", d.dropsSecurity.Load(),
-		"dropped_bulk_total", d.dropsBulk.Load())
+		"lane", laneNames[lane], "sink", sink, "event_type", ev.EventType,
+		"dropped_security_total", d.drops[laneSecurity].Load(),
+		"dropped_anonymous_total", d.drops[laneAnonymous].Load(),
+		"dropped_bulk_total", d.drops[laneBulk].Load())
 }
 
-// run is the router: drains the intake lanes (security first) and hands
-// each event to the matching sink workers without waiting on them.
-func (d *Dispatcher) run(ctx context.Context) {
-	defer d.wg.Done()
-	for {
-		// Strict priority: take a security event whenever one is waiting.
+// recvByPriority blocks until an event is waiting and returns it with its
+// lane, always taking from the highest-priority non-empty lane. ok is false
+// once ctx is done or stop is closed (a nil stop never fires).
+func recvByPriority(ctx context.Context, stop <-chan struct{}, q *[numLanes]chan Event) (Event, int, bool) {
+	for lane := range q {
 		select {
-		case <-ctx.Done():
-			return
-		case ev := <-d.secCh:
-			d.route(ctx, ev, true)
-			continue
+		case ev := <-q[lane]:
+			return ev, lane, true
 		default:
 		}
-		select {
-		case <-ctx.Done():
-			return
-		case ev := <-d.secCh:
-			d.route(ctx, ev, true)
-		case ev := <-d.bulkCh:
-			d.route(ctx, ev, false)
-		}
+	}
+	select {
+	case <-ctx.Done():
+		return Event{}, 0, false
+	case <-stop:
+		return Event{}, 0, false
+	case ev := <-q[laneSecurity]:
+		return ev, laneSecurity, true
+	case ev := <-q[laneAnonymous]:
+		return ev, laneAnonymous, true
+	case ev := <-q[laneBulk]:
+		return ev, laneBulk, true
 	}
 }
 
-func (d *Dispatcher) route(ctx context.Context, ev Event, security bool) {
+// run is the router: drains the intake lanes in priority order and hands
+// each event to the matching sink workers without waiting on them.
+func (d *Dispatcher) run(ctx context.Context) {
+	defer d.wg.Done()
+	for ctx.Err() == nil {
+		ev, lane, ok := recvByPriority(ctx, nil, &d.intake)
+		if !ok {
+			return
+		}
+		d.route(ctx, ev, lane)
+	}
+}
+
+func (d *Dispatcher) route(ctx context.Context, ev Event, lane int) {
 	d.refresh(ctx)
 	for _, w := range d.workers {
 		if !w.matches(ev.EventType) {
 			continue
 		}
-		w.enqueue(d, ev, security)
+		w.enqueue(d, ev, lane)
 	}
 }
 
@@ -292,8 +337,7 @@ func (d *Dispatcher) refresh(ctx context.Context) {
 			sink:      sink,
 			filters:   f,
 			filtersOK: ferr == nil,
-			sec:       make(chan Event, 4*d.bufSize),
-			bulk:      make(chan Event, d.bufSize),
+			queues:    newLanes(d.bufSize),
 			stop:      make(chan struct{}),
 		}
 		d.workers[row.ID] = w
@@ -318,13 +362,12 @@ type sinkWorker struct {
 	sink      Sink
 	filters   Filters
 	filtersOK bool
-	sec, bulk chan Event
+	queues    [numLanes]chan Event
 	stop      chan struct{}
 	stopOnce  sync.Once
 
-	// Drops since the last notice delivered to this sink.
-	pendingSec  atomic.Int64
-	pendingBulk atomic.Int64
+	// Drops per lane since the last notice delivered to this sink.
+	pending [numLanes]atomic.Int64
 }
 
 func (w *sinkWorker) matches(eventType string) bool {
@@ -333,21 +376,12 @@ func (w *sinkWorker) matches(eventType string) bool {
 
 func (w *sinkWorker) retire() { w.stopOnce.Do(func() { close(w.stop) }) }
 
-func (w *sinkWorker) enqueue(d *Dispatcher, ev Event, security bool) {
-	if security {
-		select {
-		case w.sec <- ev:
-		default:
-			w.pendingSec.Add(1)
-			d.noteDrop(laneSecurity, w.sink.Name(), ev)
-		}
-		return
-	}
+func (w *sinkWorker) enqueue(d *Dispatcher, ev Event, lane int) {
 	select {
-	case w.bulk <- ev:
+	case w.queues[lane] <- ev:
 	default:
-		w.pendingBulk.Add(1)
-		d.noteDrop(laneBulk, w.sink.Name(), ev)
+		w.pending[lane].Add(1)
+		d.noteDrop(lane, w.sink.Name(), ev)
 	}
 }
 
@@ -358,23 +392,10 @@ func (w *sinkWorker) run(ctx context.Context, d *Dispatcher) {
 			c.closeIdle()
 		}
 	}()
-	for {
-		var ev Event
-		select {
-		case <-ctx.Done():
+	for ctx.Err() == nil {
+		ev, _, ok := recvByPriority(ctx, w.stop, &w.queues)
+		if !ok {
 			return
-		case <-w.stop:
-			return
-		case ev = <-w.sec:
-		default:
-			select {
-			case <-ctx.Done():
-				return
-			case <-w.stop:
-				return
-			case ev = <-w.sec:
-			case ev = <-w.bulk:
-			}
 		}
 		if d.send(ctx, w.sink, ev) {
 			w.flushDropNotice(ctx, d, ev)
@@ -384,19 +405,26 @@ func (w *sinkWorker) run(ctx context.Context, d *Dispatcher) {
 
 // flushDropNotice tells a recovered sink how many events it missed.
 func (w *sinkWorker) flushDropNotice(ctx context.Context, d *Dispatcher, last Event) {
-	sec, bulk := w.pendingSec.Swap(0), w.pendingBulk.Swap(0)
-	if sec == 0 && bulk == 0 {
+	var counts [numLanes]int64
+	var total int64
+	for lane := range counts {
+		counts[lane] = w.pending[lane].Swap(0)
+		total += counts[lane]
+	}
+	if total == 0 {
 		return
 	}
 	details, _ := json.Marshal(map[string]any{
-		"dropped_security": sec,
-		"dropped_bulk":     bulk,
+		"dropped_security":  counts[laneSecurity],
+		"dropped_anonymous": counts[laneAnonymous],
+		"dropped_bulk":      counts[laneBulk],
 	})
 	notice := NewEvent(0, EventDropsNotice, "system", w.sink.Name(), details,
 		"", last.InstanceDomain, time.Now())
 	if !d.send(ctx, w.sink, notice) {
-		w.pendingSec.Add(sec)
-		w.pendingBulk.Add(bulk)
+		for lane, n := range counts {
+			w.pending[lane].Add(n)
+		}
 	}
 }
 
