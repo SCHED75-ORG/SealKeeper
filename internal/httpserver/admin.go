@@ -992,6 +992,7 @@ func (s *Server) handleAdminPolicies(w http.ResponseWriter, r *http.Request) {
 		"Domains":    doms,
 		"CSRF":       sess.CSRFToken,
 		"Error":      querySlug(r, "err"),
+		"Details":    r.URL.Query().Get("details"),
 		"OK":         querySlug(r, "ok"),
 	})
 }
@@ -1021,6 +1022,9 @@ func (s *Server) handleAdminPolicyAdd(w http.ResponseWriter, r *http.Request) {
 	}
 	p, err := s.policies.Create(r.Context(), in, &a.ID)
 	switch {
+	case errors.Is(err, policies.ErrBelowFloor):
+		http.Redirect(w, r, "/admin/policies?err=below_floor&details="+url.QueryEscape(err.Error()), http.StatusSeeOther)
+		return
 	case errors.Is(err, policies.ErrInvalidShape):
 		http.Redirect(w, r, "/admin/policies?err=invalid&details="+url.QueryEscape(err.Error()), http.StatusSeeOther)
 		return
@@ -1099,6 +1103,12 @@ func (s *Server) handleAdminPolicySave(w http.ResponseWriter, r *http.Request) {
 	}
 	err := s.policies.Update(r.Context(), id, in)
 	switch {
+	case errors.Is(err, policies.ErrBelowFloor):
+		http.Redirect(w, r, fmt.Sprintf("/admin/policies/%d/edit?err=below_floor&details=%s", id, url.QueryEscape(err.Error())), http.StatusSeeOther)
+		return
+	case errors.Is(err, policies.ErrNotFound):
+		http.Redirect(w, r, "/admin/policies?err=not_found", http.StatusSeeOther)
+		return
 	case errors.Is(err, policies.ErrInvalidShape):
 		http.Redirect(w, r, fmt.Sprintf("/admin/policies/%d/edit?err=invalid&details=%s", id, url.QueryEscape(err.Error())), http.StatusSeeOther)
 		return
@@ -2614,7 +2624,7 @@ const adminDomainsTpl = `{{define "domains.html"}}{{template "header" .}}
 const adminPoliciesTpl = `{{define "policies.html"}}{{template "header" .}}
 <main>
 <h2>Policies</h2>
-{{ if .Error }}<div class="err">{{ .Error }}</div>{{ end }}
+{{ if .Error }}<div class="err">{{ .Error }}{{ if .Details }} — <code>{{ .Details }}</code>{{ end }}</div>{{ end }}
 {{ if .OK }}<div style="background:#dcfce7;color:#166534;padding:0.5rem 1rem;border-radius:4px;margin-bottom:1rem">{{ .OK }}</div>{{ end }}
 <p>One policy per (domain, ANSSI level). When no policy is configured for an email's bucket the public flow drops the request silently (FR-B.13). Policies must reference an allowed domain — add one in <a href="/admin/domains">Domains</a> first.</p>
 
@@ -2663,16 +2673,15 @@ const adminPoliciesTpl = `{{define "policies.html"}}{{template "header" .}}
   <label for="generator">Generator</label>
   <select id="generator" name="generator" required>
     <option value="G1">G1 — citation + transforms (B1 target)</option>
-    <option value="G2" selected>G2 — Diceware (B2 target)</option>
-    <option value="G3">G3 — random alphanumeric (B3 target)</option>
+    <option value="G2">G2 — Diceware (B2 target)</option>
+    <option value="G3" selected>G3 — random alphanumeric (B3 target)</option>
   </select>
   <label for="params_json">Parameters (JSON)</label>
   <textarea id="params_json" name="params_json" rows="8" style="width:100%;font-family:ui-monospace,monospace;padding:0.5rem">{
-  "library": ["alpha","beta","gamma","delta","epsilon","zeta","eta","theta"],
-  "numberOfWords": 6,
-  "separatorOptions": ["-","_",".","/","+",":","|",";",",","~"]
+  "length": 20,
+  "excludeAmbiguous": true
 }</textarea>
-  <small style="display:block;color:#6b7280;margin-top:0.25rem">PolicyDescriptor parameters per module A. Validated as a JSON object.</small>
+  <small style="display:block;color:#6b7280;margin-top:0.25rem">PolicyDescriptor parameters per module A. Saving is refused when the guaranteed entropy is below the level's ANSSI floor (B1 ≥ 50, B2 ≥ 80, B3 ≥ 100 bits).</small>
 
   <fieldset id="entropy-preview" data-testid="entropy-preview"
     style="margin-top:1rem;padding:0.75rem 1rem;border:1px solid #d1d5db;border-radius:4px;background:#f9fafb">
@@ -2817,8 +2826,8 @@ const adminPoliciesTpl = `{{define "policies.html"}}{{template "header" .}}
     var thresholds = { B1: 50, B2: 80, B3: 100 };
     if (target in thresholds && report.expectedBits < thresholds[target]) {
       warn.style.display = '';
-      warn.textContent = 'Expected entropy is below the configured ' + target +
-        ' threshold (' + thresholds[target] + ' bits). You can save anyway — SealKeeper advises, the admin decides.';
+      warn.textContent = 'Guaranteed entropy is below the ' + target + ' floor (' + thresholds[target] +
+        ' bits): the server will refuse to save this policy. Strengthen the parameters or pick a lower level.';
     } else {
       warn.style.display = 'none';
     }
@@ -4240,8 +4249,9 @@ const adminPolicyEditTpl = `{{define "policy_edit.html"}}{{template "header" .}}
     {{ $current := .Policy.DomainID }}
     {{ range .Domains }}<option value="{{ .ID }}" {{ if eq .ID $current }}selected{{ end }}>{{ .Name }}</option>{{ end }}
   </select>
-  <label for="anssi_level">ANSSI level</label>
-  <select id="anssi_level" name="anssi_level" required>
+  <label for="anssi_level">ANSSI level <small style="font-weight:400;color:var(--stone)">(fixed: delete and re-create the policy to change it)</small></label>
+  <input type="hidden" name="anssi_level" value="{{ .Policy.ANSSILevel }}">
+  <select id="anssi_level" disabled>
     <option value="B1" {{ if eq (printf "%s" .Policy.ANSSILevel) "B1" }}selected{{ end }}>B1 — default (every user not elevated)</option>
     <option value="B2" {{ if eq (printf "%s" .Policy.ANSSILevel) "B2" }}selected{{ end }}>B2 — elevated managers</option>
     <option value="B3" {{ if eq (printf "%s" .Policy.ANSSILevel) "B3" }}selected{{ end }}>B3 — elevated system admins</option>
@@ -4256,7 +4266,7 @@ const adminPolicyEditTpl = `{{define "policy_edit.html"}}{{template "header" .}}
   </select>
   <label for="params_json">Parameters (JSON)</label>
   <textarea id="params_json" name="params_json" rows="10" style="width:100%;font-family:var(--font-mono);padding:0.5rem">{{ .ParamsJSON }}</textarea>
-  <small style="display:block;color:var(--stone);margin-top:0.25rem">PolicyDescriptor parameters per module A. Saved as-is (validated for JSON-ness).</small>
+  <small style="display:block;color:var(--stone);margin-top:0.25rem">PolicyDescriptor parameters per module A. Saving is refused when the guaranteed entropy is below the level's ANSSI floor (B1 ≥ 50, B2 ≥ 80, B3 ≥ 100 bits).</small>
 
   <fieldset id="entropy-preview" data-testid="entropy-preview"
     style="margin-top:1rem;padding:0.75rem 1rem;border:1px solid var(--rule);border-radius:2px;background:var(--bg-elev)">
@@ -4385,8 +4395,8 @@ const adminPolicyEditTpl = `{{define "policy_edit.html"}}{{template "header" .}}
     var thresholds = { B1: 50, B2: 80, B3: 100 };
     if (target in thresholds && report.expectedBits < thresholds[target]) {
       warn.style.display = '';
-      warn.textContent = 'Expected entropy is below the configured ' + target +
-        ' threshold (' + thresholds[target] + ' bits). You can save anyway — SealKeeper advises, the admin decides.';
+      warn.textContent = 'Guaranteed entropy is below the ' + target + ' floor (' + thresholds[target] +
+        ' bits): the server will refuse to save this policy. Strengthen the parameters or pick a lower level.';
     } else {
       warn.style.display = 'none';
     }
