@@ -44,21 +44,30 @@
 	# Compression — module H §3.3
 	encode gzip zstd
 
-	# Long-lived caching for hashed static assets; the JS bundle URL is
-	# expected to be fingerprinted so this is safe.
-	@static path /static/*
+	# Static assets (SK-36). The generation bundle is served from the fixed,
+	# un-hashed URL /static/sealkeeper-generation.umd.js without SRI, and it is
+	# the code that generates every password. It must therefore NEVER be
+	# cached as immutable: `no-cache` lets browsers keep a copy but forces a
+	# conditional revalidation on each use, so a generator fix reaches every
+	# client on the next page load. /static/branding/* keeps the server's own
+	# short max-age. `defer` applies the value after the upstream response.
+	@static {
+		path /static/*
+		not path /static/branding/*
+	}
 	header @static {
-		Cache-Control "public, max-age=31536000, immutable"
+		Cache-Control "no-cache"
+		defer
 	}
 
-	# Security headers — see module E (Security audit) for the rationale.
+	# Security headers. SealKeeper sets Content-Security-Policy,
+	# Strict-Transport-Security, X-Frame-Options, Referrer-Policy and
+	# X-Content-Type-Options itself — Caddy passes them through unchanged
+	# rather than sending duplicate or conflicting values (module E).
 	header {
-		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
-		X-Content-Type-Options    "nosniff"
-		X-Frame-Options           "DENY"
-		Referrer-Policy           "no-referrer"
 		# Permissions-Policy: disable powerful APIs the app does not use.
-		Permissions-Policy        "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()"
+		# `?` only sets it when the upstream response has none.
+		?Permissions-Policy "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()"
 		# Caddy adds Server: Caddy by default; hide it to reduce reconnaissance.
 		-Server
 	}

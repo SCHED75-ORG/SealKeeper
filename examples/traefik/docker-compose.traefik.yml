@@ -126,14 +126,23 @@ services:
       - "traefik.http.routers.sealkeeper.tls=true"
       - "traefik.http.routers.sealkeeper.tls.certresolver=le"
       - "traefik.http.services.sealkeeper.loadbalancer.server.port=8443"
-      # Security headers — Traefik middleware
-      - "traefik.http.middlewares.sealkeeper-headers.headers.stsSeconds=31536000"
-      - "traefik.http.middlewares.sealkeeper-headers.headers.stsIncludeSubdomains=true"
-      - "traefik.http.middlewares.sealkeeper-headers.headers.stsPreload=true"
-      - "traefik.http.middlewares.sealkeeper-headers.headers.contentTypeNosniff=true"
-      - "traefik.http.middlewares.sealkeeper-headers.headers.frameDeny=true"
-      - "traefik.http.middlewares.sealkeeper-headers.headers.referrerPolicy=no-referrer"
+      # Security headers — SealKeeper itself sets CSP, HSTS, X-Frame-Options,
+      # Referrer-Policy and X-Content-Type-Options; Traefik passes them
+      # through untouched. Only Permissions-Policy is added here.
+      - "traefik.http.middlewares.sealkeeper-headers.headers.permissionsPolicy=accelerometer=(), camera=(),
+        geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()"
       - "traefik.http.routers.sealkeeper.middlewares=sealkeeper-headers@docker"
+      # /static/* (SK-36): the generation bundle has a fixed, un-hashed URL and
+      # no SRI, so browsers must revalidate it on every use — a generator fix
+      # has to reach clients immediately. /static/branding/ keeps the
+      # server's own short max-age.
+      - "traefik.http.routers.sealkeeper-static.rule=Host(`${SK_DOMAIN:?SK_DOMAIN required}`) && PathPrefix(`/static/`) && !PathPrefix(`/static/branding/`)"
+      - "traefik.http.routers.sealkeeper-static.entrypoints=websecure"
+      - "traefik.http.routers.sealkeeper-static.tls=true"
+      - "traefik.http.routers.sealkeeper-static.tls.certresolver=le"
+      - "traefik.http.routers.sealkeeper-static.service=sealkeeper"
+      - "traefik.http.middlewares.sealkeeper-static-cache.headers.customResponseHeaders.Cache-Control=no-cache"
+      - "traefik.http.routers.sealkeeper-static.middlewares=sealkeeper-headers@docker,sealkeeper-static-cache@docker"
 
 volumes:
   sealkeeper-data:
