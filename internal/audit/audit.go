@@ -57,15 +57,15 @@
 // anchor) commits to the last legacy entry_hash, so rewriting them breaks
 // the keyed part of the chain.
 //
-// Sealing: the anchor starts unsealed (head_mac = ""). The first Append
-// seals it on an empty log; SealAnchor seals a freshly migrated legacy
-// log, but only when told that the calling process itself just applied
-// migration 0014 (storage MigrateUpApplied reports it). That is the only
-// path that accepts an unsealed anchor in front of existing rows. At any
-// other time (an ordinary boot, Append) the state is indistinguishable
-// from a keyless downgrade — rows rehashed as v1, legacy_until raised and
-// the anchor reset — so it is treated as tampering and recorded in
-// broken_seq.
+// Sealing: the anchor starts unsealed (head_mac = ""). SealCutover seals a
+// freshly migrated legacy log inside the very transaction that applies
+// migration 0014 (storage MigrateUpCutover), so the schema change and the
+// seal commit together or not at all. That is the only path that accepts
+// an unsealed anchor in front of existing rows. At any other time (an
+// ordinary boot, Append, SealAnchor) the state is indistinguishable from a
+// keyless downgrade — rows rehashed as v1, legacy_until raised and the
+// anchor reset — so it is treated as tampering and recorded in
+// broken_seq. On an empty log the first Append or SealAnchor seals it.
 //
 // Residual risk, by design of a symmetric scheme: an attacker who wipes the
 // whole log and resets the anchor to its unsealed state leaves an empty,
@@ -118,8 +118,8 @@ const (
 	KeySize = 32
 
 	// HeadMigration is the schema version that creates audit_head and
-	// records the legacy cut-over (see SealAnchor).
-	HeadMigration int64 = 14
+	// records the legacy cut-over (see SealCutover).
+	HeadMigration = storage.AuditHeadMigration
 
 	entryTag = "sealkeeper-audit-entry-v2"
 	headTag  = "sealkeeper-audit-head-v1"
@@ -271,12 +271,12 @@ func (r *Repo) Append(ctx context.Context, eventType, actor, target string, deta
 // already sealed anchor is left untouched, so a tampered anchor is never
 // re-blessed.
 //
-// legacyMigrated must be true only when this very process just applied
-// migration HeadMigration (see the package comment): that is the one moment
-// an unsealed anchor in front of existing rows is the genuine cut-over
-// state. Any other time the same state is what someone with database
-// write access but no key leaves behind after rewriting the log as v1 and
-// resetting the anchor, so it is sealed with the break recorded instead.
+// legacyMigrated may be true only right after migration HeadMigration was
+// applied without SealCutover, with nothing else run since (tests do
+// this). Any other time an unsealed anchor in front of existing rows is
+// what someone with database write access but no key leaves behind after
+// rewriting the log as v1 and resetting the anchor, so it is sealed with
+// the break recorded instead.
 func (r *Repo) SealAnchor(ctx context.Context, legacyMigrated bool) error {
 	if len(r.key) == 0 {
 		return fmt.Errorf("audit.SealAnchor: %w", ErrNoKey)
@@ -287,17 +287,55 @@ func (r *Repo) SealAnchor(ctx context.Context, legacyMigrated bool) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	sealed, err := r.sealTx(ctx, tx, legacyMigrated)
+	if err != nil {
+		return fmt.Errorf("audit.SealAnchor: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("audit.SealAnchor: commit: %w", err)
+	}
+	r.raiseFloor(sealed)
+	return nil
+}
+
+// SealCutover is the storage.CutoverFunc for migration HeadMigration: it
+// seals the fresh anchor over the legacy rows inside the transaction that
+// creates it, so the genuine cut-over state (an unsealed anchor in front
+// of v1 rows) never outlives that transaction. A crash, a timeout or a
+// failing seal rolls 0014 back for the next run to retry; a later
+// migration failing leaves 0014 committed and already sealed.
+func (r *Repo) SealCutover(ctx context.Context, tx *sql.Tx) error {
+	if len(r.key) == 0 {
+		return fmt.Errorf("audit.SealCutover: %w", ErrNoKey)
+	}
+	if err := r.lockChain(ctx, tx); err != nil {
+		return fmt.Errorf("audit.SealCutover: %w", err)
+	}
+	sealed, err := r.sealTx(ctx, tx, true)
+	if err != nil {
+		return fmt.Errorf("audit.SealCutover: %w", err)
+	}
+	// Raised before the caller commits: a rollback leaves the anchor
+	// unsealed (never MAC-valid) and the tail untouched, so the mark
+	// cannot flag a genuine anchor.
+	r.raiseFloor(sealed)
+	return nil
+}
+
+// sealTx seals an unsealed anchor over the current tail within tx and
+// returns the sequence it sealed (0 when the anchor was already sealed).
+func (r *Repo) sealTx(ctx context.Context, tx *sql.Tx, legacyMigrated bool) (int64, error) {
 	h, err := readHead(ctx, tx)
 	if err != nil {
-		return fmt.Errorf("audit.SealAnchor: read head: %w", err)
+		return 0, fmt.Errorf("read head: %w", err)
 	}
 	if h.present && h.mac != "" {
 		r.observe(h)
-		return nil
+		return 0, nil
 	}
 	t, err := readTail(ctx, tx)
 	if err != nil {
-		return fmt.Errorf("audit.SealAnchor: read tail: %w", err)
+		return 0, fmt.Errorf("read tail: %w", err)
 	}
 	next := head{
 		present:     true,
@@ -307,13 +345,9 @@ func (r *Repo) SealAnchor(ctx context.Context, legacyMigrated bool) error {
 		broken:      r.anchorBreak(h, t, 0, legacyMigrated),
 	}
 	if err := r.writeHead(ctx, tx, next); err != nil {
-		return fmt.Errorf("audit.SealAnchor: %w", err)
+		return 0, err
 	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("audit.SealAnchor: commit: %w", err)
-	}
-	r.raiseFloor(t.seq)
-	return nil
+	return t.seq, nil
 }
 
 // Count returns the number of rows currently in the log.
@@ -509,13 +543,21 @@ func (r *Repo) lockedTx(ctx context.Context) (*sql.Tx, error) {
 	if err != nil {
 		return nil, fmt.Errorf("begin: %w", err)
 	}
-	if storage.IsPostgres(r.db) {
-		if _, err := tx.ExecContext(ctx, `LOCK TABLE audit_log IN EXCLUSIVE MODE`); err != nil {
-			_ = tx.Rollback()
-			return nil, fmt.Errorf("lock: %w", err)
-		}
+	if err := r.lockChain(ctx, tx); err != nil {
+		_ = tx.Rollback()
+		return nil, err
 	}
 	return tx, nil
+}
+
+// lockChain takes the Postgres writer lock described at lockedTx.
+func (r *Repo) lockChain(ctx context.Context, tx *sql.Tx) error {
+	if storage.IsPostgres(r.db) {
+		if _, err := tx.ExecContext(ctx, `LOCK TABLE audit_log IN EXCLUSIVE MODE`); err != nil {
+			return fmt.Errorf("lock: %w", err)
+		}
+	}
+	return nil
 }
 
 func readHead(ctx context.Context, tx *sql.Tx) (head, error) {
