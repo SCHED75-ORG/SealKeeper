@@ -144,6 +144,7 @@ type Server struct {
 	// Constant-latency POST /api/v1/request (FR-B.13, see requestmail.go).
 	requestFloor time.Duration
 	mailSlots    chan struct{}
+	mailQueue    chan struct{}
 	mailWG       sync.WaitGroup
 
 	// sender is never nil — capture in eval, noop otherwise. /admin/smtp
@@ -230,6 +231,7 @@ func New(cfg config.Config, logger *slog.Logger) *Server {
 		loginPending:   newLoginPendingStore(5 * time.Minute),
 		requestFloor:   requestLatencyFloor,
 		mailSlots:      make(chan struct{}, mailWorkers),
+		mailQueue:      make(chan struct{}, mailQueueDepth),
 	}
 	s.storeSender(defaultSender)
 	return s
@@ -620,7 +622,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 	// FR-B.11..13 — apply rate limits BEFORE issuing anything. The hit is
 	// observable only via the audit log + Prometheus counter.
-	decision := s.limiter.Check(rateLimitKey(email), ip)
+	decision := s.limiter.Check(rateLimitKey(email), rateLimitIPKey(ip))
 	if !decision.Allowed {
 		s.rateHits.WithLabelValues(decision.Reason).Inc()
 		s.auditAppend(r.Context(), audit.EventRateLimited, email, decision.Reason, map[string]any{
@@ -850,6 +852,25 @@ func (s *Server) clientIP(r *http.Request) string {
 		}
 	}
 	return client.String()
+}
+
+// rateLimitIPv6Prefix is the IPv6 block one client is assumed to control:
+// a /64 is the usual end-site allocation, so keying on the /128 would let
+// a caller rotate source addresses past every per-IP limit (FR-B.12).
+const rateLimitIPv6Prefix = 64
+
+// rateLimitIPKey maps a client IP to its per-IP limiter key: IPv4 (and
+// IPv4-mapped IPv6) addresses as-is, native IPv6 folded to its /64.
+func rateLimitIPKey(ip string) string {
+	addr, err := netip.ParseAddr(ip)
+	if err != nil {
+		return ip
+	}
+	addr = addr.Unmap()
+	if addr.Is4() {
+		return addr.String()
+	}
+	return netip.PrefixFrom(addr.WithZone(""), rateLimitIPv6Prefix).Masked().String()
 }
 
 func (s *Server) isTrustedProxy(addr netip.Addr) bool {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"net/http"
 	"testing"
 	"time"
@@ -111,12 +112,38 @@ func TestMailQueueFullDropsAndAudits(t *testing.T) {
 	t.Parallel()
 	s, _, db := newModeServer(t, config.ModeProduction, false)
 	s.requestFloor = 0
-	s.mailSlots = make(chan struct{}) // no free worker
+	s.mailQueue = make(chan struct{}) // queue full
 	s.SetSender(&relaySender{sent: make(chan string, 1)})
 	if w := postRequest(s.Router(), "192.0.2.13:1000", "user@example.test"); w.Code != http.StatusAccepted {
 		t.Fatalf("status %d", w.Code)
 	}
 	if n := countAudit(t, db, "mail.send_failed"); n != 1 {
 		t.Fatalf("mail.send_failed audited %d times, want 1", n)
+	}
+}
+
+// Regression: with every worker busy the reveal mail was dropped at once,
+// so a burst of slow sends silently cost legitimate users their link.
+func TestMailWaitsForAFreeWorker(t *testing.T) {
+	t.Parallel()
+	s, _, db := newModeServer(t, config.ModeProduction, false)
+	s.requestFloor = 0
+	s.mailSlots = make(chan struct{}, 1)
+	relaySend := &relaySender{delay: 50 * time.Millisecond, sent: make(chan string, 3)}
+	s.SetSender(relaySend)
+	h := s.Router()
+	for i := 1; i <= 3; i++ {
+		if w := postRequest(h, fmt.Sprintf("192.0.2.%d:1000", 40+i), fmt.Sprintf("user%d@example.test", i)); w.Code != http.StatusAccepted {
+			t.Fatalf("status %d", w.Code)
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	s.WaitMail(ctx)
+	if got := len(relaySend.sent); got != 3 {
+		t.Errorf("relay received %d mails, want 3", got)
+	}
+	if n := countAudit(t, db, "mail.send_failed"); n != 0 {
+		t.Errorf("mail.send_failed audited %d times, want 0", n)
 	}
 }

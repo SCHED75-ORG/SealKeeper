@@ -236,7 +236,7 @@ func (s *Server) handleAdminLoginPost(w http.ResponseWriter, r *http.Request) {
 
 	email := strings.TrimSpace(r.FormValue("email"))
 	password := r.FormValue("password")
-	if !s.loginLimiter.Allow(s.clientIP(r)) {
+	if !s.loginLimiter.Allow(rateLimitIPKey(s.clientIP(r))) {
 		s.auditAppend(r.Context(), "admin.login_failed", email, "", map[string]any{"reason": "rate_limited"})
 		s.adminLoginError(w, r, "rate_limited")
 		return
