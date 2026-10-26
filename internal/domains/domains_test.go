@@ -3,19 +3,18 @@ package domains_test
 import (
 	"context"
 	"errors"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/sched75/sealkeeper/internal/domains"
 	"github.com/sched75/sealkeeper/internal/storage"
+	"github.com/sched75/sealkeeper/internal/storage/storagetest"
 )
 
 func newRepo(t *testing.T) (*domains.Repo, storage.Store) {
 	t.Helper()
-	dir := t.TempDir()
-	dsn := "sqlite://" + filepath.ToSlash(filepath.Join(dir, "d.db"))
+	dsn := storagetest.DSN(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	s, err := storage.Open(ctx, storage.Options{DSN: dsn})

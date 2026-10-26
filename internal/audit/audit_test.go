@@ -2,18 +2,17 @@ package audit_test
 
 import (
 	"context"
-	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/sched75/sealkeeper/internal/audit"
 	"github.com/sched75/sealkeeper/internal/storage"
+	"github.com/sched75/sealkeeper/internal/storage/storagetest"
 )
 
 func newRepo(t *testing.T) (*audit.Repo, storage.Store) {
 	t.Helper()
-	dir := t.TempDir()
-	dsn := "sqlite://" + filepath.ToSlash(filepath.Join(dir, "audit.db"))
+	dsn := storagetest.DSN(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

@@ -17,6 +17,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/sched75/sealkeeper/internal/storage"
 )
 
 // Token bit length. 256 bits is comfortably above the FR-B.18 floor (128 bits).
@@ -263,33 +265,4 @@ func nullable(s string) any {
 	return s
 }
 
-// rebind rewrites the `?` placeholders into the dialect's accepted form.
-// SQLite (modernc) and pgx/stdlib both accept `?` natively, but pgx prefers
-// `$N` numbered placeholders — rebind detects the driver and rewrites only
-// when needed.
-func rebind(db *sql.DB, query string) string {
-	if db == nil {
-		return query
-	}
-	// Compare the driver pointer. pgx/stdlib's Driver type lives in
-	// pgx/v5/stdlib; comparing string of reflect.Type is enough.
-	name := fmt.Sprintf("%T", db.Driver())
-	if !strings.Contains(name, "pgx") && !strings.Contains(name, "Driver") {
-		return query
-	}
-	// Only rewrite if we see pgx; SQLite accepts `?`.
-	if !strings.Contains(name, "pgx") {
-		return query
-	}
-	var b strings.Builder
-	idx := 1
-	for _, r := range query {
-		if r == '?' {
-			fmt.Fprintf(&b, "$%d", idx)
-			idx++
-			continue
-		}
-		b.WriteRune(r)
-	}
-	return b.String()
-}
+func rebind(db *sql.DB, query string) string { return storage.Rebind(db, query) }

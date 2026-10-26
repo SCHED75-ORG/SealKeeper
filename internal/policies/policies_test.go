@@ -3,7 +3,6 @@ package policies_test
 import (
 	"context"
 	"errors"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -11,6 +10,7 @@ import (
 	"github.com/sched75/sealkeeper/internal/elevations"
 	"github.com/sched75/sealkeeper/internal/policies"
 	"github.com/sched75/sealkeeper/internal/storage"
+	"github.com/sched75/sealkeeper/internal/storage/storagetest"
 )
 
 type rigs struct {
@@ -21,8 +21,7 @@ type rigs struct {
 
 func newRig(t *testing.T) rigs {
 	t.Helper()
-	dir := t.TempDir()
-	dsn := "sqlite://" + filepath.ToSlash(filepath.Join(dir, "p.db"))
+	dsn := storagetest.DSN(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	s, err := storage.Open(ctx, storage.Options{DSN: dsn})

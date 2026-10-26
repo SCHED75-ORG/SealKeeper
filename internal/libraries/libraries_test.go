@@ -11,6 +11,7 @@ import (
 
 	"github.com/sched75/sealkeeper/internal/libraries"
 	"github.com/sched75/sealkeeper/internal/storage"
+	"github.com/sched75/sealkeeper/internal/storage/storagetest"
 )
 
 // ----- Validator ------------------------------------------------------------
@@ -132,7 +133,7 @@ func TestValidateDictionaryWarnsBelowRecommendedSize(t *testing.T) {
 func newRepo(t *testing.T) *libraries.Repo {
 	t.Helper()
 	dir := t.TempDir()
-	dbDSN := "sqlite://" + filepath.ToSlash(filepath.Join(dir, "lib.db"))
+	dbDSN := storagetest.DSN(t)
 	storeDir := filepath.Join(dir, "store")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

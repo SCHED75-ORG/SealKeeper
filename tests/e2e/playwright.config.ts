@@ -77,8 +77,9 @@ export default defineConfig({
       SK_BASE_URL: BASE_URL,
       // Force an in-memory SQLite so the suite is hermetic on every OS and
       // the run leaves no artefacts behind. Real persistence is exercised
-      // by internal/storage tests against a temp file.
-      SK_DATABASE_URL: "sqlite://:memory:",
+      // by internal/storage tests against a temp file. SK_E2E_DATABASE_URL
+      // points the suite at a real Postgres instead (dialect parity check).
+      SK_DATABASE_URL: process.env.SK_E2E_DATABASE_URL ?? "sqlite://:memory:",
       // Pin the JS bundle path explicitly so the reveal-page tests can load
       // /static/sealkeeper-generation.umd.js even when the binary's cwd
       // resolution differs across OSes.

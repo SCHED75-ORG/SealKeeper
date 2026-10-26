@@ -3,7 +3,6 @@ package elevations_test
 import (
 	"context"
 	"errors"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -11,12 +10,12 @@ import (
 	"github.com/sched75/sealkeeper/internal/domains"
 	"github.com/sched75/sealkeeper/internal/elevations"
 	"github.com/sched75/sealkeeper/internal/storage"
+	"github.com/sched75/sealkeeper/internal/storage/storagetest"
 )
 
 func newRepos(t *testing.T) (*elevations.Repo, *domains.Repo) {
 	t.Helper()
-	dir := t.TempDir()
-	dsn := "sqlite://" + filepath.ToSlash(filepath.Join(dir, "e.db"))
+	dsn := storagetest.DSN(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	s, err := storage.Open(ctx, storage.Options{DSN: dsn})

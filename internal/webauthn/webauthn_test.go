@@ -3,18 +3,17 @@ package webauthn_test
 import (
 	"context"
 	"errors"
-	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/sched75/sealkeeper/internal/storage"
+	"github.com/sched75/sealkeeper/internal/storage/storagetest"
 	"github.com/sched75/sealkeeper/internal/webauthn"
 )
 
 func newRepo(t *testing.T) *webauthn.Repo {
 	t.Helper()
-	dir := t.TempDir()
-	dsn := "sqlite://" + filepath.ToSlash(filepath.Join(dir, "wa.db"))
+	dsn := storagetest.DSN(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	s, err := storage.Open(ctx, storage.Options{DSN: dsn})

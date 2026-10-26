@@ -22,6 +22,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/sched75/sealkeeper/internal/cryptobox"
+	"github.com/sched75/sealkeeper/internal/storage"
 	"github.com/sched75/sealkeeper/internal/totp"
 )
 
@@ -824,26 +825,7 @@ func nullable(s string) any {
 	return s
 }
 
-func rebind(db *sql.DB, query string) string {
-	if db == nil {
-		return query
-	}
-	name := fmt.Sprintf("%T", db.Driver())
-	if !strings.Contains(name, "pgx") {
-		return query
-	}
-	var b strings.Builder
-	idx := 1
-	for _, r := range query {
-		if r == '?' {
-			fmt.Fprintf(&b, "$%d", idx)
-			idx++
-			continue
-		}
-		b.WriteRune(r)
-	}
-	return b.String()
-}
+func rebind(db *sql.DB, query string) string { return storage.Rebind(db, query) }
 
 func toTime(v any) (time.Time, error) {
 	switch x := v.(type) {

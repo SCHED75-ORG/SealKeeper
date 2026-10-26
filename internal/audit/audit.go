@@ -24,6 +24,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/sched75/sealkeeper/internal/storage"
 )
 
 // Event types — convenience constants. Callers may add their own ad-hoc
@@ -212,28 +214,7 @@ func nullable(s string) any {
 	return s
 }
 
-// rebind rewrites `?` to `$N` only when the underlying driver is pgx; SQLite
-// is fine with `?` natively.
-func rebind(db *sql.DB, query string) string {
-	if db == nil {
-		return query
-	}
-	name := fmt.Sprintf("%T", db.Driver())
-	if !strings.Contains(name, "pgx") {
-		return query
-	}
-	var b strings.Builder
-	idx := 1
-	for _, r := range query {
-		if r == '?' {
-			fmt.Fprintf(&b, "$%d", idx)
-			idx++
-			continue
-		}
-		b.WriteRune(r)
-	}
-	return b.String()
-}
+func rebind(db *sql.DB, query string) string { return storage.Rebind(db, query) }
 
 // toTime mirrors internal/tokens' loose timestamp parser so VerifyChain
 // works against SQLite (text) and Postgres (time.Time) alike.

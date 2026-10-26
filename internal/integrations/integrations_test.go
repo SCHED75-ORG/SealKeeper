@@ -8,7 +8,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -17,6 +16,7 @@ import (
 
 	"github.com/sched75/sealkeeper/internal/integrations"
 	"github.com/sched75/sealkeeper/internal/storage"
+	"github.com/sched75/sealkeeper/internal/storage/storagetest"
 )
 
 // ----- Filters --------------------------------------------------------------
@@ -52,8 +52,7 @@ func TestFiltersPrefixAndExact(t *testing.T) {
 
 func newRepo(t *testing.T) *integrations.Repo {
 	t.Helper()
-	dir := t.TempDir()
-	dsn := "sqlite://" + filepath.ToSlash(filepath.Join(dir, "i.db"))
+	dsn := storagetest.DSN(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	s, err := storage.Open(ctx, storage.Options{DSN: dsn})
