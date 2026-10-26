@@ -10,7 +10,7 @@ For a templated, configurable variant, prefer the Helm chart in `../helm/`.
 | `namespace.yaml` | `sealkeeper` namespace with Pod Security Admission in `restricted` mode |
 | `serviceaccount.yaml` | Dedicated SA, no auto-mounted token |
 | `configmap.yaml` | Non-sensitive SK_* runtime config |
-| `secret.example.yaml` | **Template** for SK_MASTER_SECRET, SK_DATABASE_URL, SK_METRICS_TOKEN (do NOT commit a real secret) |
+| `secret.example.yaml` | **Reference only** — documents the keys of the `sealkeeper` Secret (SK_MASTER_SECRET, SK_DATABASE_URL, SK_METRICS_TOKEN). Not included in `kustomization.yaml`; create the Secret out of band |
 | `deployment.yaml` | App `Deployment` (FR-H.30): 2 replicas, rolling update, readOnlyRoot, drop ALL, probes on `/healthz` + `/readyz` |
 | `service.yaml` | `ClusterIP` on 8443 |
 | `ingress.yaml` | `Ingress` for ingress-nginx, TLS via cert-manager (annotation commented) |
@@ -21,21 +21,29 @@ For a templated, configurable variant, prefer the Helm chart in `../helm/`.
 ## Apply
 
 ```bash
-# 1. Fill the secret out-of-band — never commit real values
-cp secret.example.yaml secret.yaml
-# edit secret.yaml: SK_MASTER_SECRET (openssl rand -base64 32), SK_DATABASE_URL
-# then update kustomization.yaml to reference secret.yaml instead of the example
+# 1. Create the Secret out-of-band — it is NOT part of kustomization.yaml,
+#    so a placeholder master key can never be deployed by `apply -k`.
+#    (Or let External Secrets / Sealed Secrets create `sealkeeper`.)
+kubectl apply -f namespace.yaml
+kubectl -n sealkeeper create secret generic sealkeeper \
+  --from-literal=SK_MASTER_SECRET="$(openssl rand -base64 32)" \
+  --from-literal=SK_DATABASE_URL='postgres://sealkeeper:<password>@<host>:5432/sealkeeper?sslmode=verify-full'
+# Back up SK_MASTER_SECRET in your vault now: losing it makes the stored
+# TOTP seeds and SMTP relay password unrecoverable.
 
-# 2. Apply everything
+# 2. Set SK_TRUSTED_PROXY_CIDRS in configmap.yaml to your ingress
+#    controller's pod CIDR (see "Client IP and trusted proxies" below).
+
+# 3. Apply everything
 kubectl apply -k .
 
-# 3. Watch rollout
+# 4. Watch rollout
 kubectl -n sealkeeper rollout status deploy/sealkeeper
 ```
 
 ## Bring your own database
 
-`secret.example.yaml` ships a placeholder `SK_DATABASE_URL` pointing at a
+`secret.example.yaml` documents an `SK_DATABASE_URL` pointing at a
 PostgreSQL service inside the same namespace. SealKeeper does **not**
 provision a database — pick one of:
 

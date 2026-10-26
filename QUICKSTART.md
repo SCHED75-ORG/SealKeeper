@@ -112,10 +112,12 @@ kubectl -n sealkeeper rollout status deploy/sealkeeper
 If you prefer vanilla manifests over Helm:
 
 ```bash
+# Steps 1–2 above (namespace + Secret) first: the kustomization does not ship
+# a Secret, so no placeholder master key can be deployed by accident.
 kubectl apply -k k8s/
 ```
 
-`k8s/secret.example.yaml` is a template — copy it to `secret.yaml`, fill the values, then update `k8s/kustomization.yaml` to reference it.
+`k8s/secret.example.yaml` only documents the expected keys; it is not part of `k8s/kustomization.yaml`. Set `SK_TRUSTED_PROXY_CIDRS` in `k8s/configmap.yaml` to your ingress controller's pod CIDR before applying.
 
 ---
 

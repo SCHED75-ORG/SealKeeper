@@ -40,7 +40,11 @@ config:
 secret:
   create: true
   existingSecret: ""
-  # 32-byte base64 master secret. MUST be set in production.
+  # REQUIRED outside eval mode when secret.create is true (SK-06): base64 of
+  # exactly 32 random bytes — `openssl rand -base64 32`. The chart refuses to
+  # render with an empty, placeholder or wrongly sized value. Prefer
+  # `--set secret.masterSecret=...` from a vault over committing it to a
+  # values file, or use `existingSecret`.
   masterSecret: ""
   # Full DSN. Either supply a value here OR use a pre-existing secret managed
   # out of band.

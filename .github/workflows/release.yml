@@ -596,7 +596,9 @@ jobs:
           version: v3.16.2
 
       - name: Lint chart
-        run: helm lint helm/sealkeeper --set masterSecret=lint-only-placeholder
+        # secret.masterSecret is required by the chart (SK-06); lint with a
+        # throwaway value that is never stored.
+        run: helm lint helm/sealkeeper --set secret.masterSecret="$(openssl rand -base64 32)"
 
       - name: Package chart
         env:
