@@ -2,7 +2,7 @@
 
 > **Purpose of this file.** Drop a Claude (claude.ai, Claude Code, or any other LLM agent) into the SealKeeper repository and have it productive in a single read. It covers what the project *is*, how the code is laid out, the conventions that hold across modules, the run modes, the testing strategy, and the pitfalls observed while building. The PRD modules under `docs/prd/` are the source of truth for *requirements*; this document is the source of truth for *implementation*.
 
-State of the repo at the time of writing: **v0.1 in development**, single-binary deployment, Go 1.26.3 toolchain, all twelve PRD modules (A → L plus M for admin-accounts) drafted, multi-tenant deployment surface (Compose, Helm, K8s manifests) sketched. CI is green; the local Docker stack runs in eval mode out of the box.
+State of the repo at the time of writing: **v0.1 in development**, single-binary deployment, Go 1.26.10 toolchain, all twelve PRD modules (A → L plus M for admin-accounts) drafted, multi-tenant deployment surface (Compose, Helm, K8s manifests) sketched. CI is green; the local Docker stack runs in eval mode out of the box.
 
 ---
 
@@ -186,7 +186,7 @@ Key env vars:
 | `SK_BOOTSTRAP_ADMIN_PASSWORD`    | random 20-char         | **Eval-only** override; ≥ 12 chars                          |
 | `SK_RATE_LIMIT_*`                | 3/h email, 10/h IP     | Demo mode forces 1/1                                        |
 | `SK_SMTP_*`                      | unset                  | Env-wired sender; overridden at runtime by `/admin/smtp`    |
-| `SK_TRUSTED_PROXY_CIDRS`         | `172.16.0.0/12`        | Trust X-Forwarded-For inside these CIDRs                    |
+| `SK_TRUSTED_PROXY_CIDRS`         | unset (Compose: `172.16.0.0/12`) | XFF honoured only from these peers, walked right-to-left; validated at startup |
 | `SK_LOG_FORMAT` / `SK_LOG_LEVEL` | `json` / `info`        | slog                                                        |
 | `SK_DEMO_MODE`                   | `false`                | Independent toggle (orthogonal to SK_MODE)                  |
 | `SK_MAINTENANCE_MODE`            | `false`                | Reserved                                                    |
@@ -308,14 +308,14 @@ Use `// #nosec Gnnn -- rationale` for surgical exemptions (e.g. the fire-and-for
 `.github/workflows/ci.yml` (every PR + push to main):
 
 * **Lint** — gofmt, golangci-lint v2.12.2, prettier, eslint, hadolint, yamllint (strict), markdownlint, shellcheck.
-* **Build** — `linux/{amd64,arm64} × go {1.25.7, 1.26.3}` matrix.
+* **Build** — `linux/{amd64,arm64} × go {1.26.10, 1.27.3}` matrix.
 * **Test Go** — same matrix; coverage uploaded to Codecov.
 * **Test JS** — Vitest with `--coverage`.
 * **SAST** — govulncheck (blocking on affecting CVEs), gosec docker (`securego/gosec@v2.24.6`), semgrep (OWASP + CWE-Top-25 + golang + javascript via `pip install semgrep` + `--exclude-rule` list mirroring the gosec excludes).
 * **E2E subset** — Playwright `@happy-path` on Chromium.
 * **CI success** — verifies every upstream job is green; the branch protection rule keys off this single job.
 
-Go version is **pinned to 1.26.3** end-to-end (setup-go, Dockerfile builder, `go.mod` toolchain directive) so stdlib CVEs fixed in 1.26.3 stay closed even on cached runner images.
+Go version is **pinned to 1.26.10** end-to-end (setup-go, Dockerfile builder, `go.mod` toolchain directive) so stdlib CVEs fixed up to 1.26.10 stay closed even on cached runner images.
 
 `.github/workflows/release.yml` — tag-driven; pushes a cosign-signed OCI image to GHCR + SLSA provenance attestation. Same pinned Go version.
 
@@ -381,7 +381,7 @@ A running list of things that have tripped Claude or a human in this codebase. *
 8. **Volume permissions in Docker.** The container runs as UID 65532; named volumes are created root-owned. Either chown in an init step (`docker run --rm -v sealkeeper-data:/data alpine chown -R 65532:65532 /data`) or use a `:memory:` SQLite for ephemeral testing.
 9. **Distroless has no shell.** `docker exec sealkeeper-local sh` fails. To run a CLI subcommand: `docker exec sealkeeper-local /usr/local/bin/sealkeeper admin list` (or `//usr/local/...` from Git Bash on Windows to dodge path mangling).
 10. **Goose migrations are checksummed.** Never edit a migration after it lands in `main` — write a new one. SQLite + Postgres files must both exist, both pass the same forward steps.
-11. **Alpine 3.21 is retired for Go 1.26.3.** Use `golang:1.26.3-alpine3.22`. Same trap will appear at the next Go minor.
+11. **Alpine 3.22 is retired for Go 1.26.10.** Use `golang:1.26.10-alpine3.23` (3.21 went the same way at 1.26.3). Same trap will appear at the next Go minor.
 12. **The login error slug `bad_creds` covers three different failures** (unknown email, wrong password, wrong TOTP code) — that's anti-enumeration on purpose. A real internal failure surfaces as `internal`; a master-secret rotation surfaces as `totp_unrecoverable` now.
 13. **gosec `Nosec: N, Issues: 0` is the success line.** Tools shipping a `// #nosec Gxxx -- rationale` exemption still register in the Nosec count.
 

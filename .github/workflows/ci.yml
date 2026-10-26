@@ -45,8 +45,9 @@ env:
   # Pinned to the exact patched stdlib version because setup-go's loose
   # "1.26" spec can drift to whichever 1.26.x the runner image happens to
   # have cached — which in turn re-introduces the stdlib CVEs fixed in
-  # 1.26.3 (GO-2026-4971/4977/4980/4982/4986 + golang.org/x/net HTTP/2 4918).
-  GO_VERSION_DEFAULT: "1.26.3"
+  # 1.26.4..1.26.10 (GO-2026-5037..6809: net/http HTTP/2, html/template,
+  # crypto/x509, crypto/tls, net/textproto — see govulncheck history).
+  GO_VERSION_DEFAULT: "1.26.10"
   NODE_VERSION: "20"
 
 jobs:
@@ -90,7 +91,7 @@ jobs:
         # v8 is the current action major and supports golangci-lint v2.
         # The binary itself must be built with a Go version >= our target;
         # v2.5.0 was built with Go 1.25 and its typechecker rejects modules
-        # that declare go 1.26.3. v2.12.x is built with Go 1.26+ and clears
+        # that declare go 1.26.x. v2.12.x is built with Go 1.26+ and clears
         # the gate.
         uses: golangci/golangci-lint-action@v8
         with:
@@ -147,7 +148,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        go: ["1.25.7", "1.26.3"]
+        go: ["1.26.10", "1.27.3"]
         goarch: [amd64, arm64]
     steps:
       - name: Checkout
@@ -220,7 +221,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        go: ["1.25.7", "1.26.3"]
+        go: ["1.26.10", "1.27.3"]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -339,7 +340,7 @@ jobs:
       - name: gosec
         # 2.24.6 ships a Go 1.26 toolchain inside its container; older
         # tags (2.21.x) baked in Go 1.23 with GOTOOLCHAIN=local, which
-        # made every package fail to load against our go 1.25.7+ module.
+        # made every package fail to load against our go 1.26+ module.
         uses: securego/gosec@v2.24.6
         with:
           # Excludes mirror the .golangci.yml gosec section so this standalone

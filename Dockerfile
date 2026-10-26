@@ -14,7 +14,7 @@
 # =============================================================================
 
 # ---------- 1) Builder ----------
-FROM golang:1.26.3-alpine3.22 AS builder
+FROM golang:1.26.10-alpine3.23 AS builder
 
 ENV CGO_ENABLED=0 \
     GOFLAGS="-trimpath -buildvcs=true"
