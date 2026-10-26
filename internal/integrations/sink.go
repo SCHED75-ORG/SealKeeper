@@ -55,7 +55,7 @@ func BuildSink(row Integration, pol NetPolicy) (Sink, error) {
 	if row.ConfigErr != nil {
 		return nil, fmt.Errorf("%w: %s", ErrInvalidConfig, row.ConfigErr.Error())
 	}
-	if err := validateKindConfig(row.Kind, row.ConfigJSON); err != nil {
+	if err := validateKindConfig(row.Kind, row.ConfigJSON, pol); err != nil {
 		return nil, err
 	}
 	switch row.Kind {
@@ -86,53 +86,75 @@ func BuildSink(row Integration, pol NetPolicy) (Sink, error) {
 
 // validateKindConfig parses `raw` into the kind's config struct and checks
 // the fields that steer where the sink connects: http(s) URL with a host,
-// Sentinel workspace GUID, syslog host:port + network. Run at Create and
-// again at BuildSink so rows stored before the check cannot bypass it.
-func validateKindConfig(kind Kind, raw json.RawMessage) error {
+// Sentinel workspace GUID, syslog host:port + network. HTTP sinks need an
+// https URL unless pol.AllowPlainHTTP (eval mode). Run at Create and again
+// at BuildSink so rows stored before the check cannot bypass it.
+func validateKindConfig(kind Kind, raw json.RawMessage, pol NetPolicy) error {
 	switch kind {
 	case KindWebhook:
 		var cfg WebhookConfig
 		if err := unmarshalConfig(raw, &cfg); err != nil {
 			return err
 		}
-		return validateHTTPURL(cfg.URL, "webhook")
+		return validateHTTPURL(cfg.URL, "webhook", pol.AllowPlainHTTP)
 	case KindSplunk:
-		var cfg SplunkConfig
-		if err := unmarshalConfig(raw, &cfg); err != nil {
-			return err
-		}
-		return validateHTTPURL(cfg.URL, "splunk")
+		return validateSplunkConfig(raw, pol)
 	case KindSentinel:
-		var cfg SentinelConfig
-		if err := unmarshalConfig(raw, &cfg); err != nil {
-			return err
-		}
-		if !sentinelWorkspaceRe.MatchString(cfg.WorkspaceID) {
-			return fmt.Errorf("%w: sentinel: workspace_id must be a GUID", ErrInvalidConfig)
-		}
-		return nil
+		return validateSentinelConfig(raw)
 	case KindElastic:
 		var cfg ElasticConfig
 		if err := unmarshalConfig(raw, &cfg); err != nil {
 			return err
 		}
-		return validateHTTPURL(cfg.URL, "elastic")
+		return validateHTTPURL(cfg.URL, "elastic", pol.AllowPlainHTTP)
 	case KindSyslog:
-		var cfg SyslogConfig
-		if err := unmarshalConfig(raw, &cfg); err != nil {
-			return err
-		}
-		host, port, err := net.SplitHostPort(strings.TrimSpace(cfg.Address))
-		if err != nil || host == "" || port == "" {
-			return fmt.Errorf("%w: syslog: address must be host:port", ErrInvalidConfig)
-		}
-		if cfg.Network != "" && cfg.Network != "udp" && cfg.Network != "tcp" {
-			return fmt.Errorf("%w: syslog: network must be udp or tcp", ErrInvalidConfig)
-		}
-		return nil
+		return validateSyslogConfig(raw)
 	default:
 		return fmt.Errorf("%w: %q", ErrInvalidKind, kind)
 	}
+}
+
+// validateSplunkConfig refuses insecure_tls and checks the HEC URL.
+func validateSplunkConfig(raw json.RawMessage, pol NetPolicy) error {
+	var cfg SplunkConfig
+	if err := unmarshalConfig(raw, &cfg); err != nil {
+		return err
+	}
+	if cfg.InsecureTLS {
+		// Never honoured: refuse rather than let the operator believe
+		// certificate verification is off.
+		return fmt.Errorf("%w: splunk: insecure_tls is not supported (certificates are always verified)", ErrInvalidConfig)
+	}
+	return validateHTTPURL(cfg.URL, "splunk", pol.AllowPlainHTTP)
+}
+
+// validateSentinelConfig requires the workspace ID to be a GUID.
+func validateSentinelConfig(raw json.RawMessage) error {
+	var cfg SentinelConfig
+	if err := unmarshalConfig(raw, &cfg); err != nil {
+		return err
+	}
+	if !sentinelWorkspaceRe.MatchString(cfg.WorkspaceID) {
+		return fmt.Errorf("%w: sentinel: workspace_id must be a GUID", ErrInvalidConfig)
+	}
+	return nil
+}
+
+// validateSyslogConfig requires a host:port address and a udp/tcp (or
+// empty) network.
+func validateSyslogConfig(raw json.RawMessage) error {
+	var cfg SyslogConfig
+	if err := unmarshalConfig(raw, &cfg); err != nil {
+		return err
+	}
+	host, port, err := net.SplitHostPort(strings.TrimSpace(cfg.Address))
+	if err != nil || host == "" || port == "" {
+		return fmt.Errorf("%w: syslog: address must be host:port", ErrInvalidConfig)
+	}
+	if cfg.Network != "" && cfg.Network != "udp" && cfg.Network != "tcp" {
+		return fmt.Errorf("%w: syslog: network must be udp or tcp", ErrInvalidConfig)
+	}
+	return nil
 }
 
 func unmarshalConfig(raw json.RawMessage, v any) error {

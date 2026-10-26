@@ -30,6 +30,9 @@ var (
 	ErrAlreadyExists = errors.New("policies: already exists for this (domain, level)")
 	ErrInvalidShape  = errors.New("policies: invalid shape")
 	ErrNoPolicy      = errors.New("policies: no policy applies")
+	// ErrBelowFloor: the parameters cannot guarantee the entropy floor of
+	// the policy's ANSSI level (PRD A FR-A.G1.5 / G2.4 / G3.3).
+	ErrBelowFloor = errors.New("policies: entropy below the ANSSI level floor")
 )
 
 // Generator identifies the bundle generator.
@@ -99,9 +102,13 @@ type CreateInputs struct {
 }
 
 // Create inserts a new policy. Validates that params_json parses, that the
-// generator is known, and that the level is one of B1/B2/B3.
+// generator is known, that the level is one of B1/B2/B3 and that the
+// parameters guarantee that level's entropy floor (ErrBelowFloor).
 func (r *Repo) Create(ctx context.Context, in CreateInputs, adminID *int64) (Policy, error) {
 	if err := validateInputs(in); err != nil {
+		return Policy{}, err
+	}
+	if err := checkEntropyFloor(in.ANSSILevel, in.Generator, in.ParamsJSON); err != nil {
 		return Policy{}, err
 	}
 	now := r.now().UTC()
@@ -130,13 +137,22 @@ func (r *Repo) Create(ctx context.Context, in CreateInputs, adminID *int64) (Pol
 	return r.Get(ctx, id)
 }
 
-// Update overwrites every editable field of a row.
+// Update overwrites every editable field of a row. The ANSSI level is not
+// editable, so the entropy floor checked is the stored level's, not the
+// one the form carries.
 func (r *Repo) Update(ctx context.Context, id int64, in CreateInputs) error {
 	if err := validateInputs(in); err != nil {
 		return err
 	}
+	cur, err := r.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	if err := checkEntropyFloor(cur.ANSSILevel, in.Generator, in.ParamsJSON); err != nil {
+		return err
+	}
 	now := r.now().UTC()
-	_, err := r.db.ExecContext(ctx,
+	_, err = r.db.ExecContext(ctx,
 		rebind(r.db, `UPDATE policies
 			SET name = ?, generator = ?, params_json = ?,
 			    proposal_count = ?, regenerate_limit = ?, session_ttl_seconds = ?,
@@ -340,45 +356,25 @@ func validateInputs(in CreateInputs) error {
 			return fmt.Errorf("%w: params_json must be a JSON object", ErrInvalidShape)
 		}
 	}
-	return validateGeneratorParams(in.Generator, canonJSON(in.ParamsJSON))
+	return validateGeneratorParams(in.Generator, canonJSON(in.ParamsJSON),
+		defaultInt(in.ProposalCount, 5), defaultInt(in.RegenerateLimit, 3))
 }
 
 // validateGeneratorParams rejects at save time what the browser bundle
 // (web/src/params.js) refuses at reveal time, so an operator learns about a
 // broken policy in the editor rather than from users whose links fail.
-// It checks the structural traps only; web/src/params.js remains the
-// authority on the finer bounds.
-func validateGeneratorParams(gen Generator, paramsJSON string) error {
-	var p struct {
-		Library       json.RawMessage `json:"library"`
-		NumberOfWords *float64        `json:"numberOfWords"`
-		Length        *float64        `json:"length"`
+// proposalCount and regenerateLimit are the values that will be stored.
+func validateGeneratorParams(gen Generator, paramsJSON string, proposalCount, regenerateLimit int) error {
+	if err := bundleRefusal(gen, paramsJSON, proposalCount, regenerateLimit); err != nil {
+		return err
 	}
-	if err := json.Unmarshal([]byte(paramsJSON), &p); err != nil {
-		return fmt.Errorf("%w: params_json: %s", ErrInvalidShape, err.Error())
-	}
-	intIn := func(v *float64, name string, lo, hi float64) error {
-		if v != nil && (*v != float64(int64(*v)) || *v < lo || *v > hi) {
-			return fmt.Errorf("%w: %s must be an integer in [%g, %g]", ErrInvalidShape, name, lo, hi)
-		}
-		return nil
-	}
-	switch gen {
-	case GeneratorG1, GeneratorG2:
-		// No silent fallback to the bundled sample: G1/G2 need an inline
-		// list of non-empty entries (library ids are not resolved yet).
-		var lib []string
-		if len(p.Library) == 0 || json.Unmarshal(p.Library, &lib) != nil || len(lib) == 0 {
-			return fmt.Errorf("%w: %s needs parameters.library, a non-empty array of strings", ErrInvalidShape, gen)
-		}
-		for _, e := range lib {
+	// Stricter than the bundle: a whitespace-only entry is a typo.
+	if gen == GeneratorG1 || gen == GeneratorG2 {
+		for _, e := range libraryEntries(paramsJSON) {
 			if strings.TrimSpace(e) == "" {
 				return fmt.Errorf("%w: parameters.library contains an empty entry", ErrInvalidShape)
 			}
 		}
-		return intIn(p.NumberOfWords, "numberOfWords", 1, 64)
-	case GeneratorG3:
-		return intIn(p.Length, "length", 1, 256)
 	}
 	return nil
 }

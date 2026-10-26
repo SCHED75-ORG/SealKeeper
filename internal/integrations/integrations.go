@@ -130,11 +130,20 @@ type Repo struct {
 	db  *sql.DB
 	box *cryptobox.Box
 	now func() time.Time
+	pol NetPolicy
 }
 
 // NewRepo binds a Repo to a *sql.DB and the instance cryptobox.
 func NewRepo(db *sql.DB, box *cryptobox.Box) *Repo {
 	return &Repo{db: db, box: box, now: time.Now}
+}
+
+// WithNetPolicy sets the outbound policy Create validates new rows against
+// (https required unless AllowPlainHTTP). The zero policy is the strict one.
+func (r *Repo) WithNetPolicy(p NetPolicy) *Repo {
+	c := *r
+	c.pol = p
+	return &c
 }
 
 // WithClock for tests.
@@ -165,7 +174,7 @@ func (r *Repo) Create(ctx context.Context, in CreateInputs, adminID *int64) (Int
 	if err := validateJSONObject(in.ConfigJSON, "config_json"); err != nil {
 		return Integration{}, err
 	}
-	if err := validateKindConfig(in.Kind, json.RawMessage(canonJSON(in.ConfigJSON))); err != nil {
+	if err := validateKindConfig(in.Kind, json.RawMessage(canonJSON(in.ConfigJSON)), r.pol); err != nil {
 		return Integration{}, err
 	}
 	if err := validateJSONObject(in.FiltersJSON, "filters_json"); err != nil {

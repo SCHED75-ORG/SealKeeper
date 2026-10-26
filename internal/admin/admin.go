@@ -357,50 +357,18 @@ type AuthResult struct {
 //   - if the account is missing or password is wrong, ErrInvalidCreds (and
 //     the failure counter increments — see reserveAttempt);
 //   - if the account is locked, ErrAccountLocked is returned without
-//     verifying the password (constant time still — see handlers);
+//     verifying the password (constant time still — see handlers); the
+//     login handler shows it as bad_creds so it does not reveal the email;
+//   - if the account is disabled, ErrAccountDisabled is returned only after
+//     the password matched; a wrong password is ErrInvalidCreds;
 //   - if force_totp_enroll is true, TOTP is not checked yet; the caller
 //     must drive the user into the enrollment flow (NeedsTOTPEnrollment);
 //   - if TOTP is enrolled, the code is verified and a mismatch is also
 //     ErrInvalidCreds — we never tell the user which factor failed.
 func (r *Repo) Authenticate(ctx context.Context, email, password, totpCode string) (AuthResult, error) {
-	row, err := r.loadByEmail(ctx, email)
-	if errors.Is(err, ErrNotFound) {
-		// Avoid leaking whether the account exists: spend the same bcrypt
-		// work as a real comparison. The previous literal was not a valid
-		// bcrypt hash, so bcrypt rejected it instantly (timing oracle).
-		_ = bcrypt.CompareHashAndPassword(dummyBcryptHash(), []byte(password))
-		return AuthResult{}, ErrInvalidCreds
-	}
+	row, err := r.verifyPasswordFactor(ctx, email, password)
 	if err != nil {
 		return AuthResult{}, err
-	}
-	if row.DisabledAt != nil {
-		return AuthResult{}, ErrAccountDisabled
-	}
-	if row.LockedUntil != nil {
-		if r.now().Before(*row.LockedUntil) {
-			return AuthResult{}, ErrAccountLocked
-		}
-		r.clearExpiredLock(ctx, row.ID)
-	}
-
-	// Reserve this attempt before doing any verification. The reservation
-	// is a single conditional UPDATE, so however many requests race, at
-	// most MaxFailedAttempts of them get to run bcrypt / TOTP per lock
-	// cycle. A snapshot check followed by a later increment let a burst of
-	// 100 requests evaluate ~57 guesses.
-	reserved, err := r.reserveAttempt(ctx, row.ID)
-	if err != nil {
-		return AuthResult{}, err
-	}
-	if !reserved {
-		r.lockIfExhausted(ctx, row.ID)
-		return AuthResult{}, ErrAccountLocked
-	}
-
-	if err := bcrypt.CompareHashAndPassword([]byte(row.PasswordHash), []byte(password)); err != nil {
-		r.lockIfExhausted(ctx, row.ID)
-		return AuthResult{}, ErrInvalidCreds
 	}
 
 	// The failure counter is cleared only once every factor has passed
@@ -419,22 +387,81 @@ func (r *Repo) Authenticate(ctx context.Context, email, password, totpCode strin
 	}
 
 	if looksLikeRecoveryCode(totpCode) {
-		// A recovery code stands in for the TOTP code and is spent on use.
-		if err := r.ConsumeRecoveryCode(ctx, row.ID, totpCode); err != nil {
-			if !errors.Is(err, ErrInvalidCreds) {
-				return AuthResult{}, err
-			}
-			r.lockIfExhausted(ctx, row.ID)
-			return AuthResult{}, ErrInvalidCreds
+		return r.authenticateRecoveryCode(ctx, row, totpCode)
+	}
+	return r.authenticateTOTP(ctx, row, totpCode)
+}
+
+// verifyPasswordFactor runs the first half of Authenticate, in order:
+// account lookup (dummy bcrypt for an unknown email), the lock check, the
+// attempt reservation, the password comparison, then the disabled check.
+// It returns the row only when the password matched on an enabled account.
+func (r *Repo) verifyPasswordFactor(ctx context.Context, email, password string) (adminRow, error) {
+	row, err := r.loadByEmail(ctx, email)
+	if errors.Is(err, ErrNotFound) {
+		// Avoid leaking whether the account exists: spend the same bcrypt
+		// work as a real comparison. The previous literal was not a valid
+		// bcrypt hash, so bcrypt rejected it instantly (timing oracle).
+		_ = bcrypt.CompareHashAndPassword(dummyBcryptHash(), []byte(password))
+		return adminRow{}, ErrInvalidCreds
+	}
+	if err != nil {
+		return adminRow{}, err
+	}
+	if row.LockedUntil != nil {
+		if r.now().Before(*row.LockedUntil) {
+			return adminRow{}, ErrAccountLocked
 		}
-		r.RecordLoginSuccess(ctx, row.ID)
-		return AuthResult{
-			Admin:               row.toAdmin(),
-			NeedsPasswordChange: row.ForcePasswordChange,
-			UsedRecoveryCode:    true,
-		}, nil
+		r.clearExpiredLock(ctx, row.ID)
 	}
 
+	// Reserve this attempt before doing any verification. The reservation
+	// is a single conditional UPDATE, so however many requests race, at
+	// most MaxFailedAttempts of them get to run bcrypt / TOTP per lock
+	// cycle. A snapshot check followed by a later increment let a burst of
+	// 100 requests evaluate ~57 guesses.
+	reserved, err := r.reserveAttempt(ctx, row.ID)
+	if err != nil {
+		return adminRow{}, err
+	}
+	if !reserved {
+		r.lockIfExhausted(ctx, row.ID)
+		return adminRow{}, ErrAccountLocked
+	}
+
+	if err := bcrypt.CompareHashAndPassword([]byte(row.PasswordHash), []byte(password)); err != nil {
+		r.lockIfExhausted(ctx, row.ID)
+		return adminRow{}, ErrInvalidCreds
+	}
+	// Disabled is reported only once the password matched: answering it
+	// first told anyone that the email belongs to an admin.
+	if row.DisabledAt != nil {
+		return adminRow{}, ErrAccountDisabled
+	}
+	return row, nil
+}
+
+// authenticateRecoveryCode finishes Authenticate when a recovery code stands
+// in for the TOTP code; the code is spent on use.
+func (r *Repo) authenticateRecoveryCode(ctx context.Context, row adminRow, code string) (AuthResult, error) {
+	if err := r.ConsumeRecoveryCode(ctx, row.ID, code); err != nil {
+		if !errors.Is(err, ErrInvalidCreds) {
+			return AuthResult{}, err
+		}
+		r.lockIfExhausted(ctx, row.ID)
+		return AuthResult{}, ErrInvalidCreds
+	}
+	r.RecordLoginSuccess(ctx, row.ID)
+	return AuthResult{
+		Admin:               row.toAdmin(),
+		NeedsPasswordChange: row.ForcePasswordChange,
+		UsedRecoveryCode:    true,
+	}, nil
+}
+
+// authenticateTOTP finishes Authenticate with a TOTP code, which is
+// single-use per time step.
+func (r *Repo) authenticateTOTP(ctx context.Context, row adminRow, totpCode string) (AuthResult, error) {
 	if strings.TrimSpace(totpCode) == "" {
 		// The reserved attempt stays counted: interleaving blank codes
 		// must not buy extra TOTP guesses.
@@ -713,24 +740,12 @@ func (r *Repo) LookupSession(ctx context.Context, token string) (Session, Admin,
 		FROM admin_sessions s JOIN admins a ON a.id = s.admin_id
 		WHERE s.token = ?`
 
-	row := r.db.QueryRowContext(ctx, rebind(r.db, q), hashToken(token))
-
-	var (
-		sessTok                              string
-		adminID                              int64
-		issuedAt, expiresAt, idleExpiresAt   any
-		revokedAt                            any
-		csrfTok                              string
-		adminPK                              int64
-		email                                string
-		forcePwd, forceTOTP                  bool
-		totpEnc                              []byte
-		disabledAt, lockedUntil, lastLoginAt any
-	)
-	err := row.Scan(&sessTok, &adminID, &issuedAt, &expiresAt, &idleExpiresAt,
-		&csrfTok, &revokedAt,
-		&adminPK, &email, &forcePwd, &forceTOTP, &totpEnc,
-		&disabledAt, &lockedUntil, &lastLoginAt,
+	var sr sessionRow
+	err := r.db.QueryRowContext(ctx, rebind(r.db, q), hashToken(token)).Scan(
+		&sr.sessTok, &sr.adminID, &sr.issuedAt, &sr.expiresAt, &sr.idleExpiresAt,
+		&sr.csrfTok, &sr.revokedAt,
+		&sr.adminPK, &sr.email, &sr.forcePwd, &sr.forceTOTP, &sr.totpEnc,
+		&sr.disabledAt, &sr.lockedUntil, &sr.lastLoginAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Session{}, Admin{}, ErrSessionNotFound
@@ -740,69 +755,89 @@ func (r *Repo) LookupSession(ctx context.Context, token string) (Session, Admin,
 	}
 
 	now := r.now().UTC()
-	exp, _ := toTime(expiresAt)
-	idle, _ := toTime(idleExpiresAt)
-	if revokedAt != nil {
-		if _, err := toTime(revokedAt); err == nil {
-			return Session{}, Admin{}, ErrSessionExpired
-		}
-	}
-	if !now.Before(exp) || !now.Before(idle) {
-		return Session{}, Admin{}, ErrSessionExpired
-	}
-	// A disabled admin must not be able to ride an existing session
-	// past the disable point. SetDisabled relies on this check.
-	if disabledAt != nil {
-		if _, err := toTime(disabledAt); err == nil {
-			return Session{}, Admin{}, ErrAccountDisabled
-		}
+	exp, _ := toTime(sr.expiresAt)
+	if err := sr.validate(now, exp); err != nil {
+		return Session{}, Admin{}, err
 	}
 
 	// Touch idle deadline.
 	newIdle := now.Add(SessionIdleTTL)
 	_, _ = r.db.ExecContext(ctx,
 		rebind(r.db, `UPDATE admin_sessions SET idle_expires_at = ? WHERE token = ?`),
-		newIdle, sessTok,
+		newIdle, sr.sessTok,
 	)
-
-	a := Admin{
-		ID:                  adminPK,
-		Email:               email,
-		ForcePasswordChange: forcePwd,
-		ForceTOTPEnroll:     forceTOTP,
-		TOTPEnrolled:        len(totpEnc) > 0,
-	}
-	if disabledAt != nil {
-		if t, err := toTime(disabledAt); err == nil {
-			t := t
-			a.Disabled = true
-			_ = t
-		}
-	}
-	if lockedUntil != nil {
-		if t, err := toTime(lockedUntil); err == nil {
-			t := t
-			a.LockedUntil = &t
-		}
-	}
-	if lastLoginAt != nil {
-		if t, err := toTime(lastLoginAt); err == nil {
-			t := t
-			a.LastLoginAt = &t
-		}
-	}
 
 	sess := Session{
 		Token:         token,
-		AdminID:       adminID,
+		AdminID:       sr.adminID,
 		CSRFToken:     sessionCSRF(token), // csrf_token column holds only a hash
 		IdleExpiresAt: newIdle,
 		ExpiresAt:     exp,
 	}
-	if t, err := toTime(issuedAt); err == nil {
+	if t, err := toTime(sr.issuedAt); err == nil {
 		sess.IssuedAt = t
 	}
-	return sess, a, nil
+	return sess, sr.toAdmin(), nil
+}
+
+// sessionRow is the raw admin_sessions JOIN admins row LookupSession scans.
+// Timestamp columns stay `any` because SQLite returns them as strings.
+type sessionRow struct {
+	sessTok                              string
+	adminID                              int64
+	issuedAt, expiresAt, idleExpiresAt   any
+	revokedAt                            any
+	csrfTok                              string
+	adminPK                              int64
+	email                                string
+	forcePwd, forceTOTP                  bool
+	totpEnc                              []byte
+	disabledAt, lockedUntil, lastLoginAt any
+}
+
+// validate refuses a revoked, expired, idled-out or disabled-admin session.
+// exp is the parsed expires_at.
+func (sr sessionRow) validate(now, exp time.Time) error {
+	idle, _ := toTime(sr.idleExpiresAt)
+	if parsedTime(sr.revokedAt) != nil {
+		return ErrSessionExpired
+	}
+	if !now.Before(exp) || !now.Before(idle) {
+		return ErrSessionExpired
+	}
+	// A disabled admin must not be able to ride an existing session
+	// past the disable point. SetDisabled relies on this check.
+	if parsedTime(sr.disabledAt) != nil {
+		return ErrAccountDisabled
+	}
+	return nil
+}
+
+// toAdmin builds the public Admin view carried with a valid session.
+func (sr sessionRow) toAdmin() Admin {
+	return Admin{
+		ID:                  sr.adminPK,
+		Email:               sr.email,
+		ForcePasswordChange: sr.forcePwd,
+		ForceTOTPEnroll:     sr.forceTOTP,
+		TOTPEnrolled:        len(sr.totpEnc) > 0,
+		Disabled:            parsedTime(sr.disabledAt) != nil,
+		LockedUntil:         parsedTime(sr.lockedUntil),
+		LastLoginAt:         parsedTime(sr.lastLoginAt),
+	}
+}
+
+// parsedTime returns the timestamp held in a nullable scanned column, or nil
+// when the column is NULL or does not parse.
+func parsedTime(v any) *time.Time {
+	if v == nil {
+		return nil
+	}
+	t, err := toTime(v)
+	if err != nil {
+		return nil
+	}
+	return &t
 }
 
 // RevokeSession marks the session as revoked.

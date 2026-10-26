@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"testing"
-	"time"
 
 	"github.com/sched75/sealkeeper/internal/storage"
 	"github.com/sched75/sealkeeper/internal/storage/storagetest"
@@ -14,7 +13,7 @@ import (
 func newRepo(t *testing.T) *webauthn.Repo {
 	t.Helper()
 	dsn := storagetest.DSN(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), storagetest.SetupTimeout)
 	defer cancel()
 	s, err := storage.Open(ctx, storage.Options{DSN: dsn})
 	if err != nil {

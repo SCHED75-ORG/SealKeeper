@@ -47,6 +47,14 @@ A useful security report typically contains:
 
 We will respond within **72 hours** with an acknowledgement and an initial assessment. We aim to publish a patched release within **30 days** for high-severity issues and **90 days** for medium-severity issues.
 
+## Hall of thanks
+
+Researchers who report a valid vulnerability are credited in the published advisory and listed in the [hall of thanks](design/hall-of-thanks.html) (also on the project website), and receive a signed, numbered certificate of thanks — unless they ask to remain anonymous.
+
+| Researcher | Advisories |
+|------------|------------|
+| Sri Charan Pedhiti ([@Char0n1507](https://github.com/Char0n1507)) | [GHSA-xr59-fxvh-vx8h](https://github.com/sched75/SealKeeper/security/advisories/GHSA-xr59-fxvh-vx8h), [GHSA-h3vw-xg58-625j](https://github.com/sched75/SealKeeper/security/advisories/GHSA-h3vw-xg58-625j) |
+
 ## Scope
 
 The following are considered in scope:

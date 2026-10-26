@@ -5,7 +5,6 @@ import (
 	"errors"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/sched75/sealkeeper/internal/domains"
 	"github.com/sched75/sealkeeper/internal/storage"
@@ -15,7 +14,7 @@ import (
 func newRepo(t *testing.T) (*domains.Repo, storage.Store) {
 	t.Helper()
 	dsn := storagetest.DSN(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), storagetest.SetupTimeout)
 	defer cancel()
 	s, err := storage.Open(ctx, storage.Options{DSN: dsn})
 	if err != nil {

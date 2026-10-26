@@ -20,7 +20,7 @@ func newRepo(t *testing.T) (*audit.Repo, storage.Store) {
 	t.Helper()
 	dsn := storagetest.DSN(t)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), storagetest.SetupTimeout)
 	defer cancel()
 	s, err := storage.Open(ctx, storage.Options{DSN: dsn})
 	if err != nil {
@@ -180,7 +180,7 @@ func TestVerifyChainAcceptsLegacyNanosecondRows(t *testing.T) {
 		`UPDATE audit_head SET legacy_until = (SELECT MAX(sequence_no) FROM audit_log)`); err != nil {
 		t.Fatalf("set legacy_until: %v", err)
 	}
-	if err := r.SealAnchor(ctx); err != nil {
+	if err := r.SealAnchor(ctx, true); err != nil {
 		t.Fatalf("SealAnchor: %v", err)
 	}
 	if _, err := r.Append(ctx, "evt", "actor", "", nil); err != nil {

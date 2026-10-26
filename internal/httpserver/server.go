@@ -8,8 +8,9 @@
 //	GET  /version                 — build metadata
 //	GET  /                        — landing page (HTML stub)
 //	POST /api/v1/request          — issue a reveal token + capture/send mail
-//	GET  /api/v1/policy           — public policy; single-use consumption
-//	                                when ?token=… is supplied (FR-B.36)
+//	GET  /api/v1/policy           — public default policy (?token= refused)
+//	POST /api/v1/policy           — single-use consumption, token in the
+//	                                JSON body, never the URL (FR-B.36)
 //	GET  /reveal/{token}          — reveal page HTML (loads UMD bundle)
 //	GET  /static/*                — JS bundle + assets (config.WebDir)
 //	GET  /__captured_mail         — eval mail queue; demo: caller's own mail
@@ -26,12 +27,17 @@ import (
 	"fmt"
 	htmltemplate "html/template"
 	"log/slog"
+	"math"
+	"mime"
 	"net"
 	"net/http"
 	"net/netip"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+	"unicode"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -68,9 +74,22 @@ func pseudonymKey(masterSecret string) []byte {
 	return sum[:]
 }
 
+// ceremonyKey derives the WebAuthn ceremony MAC key from the master
+// secret, domain-separated from every other use of it.
+func ceremonyKey(masterSecret string) []byte {
+	sum := sha256.Sum256([]byte("sealkeeper-webauthn-ceremony:" + masterSecret))
+	return sum[:]
+}
+
 // adminLoginPerIPWindow is the number of admin login attempts one client IP
 // may make per 15 minutes.
 const adminLoginPerIPWindow = 20
+
+// tokenLookupPerIPWindow is the number of reveal-token lookups (GET
+// /reveal/{token} and /api/v1/policy?token=) one client IP may make per 15
+// minutes. Both answer unknown / expired / consumed differently, so they
+// are a token-state oracle; an honest reveal costs two lookups.
+const tokenLookupPerIPWindow = 60
 
 // Server is the HTTP service.
 type Server struct {
@@ -78,9 +97,8 @@ type Server struct {
 	logger   *slog.Logger
 	readyz   *readiness.Set
 	mail     *mailcapture.Store
-	sender   mailer.Sender // never nil — defaults to capture in eval, noop otherwise
-	tokens   *tokens.Repo  // optional — nil when storage is unavailable
-	audit    *audit.Repo   // optional — nil when storage is unavailable
+	tokens   *tokens.Repo // optional — nil when storage is unavailable
+	audit    *audit.Repo  // optional — nil when storage is unavailable
 	limiter  ratelimit.Composite
 	reqCount *prometheus.CounterVec
 	reqDur   *prometheus.HistogramVec
@@ -110,8 +128,16 @@ type Server struct {
 	// lockout alone lets one IP spray many accounts, and lock them all.
 	loginLimiter *ratelimit.Limiter
 
+	// tokenLimiter caps reveal-token lookups per client IP (see
+	// tokenLookupPerIPWindow).
+	tokenLimiter *ratelimit.Limiter
+
 	// pseudonymKey keys hashShort (derived from the master secret).
 	pseudonymKey []byte
+
+	// ceremonyKey authenticates the WebAuthn ceremony state the browser
+	// carries between /begin and /finish (see sealCeremony).
+	ceremonyKey []byte
 
 	// trustedProxies gates X-Forwarded-For (FR-H.42). Empty = never trust.
 	trustedProxies []netip.Prefix
@@ -119,7 +145,15 @@ type Server struct {
 	// Constant-latency POST /api/v1/request (FR-B.13, see requestmail.go).
 	requestFloor time.Duration
 	mailSlots    chan struct{}
+	mailQueue    chan struct{}
 	mailWG       sync.WaitGroup
+
+	// sender is never nil — capture in eval, noop otherwise. /admin/smtp
+	// swaps it while requests read it: go through currentSender /
+	// storeSender. smtpMu serialises RebuildSMTPSender so the last
+	// rebuild always installs the latest saved relay.
+	sender atomic.Pointer[senderRef]
+	smtpMu sync.Mutex
 }
 
 // New builds an HTTP server with the given configuration.
@@ -139,7 +173,7 @@ func New(cfg config.Config, logger *slog.Logger) *Server {
 	}, []string{"route"})
 	rateHits := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "sealkeeper_rate_limit_hits_total",
-		Help: "Number of rate-limited POST /api/v1/request hits.",
+		Help: "Number of rate-limited public requests (POST /api/v1/request by email/ip, reveal-token lookups by token_lookup).",
 	}, []string{"dimension"})
 	reg.MustRegister(reqCount, reqDur, rateHits)
 
@@ -176,15 +210,16 @@ func New(cfg config.Config, logger *slog.Logger) *Server {
 		trusted = nil
 	}
 
-	return &Server{
+	s := &Server{
 		trustedProxies: trusted,
 		pseudonymKey:   pseudonymKey(cfg.MasterSecret),
+		ceremonyKey:    ceremonyKey(cfg.MasterSecret),
 		loginLimiter:   ratelimit.New(adminLoginPerIPWindow, 15*time.Minute),
+		tokenLimiter:   ratelimit.New(tokenLookupPerIPWindow, 15*time.Minute),
 		cfg:            cfg,
 		logger:         logger,
 		readyz:         readiness.New(),
 		mail:           mailStore,
-		sender:         defaultSender,
 		limiter:        limiter,
 		reqCount:       reqCount,
 		reqDur:         reqDur,
@@ -197,8 +232,21 @@ func New(cfg config.Config, logger *slog.Logger) *Server {
 		loginPending:   newLoginPendingStore(5 * time.Minute),
 		requestFloor:   requestLatencyFloor,
 		mailSlots:      make(chan struct{}, mailWorkers),
+		mailQueue:      make(chan struct{}, mailQueueDepth),
 	}
+	s.storeSender(defaultSender)
+	return s
 }
+
+// senderRef boxes the mailer.Sender interface for atomic.Pointer.
+type senderRef struct{ mailer.Sender }
+
+// currentSender returns the active mail sender. Callers that use it more
+// than once (Send then Name) take one snapshot so a concurrent swap
+// cannot split them across two transports.
+func (s *Server) currentSender() mailer.Sender { return s.sender.Load().Sender }
+
+func (s *Server) storeSender(sender mailer.Sender) { s.sender.Store(&senderRef{sender}) }
 
 // MailStore returns the underlying mail capture store (eval mode).
 func (s *Server) MailStore() *mailcapture.Store { return s.mail }
@@ -229,7 +277,7 @@ func (s *Server) SetSender(sender mailer.Sender) {
 			return
 		}
 	}
-	s.sender = sender
+	s.storeSender(sender)
 }
 
 // SetDomains binds the allowlist repo. When nil, every domain is accepted —
@@ -294,6 +342,8 @@ func (s *Server) RebuildSMTPSender(ctx context.Context) error {
 	if s.cfg.IsDemo() {
 		return nil
 	}
+	s.smtpMu.Lock()
+	defer s.smtpMu.Unlock()
 	cfg, err := s.smtpConfig.Get(ctx)
 	if errors.Is(err, smtpconfig.ErrNotConfigured) {
 		return nil
@@ -319,7 +369,7 @@ func (s *Server) RebuildSMTPSender(ctx context.Context) error {
 	// Bypass the SetSender guard against non-capture senders in demo
 	// mode by short-circuiting above; here we know the mode is not
 	// demo so direct assignment is fine.
-	s.sender = sender
+	s.storeSender(sender)
 	return nil
 }
 
@@ -369,7 +419,11 @@ func (s *Server) Router() http.Handler {
 
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Get("/policy", s.handlePolicy)
-		r.Post("/request", s.handleRequest)
+		// Cross-origin pages must not mint reveal links from their
+		// visitors' browsers (distributed rate-limit bypass, mail bombing),
+		// nor burn someone else's token.
+		r.With(sameOriginPOST).Post("/policy", s.handlePolicyConsume)
+		r.With(sameOriginPOST).Post("/request", s.handleRequest)
 	})
 
 	r.Get("/reveal/{token}", s.handleRevealPage)
@@ -439,7 +493,7 @@ func (s *Server) Run(ctx context.Context) error {
 	// stays in memory for the life of the process.
 	stopJanitors := make(chan struct{})
 	defer close(stopJanitors)
-	for _, l := range []*ratelimit.Limiter{s.limiter.Email, s.limiter.IP, s.loginLimiter} {
+	for _, l := range []*ratelimit.Limiter{s.limiter.Email, s.limiter.IP, s.loginLimiter, s.tokenLimiter} {
 		if l != nil {
 			go l.RunJanitor(stopJanitors, 5*time.Minute)
 		}
@@ -495,7 +549,6 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	if err := s.landingTpl.Execute(w, map[string]any{
 		"CSPNonce":   scriptNonce(w),
 		"Branding":   b,
-		"Version":    version.Version,
 		"EvalBanner": s.cfg.IsEval(),
 		"DemoBanner": s.cfg.IsDemo(),
 	}); err != nil {
@@ -506,14 +559,23 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 // maxRequestBodyBytes bounds POST /api/v1/request bodies.
 const maxRequestBodyBytes = 4 << 10
 
+// requestPayload is the POST /api/v1/request body. Legacy "domain" and
+// "subject" fields are ignored: the domain is derived server-side from the
+// normalised email so a requester cannot forge what operators see in the
+// audit log, the SIEM feed or request_tokens.domain.
 type requestPayload struct {
-	Email   string `json:"email"`
-	Domain  string `json:"domain"`
-	Subject string `json:"subject"`
+	Email string `json:"email"`
 }
 
 func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
+	// JSON only: text/plain, form and multipart bodies are CORS "simple
+	// requests" any website can fire without a preflight. Like a malformed
+	// payload, this reveals nothing about the allowlist.
+	if !isJSONContentType(r.Header.Get("Content-Type")) {
+		http.Error(w, `{"error":"unsupported_media_type"}`, http.StatusUnsupportedMediaType)
+		return
+	}
 	start := time.Now()
 	captureOwner := s.demoCaptureHandle(w, r)
 
@@ -521,135 +583,24 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	// after the same latency floor (FR-B.13, see requestmail.go).
 	// Failure information stays in the audit log, never in the response.
 	acceptedResp := func(extra map[string]string) {
-		s.padRequestLatency(r.Context(), start)
-		body := map[string]string{"status": "accepted"}
-		for k, v := range extra {
-			body[k] = v
-		}
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		w.WriteHeader(http.StatusAccepted)
-		_ = json.NewEncoder(w).Encode(body)
+		s.writeAcceptedResponse(w, r, start, extra)
 	}
 
-	// The payload is three short strings; cap it so an attacker can't make
-	// us buffer, hash and audit-log megabytes per request.
-	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
-	var p requestPayload
-	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
-		// Malformed payload is the one case we DO surface — it cannot leak
-		// allowlist info and helps integrators debug client code.
-		http.Error(w, `{"error":"invalid_payload"}`, http.StatusBadRequest)
+	email, ok := s.readRequestEmail(w, r)
+	if !ok {
 		return
 	}
-	if p.Email == "" {
-		http.Error(w, `{"error":"email_required"}`, http.StatusBadRequest)
-		return
-	}
-	// Bare addr-spec only: display names / comments are how CR/LF reached
-	// the To: header. A syntax error reveals nothing about the allowlist.
-	email, err := mail.NormalizeAddress(p.Email)
-	if err != nil {
-		http.Error(w, `{"error":"invalid_email"}`, http.StatusBadRequest)
-		return
-	}
-	if s.tokens == nil {
-		http.Error(w, `{"error":"storage_unavailable"}`, http.StatusServiceUnavailable)
+	pr := s.newPublicRequest(r, email)
+
+	// Rate limit, then domain allowlist, then policy resolution — all
+	// before anything is issued, each refusal answering the identical 202.
+	if !s.admitRequest(r.Context(), pr) {
+		acceptedResp(nil) // FR-B.13
 		return
 	}
 
-	ip := s.clientIP(r)
-	ipHash := s.hashShort(ip)
-	uaHash := s.hashShort(r.UserAgent())
-
-	// FR-B.11..13 — apply rate limits BEFORE issuing anything. The hit is
-	// observable only via the audit log + Prometheus counter.
-	decision := s.limiter.Check(rateLimitKey(email), ip)
-	if !decision.Allowed {
-		s.rateHits.WithLabelValues(decision.Reason).Inc()
-		s.auditAppend(r.Context(), audit.EventRateLimited, email, decision.Reason, map[string]any{
-			"ip_hash":              ipHash,
-			"ua_hash":              uaHash,
-			"limit_email_per_hour": s.cfg.RateLimitEmailPerHour,
-			"limit_ip_per_hour":    s.cfg.RateLimitIPPerHour,
-		})
-		s.logger.Info("rate-limited request silently dropped",
-			"email", email, "dimension", decision.Reason,
-		)
-		acceptedResp(nil) // identical response — FR-B.13
-		return
-	}
-
-	// FR-C.20..23 — consult the domain allowlist when it has any entries.
-	// An empty table keeps the zero-config eval flow open. A denied domain
-	// is FR-B.9-silent: same response, audit log carries the truth.
-	if s.domains != nil {
-		emailDomain := ""
-		if at := strings.LastIndex(email, "@"); at > 0 && at+1 < len(email) {
-			emailDomain = email[at+1:]
-		}
-		ok, err := s.domains.Allows(r.Context(), emailDomain)
-		if err != nil {
-			s.logger.Error("domains.Allows failed", "err", err)
-			// Fail-safe: deny silently so a database hiccup can't open the gate.
-			acceptedResp(nil)
-			return
-		}
-		if !ok {
-			s.auditAppend(r.Context(), "request.domain_blocked", email, emailDomain, map[string]any{
-				"ip_hash": ipHash,
-				"ua_hash": uaHash,
-			})
-			s.logger.Info("domain not in allowlist — silent drop",
-				"email", email, "domain", emailDomain,
-			)
-			acceptedResp(nil) // FR-B.13
-			return
-		}
-	}
-
-	// FR-C.27..28 — resolve a policy NOW so we never mint a token that
-	// nobody can consume. The resolution honours the elevation lists and
-	// the per-(domain, level) policy mapping.
-	//
-	// Zero-config fallback: when no policies are configured, skip the gate
-	// entirely and let handlePolicy serve the built-in Default. The moment
-	// the admin adds a row the gate activates.
-	if s.policies != nil {
-		count, err := s.policies.Count(r.Context())
-		if err != nil {
-			s.logger.Error("policies.Count failed", "err", err)
-			acceptedResp(nil)
-			return
-		}
-		if count > 0 {
-			if _, err := s.policies.Resolve(r.Context(), email); errors.Is(err, policies.ErrNoPolicy) {
-				s.auditAppend(r.Context(), "request.policy_not_found", email, "", map[string]any{
-					"ip_hash": ipHash,
-					"ua_hash": uaHash,
-				})
-				s.logger.Info("no policy resolved for email — silent drop", "email", email)
-				acceptedResp(nil) // FR-B.13
-				return
-			} else if err != nil {
-				s.logger.Error("policies.Resolve failed", "err", err)
-				acceptedResp(nil) // fail-safe deny
-				return
-			}
-		}
-	}
-
-	tok, err := s.tokens.Issue(r.Context(), tokens.IssueOptions{
-		Email:  email,
-		Domain: p.Domain,
-		IPHash: ipHash,
-		UAHash: uaHash,
-		TTL:    tokens.DefaultTTL,
-	})
-	if err != nil {
-		s.logger.Error("tokens.Issue failed", "err", err)
-		s.auditAppend(r.Context(), "request.issue_failed", email, "", map[string]any{
-			"error": err.Error(),
-		})
+	tok, ok := s.issueRequestToken(r.Context(), pr)
+	if !ok {
 		// Still return 202 — anti-enumeration. The audit log carries the
 		// truth for operators.
 		acceptedResp(nil)
@@ -657,73 +608,17 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	revealURL := strings.TrimRight(s.cfg.BaseURL, "/") + "/reveal/" + tok.Token
-	lang := mailtemplates.PickLanguage(r.Header.Get("Accept-Language"))
-	brand := s.resolveBranding(r.Context())
-
-	var (
-		msg mail.Message
-	)
-	if s.mailTpls != nil {
-		rendered, rerr := s.mailTpls.Render(r.Context(), mailtemplates.KindRevealLink, lang, mailtemplates.Vars{
-			RevealURL:       revealURL,
-			UserEmail:       tok.Email,
-			ExpiresAt:       tok.ExpiresAt,
-			ValidityMinutes: int(tokens.DefaultTTL / time.Minute),
-			InstanceName:    brand.InstanceName,
-			InstanceDomain:  s.cfg.InstanceDomain,
-			ContactURL:      brand.ContactURL,
-		})
-		if rerr != nil {
-			s.logger.Error("mailtemplates.Render failed", "err", rerr)
-			acceptedResp(nil)
-			return
-		}
-		built, aerr := mail.Assemble(mail.AssembleInputs{
-			To:             tok.Email,
-			InstanceDomain: s.cfg.InstanceDomain,
-			Subject:        rendered.Subject,
-			Text:           rendered.Text,
-			HTML:           rendered.HTML,
-		})
-		if aerr != nil {
-			s.logger.Error("mail.Assemble failed", "err", aerr)
-			acceptedResp(nil)
-			return
-		}
-		msg = built
-	} else {
-		built, berr := mail.BuildReveal(mail.RevealInputs{
-			To:              tok.Email,
-			InstanceDomain:  s.cfg.InstanceDomain,
-			RevealURL:       revealURL,
-			ValidityMinutes: int(tokens.DefaultTTL / time.Minute),
-		})
-		if berr != nil {
-			s.logger.Error("mail.BuildReveal failed", "err", berr)
-			acceptedResp(nil)
-			return
-		}
-		msg = built
+	msg, ok := s.buildRevealMessage(r.Context(), tok, revealURL)
+	if !ok {
+		acceptedResp(nil)
+		return
 	}
 
-	// The capture queue is in-memory: write to it directly so the mail is
-	// tagged with its demo owner and eval mode gets the capture id back.
-	// (Setting CaptureIDCallback on the shared sender raced between
-	// concurrent requests.)
-	// Any other sender talks to a relay: it runs in the background so the
-	// relay round trip never shows in the response time (FR-B.13); a
-	// failure is audited as mail.send_failed.
-	sender := s.sender
-	captureID := ""
-	if cs, ok := sender.(*mailer.CaptureSender); ok && cs.Store != nil {
-		captureID = cs.Store.CaptureFor(captureOwner, msg.To, msg.Subject, msg.String())
-	} else {
-		s.sendRevealMail(r.Context(), sender, email, tokenRef(tok.Token), msg)
-	}
+	sender, captureID := s.deliverRevealMail(r.Context(), captureOwner, email, tok, msg)
 
 	s.auditAppend(r.Context(), audit.EventTokenIssued, email, tokenRef(tok.Token), map[string]any{
-		"ip_hash":   ipHash,
-		"ua_hash":   uaHash,
+		"ip_hash":   pr.ipHash,
+		"ua_hash":   pr.uaHash,
 		"domain":    tok.Domain,
 		"transport": sender.Name(),
 	})
@@ -795,6 +690,25 @@ func (s *Server) clientIP(r *http.Request) string {
 	return client.String()
 }
 
+// rateLimitIPv6Prefix is the IPv6 block one client is assumed to control:
+// a /64 is the usual end-site allocation, so keying on the /128 would let
+// a caller rotate source addresses past every per-IP limit (FR-B.12).
+const rateLimitIPv6Prefix = 64
+
+// rateLimitIPKey maps a client IP to its per-IP limiter key: IPv4 (and
+// IPv4-mapped IPv6) addresses as-is, native IPv6 folded to its /64.
+func rateLimitIPKey(ip string) string {
+	addr, err := netip.ParseAddr(ip)
+	if err != nil {
+		return ip
+	}
+	addr = addr.Unmap()
+	if addr.Is4() {
+		return addr.String()
+	}
+	return netip.PrefixFrom(addr.WithZone(""), rateLimitIPv6Prefix).Masked().String()
+}
+
 func (s *Server) isTrustedProxy(addr netip.Addr) bool {
 	addr = addr.Unmap()
 	for _, p := range s.trustedProxies {
@@ -813,49 +727,55 @@ func remoteHost(remoteAddr string) string {
 	return remoteAddr
 }
 
-// handlePolicy serves /api/v1/policy. With ?token=… present, the token is
-// consumed atomically and the policy is returned. Without a token, returns
-// the default policy descriptor (for documentation / Swagger).
+// maxPolicyBodyBytes caps the POST /api/v1/policy body: one 43-char token
+// plus JSON framing.
+const maxPolicyBodyBytes = 1 << 10
+
+// handlePolicy serves GET /api/v1/policy: the default policy descriptor
+// (for documentation / Swagger). A ?token=… is refused, never consumed:
+// URLs end up in proxy, ingress and SIEM access logs, where a live token
+// is a bearer credential anyone reading them could use first. Tokens are
+// consumed by POST only (handlePolicyConsume).
 func (s *Server) handlePolicy(w http.ResponseWriter, r *http.Request) {
-	tokenParam := strings.TrimSpace(r.URL.Query().Get("token"))
-	if tokenParam == "" {
-		policy.Handler().ServeHTTP(w, r)
+	if r.URL.Query().Has("token") {
+		writeJSONError(w, http.StatusBadRequest, "token_in_query",
+			"Reveal tokens are not accepted in the URL. POST {\"token\":\"…\"} to /api/v1/policy.")
 		return
 	}
-	if s.tokens == nil {
-		http.Error(w, `{"error":"storage_unavailable"}`, http.StatusServiceUnavailable)
+	policy.Handler().ServeHTTP(w, r)
+}
+
+// handlePolicyConsume serves POST /api/v1/policy with a JSON body
+// {"token":"…"}: the token is consumed atomically and the resolved policy
+// is returned (FR-B.36). The body keeps the token out of every access log.
+func (s *Server) handlePolicyConsume(w http.ResponseWriter, r *http.Request) {
+	defer r.Body.Close()
+	tokenParam, ok := s.readConsumeToken(w, r)
+	if !ok {
 		return
 	}
-	ipHash := s.hashShort(s.clientIP(r))
+	ip := s.clientIP(r)
+	// Before any lookup: a refused fetch must neither probe nor burn a token.
+	if !s.allowTokenLookup(w, ip) {
+		writeJSONError(w, http.StatusTooManyRequests, "rate_limited",
+			"Too many attempts from your network. Try again in a few minutes.")
+		return
+	}
+	ipHash := s.hashShort(ip)
 	uaHash := s.hashShort(r.UserAgent())
 
 	// Resolve the policy BEFORE burning the token: if it can't be resolved
 	// (DB error, policy disabled or deleted during the TTL) the user keeps a
 	// working link instead of silently getting the weaker built-in default.
-	var resolved map[string]any
-	if pending, err := s.tokens.Get(r.Context(), tokenParam); err == nil {
-		resolved, err = s.resolvedPolicy(r.Context(), pending.Email)
-		if err != nil {
-			s.logger.Error("policy resolution failed; token left unconsumed", "err", err)
-			writeJSONError(w, http.StatusServiceUnavailable, "policy_unavailable",
-				"Your password policy is temporarily unavailable. Try the link again later.")
-			return
-		}
+	resolved, err := s.resolveBeforeConsume(r.Context(), tokenParam)
+	if err != nil {
+		s.logger.Error("policy resolution failed; token left unconsumed", "err", err)
+		writeJSONError(w, http.StatusServiceUnavailable, "policy_unavailable",
+			"Your password policy is temporarily unavailable. Try the link again later.")
+		return
 	}
 	tok, err := s.tokens.Consume(r.Context(), tokenParam, ipHash, uaHash)
-	switch {
-	case errors.Is(err, tokens.ErrNotFound):
-		writeJSONError(w, http.StatusNotFound, "token_not_found", "Unknown reveal token.")
-		return
-	case errors.Is(err, tokens.ErrExpired):
-		writeJSONError(w, http.StatusGone, "token_expired", "Reveal link expired. Request a new one.")
-		return
-	case errors.Is(err, tokens.ErrConsumed):
-		writeJSONError(w, http.StatusGone, "token_consumed", "Link already used. Request a new one if needed.")
-		return
-	case err != nil:
-		s.logger.Error("tokens.Consume failed", "err", err)
-		http.Error(w, `{"error":"internal"}`, http.StatusInternalServerError)
+	if s.writeConsumeError(w, err) {
 		return
 	}
 
@@ -868,35 +788,8 @@ func (s *Server) handlePolicy(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	s.auditAppend(r.Context(), audit.EventTokenConsumed, tok.Email, tokenRef(tok.Token), map[string]any{
-		"ip_hash": ipHash,
-		"ua_hash": uaHash,
-		"domain":  tok.Domain,
-	})
-
-	// FR-B.39..41 — optional post-consultation notification. Fire and
-	// forget: the assertion-policy roundtrip must not wait on SMTP, and
-	// the requester already has the secret in front of them by the time
-	// the mail goes out. We snapshot every request-scoped value before
-	// detaching the context so the goroutine doesn't reach into a
-	// cancelled r.Context().
-	if s.shouldNotifyPostConsult(r.Context(), tok.Email) {
-		lang := mailtemplates.PickLanguage(r.Header.Get("Accept-Language"))
-		brand := s.resolveBranding(r.Context())
-		// dispatchPostConsult intentionally detaches from r.Context() —
-		// the request returns before SMTP finishes and cancelling the
-		// goroutine would lose the audit-trail mail.
-		// #nosec G118 -- fire-and-forget by design
-		go s.dispatchPostConsult(postConsultMail{
-			token:    tok.Token,
-			email:    tok.Email,
-			lang:     lang,
-			brand:    brand,
-			consumed: time.Now().UTC(),
-			ipHash:   ipHash,
-			uaHash:   uaHash,
-		})
-	}
+	s.auditTokenConsumed(r.Context(), tok, resolved, ipHash, uaHash)
+	s.notifyPostConsult(r, tok)
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
@@ -907,11 +800,22 @@ func (s *Server) handlePolicy(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// mailLanguage is the template language for outbound mail. It is the
+// instance setting, never the HTTP client's Accept-Language: the public
+// form lets anyone request a mail for someone else, and the reveal page
+// may be opened by someone other than the owner.
+func (s *Server) mailLanguage() string {
+	if s.cfg.MailLanguage == "" {
+		return "en"
+	}
+	return s.cfg.MailLanguage
+}
+
 // shouldNotifyPostConsult resolves the policy for the consultation's
 // owner and returns its NotifyOnConsult flag. Returns false on any error
 // or when the policies layer is not wired (zero-config eval).
 func (s *Server) shouldNotifyPostConsult(ctx context.Context, email string) bool {
-	if s.policies == nil || s.mailTpls == nil || s.sender == nil {
+	if s.policies == nil || s.mailTpls == nil {
 		return false
 	}
 	pol, err := s.policies.Resolve(ctx, email)
@@ -930,8 +834,56 @@ type postConsultMail struct {
 	lang     string
 	brand    branding.Branding
 	consumed time.Time
-	ipHash   string
-	uaHash   string
+	ip       string
+	ua       string
+}
+
+// maxMailUALen caps the User-Agent quoted in the post-consultation mail.
+const maxMailUALen = 200
+
+// mailDisplayText makes caller-controlled text safe to quote in a mail
+// body: control characters are dropped and the result is capped at max
+// runes.
+func mailDisplayText(v string, maxRunes int) string {
+	var b strings.Builder
+	n := 0
+	for _, c := range v {
+		if unicode.IsControl(c) {
+			continue
+		}
+		if n == maxRunes {
+			b.WriteString("…")
+			break
+		}
+		b.WriteRune(c)
+		n++
+	}
+	return b.String()
+}
+
+// queuePostConsult hands m to a background mail worker tracked by
+// mailWG, so Shutdown waits for it. When every worker is busy the mail
+// is dropped and audited rather than delaying the policy response.
+func (s *Server) queuePostConsult(ctx context.Context, m postConsultMail) {
+	select {
+	case s.mailSlots <- struct{}{}:
+	default:
+		s.logger.Error("mail queue full — post-consultation mail dropped")
+		s.auditAppend(ctx, "mail.post_consult_failed", m.email, tokenRef(m.token), map[string]any{
+			"stage": "queue",
+			"error": "mail queue full",
+		})
+		return
+	}
+	s.mailWG.Add(1)
+	// Detached from the request context on purpose: the response is
+	// written before the relay answers.
+	// #nosec G118 -- bounded by mailSlots, drained by WaitMail
+	go func() {
+		defer s.mailWG.Done()
+		defer func() { <-s.mailSlots }()
+		s.dispatchPostConsult(m)
+	}()
 }
 
 // dispatchPostConsult renders the post_consultation template and sends
@@ -949,8 +901,8 @@ func (s *Server) dispatchPostConsult(m postConsultMail) {
 		InstanceDomain:     s.cfg.InstanceDomain,
 		ContactURL:         m.brand.ContactURL,
 		ConsultedAt:        m.consumed.Format(time.RFC3339),
-		ConsultedIP:        m.ipHash,
-		ConsultedUserAgent: m.uaHash,
+		ConsultedIP:        m.ip,
+		ConsultedUserAgent: m.ua,
 	})
 	if err != nil {
 		s.logger.Error("post-consultation render failed", "err", err)
@@ -975,17 +927,18 @@ func (s *Server) dispatchPostConsult(m postConsultMail) {
 		})
 		return
 	}
-	if err := s.sender.Send(ctx, msg); err != nil {
-		s.logger.Error("post-consultation send failed", "transport", s.sender.Name(), "err", err)
+	sender := s.currentSender()
+	if err := sender.Send(ctx, msg); err != nil {
+		s.logger.Error("post-consultation send failed", "transport", sender.Name(), "err", err)
 		s.auditAppend(ctx, "mail.post_consult_failed", m.email, tokenRef(m.token), map[string]any{
 			"stage":     "send",
-			"transport": s.sender.Name(),
+			"transport": sender.Name(),
 			"error":     err.Error(),
 		})
 		return
 	}
 	s.auditAppend(ctx, "mail.post_consult_sent", m.email, tokenRef(m.token), map[string]any{
-		"transport": s.sender.Name(),
+		"transport": sender.Name(),
 	})
 }
 
@@ -1015,6 +968,18 @@ func (s *Server) resolvedPolicy(ctx context.Context, email string) (map[string]a
 	if err != nil {
 		return nil, err
 	}
+	// A row the reveal bundle would refuse (saved before the editor checked
+	// it, or edited in the DB) must not cost the user their link.
+	if err := policies.ValidateForReveal(row); err != nil {
+		return nil, fmt.Errorf("policy %d: %w", row.ID, err)
+	}
+	return policyDescriptor(row)
+}
+
+// policyDescriptor is the policy as served to the reveal page. Its
+// fingerprint (descriptorSHA256) is what ties a token.consumed audit row
+// to a policy.created / policy.updated row.
+func policyDescriptor(row policies.Policy) (map[string]any, error) {
 	out := map[string]any{
 		"id":              row.ID,
 		"domain":          row.DomainName,
@@ -1059,7 +1024,10 @@ func policyDefaultMap() map[string]any {
 func (s *Server) handleRevealPage(w http.ResponseWriter, r *http.Request) {
 	token := chi.URLParam(r, "token")
 	state := "ready"
-	if s.tokens != nil {
+	status := http.StatusOK
+	if !s.allowTokenLookup(w, s.clientIP(r)) {
+		state, status = "rate_limited", http.StatusTooManyRequests
+	} else if s.tokens != nil {
 		if tok, err := s.tokens.Get(r.Context(), token); err == nil {
 			if tok.ConsumedAt != nil {
 				state = "consumed"
@@ -1075,15 +1043,28 @@ func (s *Server) handleRevealPage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Frame-Options", "DENY")
 	w.Header().Set("Referrer-Policy", "no-referrer")
-	_ = s.revealTpl.Execute(w, map[string]any{
+	data := map[string]any{
 		"CSPNonce":   scriptNonce(w),
 		"Token":      token,
 		"State":      state,
-		"Version":    version.Version,
 		"EvalBanner": s.cfg.IsEval(),
 		"DemoBanner": s.cfg.IsDemo(),
 		"Branding":   s.resolveBranding(r.Context()),
-	})
+	}
+	w.WriteHeader(status)
+	_ = s.revealTpl.Execute(w, data)
+}
+
+// allowTokenLookup charges one reveal-token lookup to ip and reports
+// whether it is under the cap; when it is not, Retry-After is set.
+func (s *Server) allowTokenLookup(w http.ResponseWriter, ip string) bool {
+	if s.tokenLimiter == nil || s.tokenLimiter.Allow(ip) {
+		return true
+	}
+	s.rateHits.WithLabelValues("token_lookup").Inc()
+	_, _, resetAt := s.tokenLimiter.Inspect(ip)
+	w.Header().Set("Retry-After", strconv.Itoa(max(1, int(math.Ceil(time.Until(resetAt).Seconds())))))
+	return false
 }
 
 func (s *Server) metricsHandler() http.Handler {
@@ -1173,6 +1154,22 @@ func statusBucket(code int) string {
 }
 
 // ----- reveal page template -------------------------------------------------
+//
+// Session semantics (FR-B.27..32). The session starts when the token is
+// consumed and lasts the policy's sessionTTLSec; the page then drops the
+// proposals and purges the clipboard. Regeneration is bounded by
+// regenerateLimit. Both are enforced in the page only: generation is
+// client-side, so after the consume there is no server round trip left to
+// gate, and a caller holding the policy can run the public generator at
+// will — which yields no access. The server-side guarantees are the
+// single-use link (atomic consume) and the audit trail. For the same
+// reason the user_sessions table (migration 0002) is not written: nothing
+// would ever read a row back.
+//
+// Secret hygiene: no-store (no disk cache; most browsers then skip the
+// back/forward cache too), translate="no" on the passwords (no page
+// translation round trip), and pagehide clears the DOM and the clipboard.
+// There is no form field, so browser autofill never sees a password.
 
 const revealHTML = `<!doctype html>
 <html lang="fr"><head>
@@ -1228,10 +1225,12 @@ const revealHTML = `<!doctype html>
 {{ if .DemoBanner }}<div class="banner demo" data-testid="demo-banner">⚠ Public demo — all data is public and purged daily</div>{{ end }}
 <header>
   {{ if .Branding.HasLogo }}<img src="/static/branding/logo" alt="{{ .Branding.InstanceName }} logo">{{ end }}
-  <h1>{{ .Branding.InstanceName }} <small style="font-weight:400;color:var(--stone);font-family:var(--font-body);font-size:0.95rem">{{ .Version }}</small></h1>
+  <h1>{{ .Branding.InstanceName }}</h1>
 </header>
 
-{{ if eq .State "expired" }}
+{{ if eq .State "rate_limited" }}
+  <p class="err">Too many attempts from your network. Try again in a few minutes.</p>
+{{ else if eq .State "expired" }}
   <p class="err">This reveal link has expired. Please request a new one.</p>
 {{ else if eq .State "consumed" }}
   <p class="err">This reveal link has already been used. Request a new one if necessary.</p>
@@ -1239,49 +1238,153 @@ const revealHTML = `<!doctype html>
   <p class="err">Unknown reveal link. Please request a new one.</p>
 {{ else }}
   <p>Click the button below to reveal your password proposals. The link is single-use; once consumed it can no longer be re-opened.</p>
-  <p><button id="decode-btn" type="button">Décoder</button></p>
+  <p id="decode-row"><button id="decode-btn" type="button">Décoder</button></p>
+  <p id="countdown" data-testid="countdown" aria-live="polite" hidden></p>
   <div id="proposals" data-testid="proposals" hidden></div>
+  <p id="regen-row" hidden><button id="regen-btn" type="button" class="secondary">Nouvelles propositions</button></p>
+  <p id="clip-note" hidden><small>Le presse-papier est vidé 30 s après la copie et à la fermeture de la page.</small></p>
+  <p id="expired" data-testid="expired" class="err" hidden>Session expirée. Les propositions ont été effacées ; demandez un nouveau lien si nécessaire.</p>
   <p id="error" class="err" hidden></p>
   <script src="/static/sealkeeper-generation.umd.js"></script>
   <script nonce="{{ $.CSPNonce }}">
+    // Session rules (FR-B.27..32) live in the bundle (web/src/reveal.js),
+    // which also documents what the server can and cannot enforce once
+    // generation runs in the browser.
     const token = {{ .Token }};
-    const btn = document.getElementById('decode-btn');
-    const out = document.getElementById('proposals');
-    const errEl = document.getElementById('error');
+    const G = window.SealKeeper.Generation;
+    const R = window.SealKeeper.Reveal;
+    const $ = (id) => document.getElementById(id);
+    const btn = $('decode-btn'), out = $('proposals'), errEl = $('error');
+    const countdown = $('countdown'), regenRow = $('regen-row'), regenBtn = $('regen-btn');
+    const guard = R.createClipboardGuard({ clipboard: navigator.clipboard, permissions: navigator.permissions });
+    let session = null, descriptor = null, ticker = null, closed = false;
+
+    function card(p) {
+      const c = document.createElement('div');
+      c.className = 'card';
+      c.dataset.testid = 'proposal';
+      const pwd = document.createElement('div');
+      pwd.className = 'pwd notranslate';
+      pwd.dataset.testid = 'password';
+      pwd.setAttribute('translate', 'no'); // never sent to a page-translation service
+      pwd.textContent = p.password;
+      const meta = document.createElement('div');
+      const badge = document.createElement('span');
+      badge.className = 'badge';
+      badge.dataset.testid = 'anssi';
+      badge.textContent = p.anssiLevel;
+      const bits = document.createElement('small');
+      bits.textContent = ' ' + p.entropyBits.toFixed(1) + ' bits';
+      meta.append(badge, bits);
+      const gauge = document.createElement('div');
+      gauge.className = 'gauge';
+      const fill = document.createElement('div');
+      fill.style.width = Math.min(100, p.entropyBits) + '%';
+      gauge.append(fill);
+      const row = document.createElement('p');
+      row.style.marginTop = '0.5rem';
+      const copy = document.createElement('button');
+      copy.type = 'button';
+      copy.className = 'secondary';
+      copy.textContent = 'Copier';
+      copy.addEventListener('click', async () => {
+        if (closed || session.expired()) return close();
+        try {
+          await guard.copy(p.password);
+          copy.textContent = 'Copié'; // FR-B.31
+        } catch (e) {
+          copy.textContent = 'Copie impossible';
+        }
+        setTimeout(() => { copy.textContent = 'Copier'; }, 2000);
+      });
+      row.append(copy);
+      c.append(pwd, meta, gauge, row);
+      return c;
+    }
+
+    function show(proposals) {
+      out.replaceChildren(...proposals.map(card));
+      out.hidden = false;
+      const left = G.regenerationsLeft(descriptor);
+      if (regenRow.hidden && left > 0 && !closed) regenRow.hidden = false; // never shown for a limit of 0
+      regenBtn.disabled = left === 0;
+      regenBtn.textContent = 'Nouvelles propositions (' + left + ')';
+    }
+
+    function tick() {
+      if (!session || closed) return;
+      if (session.expired()) return close();
+      const label = 'Temps restant : ' + session.label();
+      if (countdown.textContent !== label) countdown.textContent = label;
+    }
+
+    // close ends the session (TTL reached or page left): the proposals
+    // leave the DOM and the clipboard is purged.
+    function close() {
+      if (closed) return;
+      closed = true;
+      clearInterval(ticker);
+      void guard.purge();
+      out.replaceChildren();
+      out.hidden = true;
+      regenRow.hidden = true;
+      countdown.hidden = true;
+      $('clip-note').hidden = true;
+      $('expired').hidden = false;
+    }
 
     btn.addEventListener('click', async () => {
       btn.disabled = true; btn.textContent = '…';
       try {
-        const r = await fetch('/api/v1/policy?token=' + encodeURIComponent(token));
+        // Token in the body, never the URL: URLs land in access logs.
+        const r = await fetch('/api/v1/policy', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token: token }),
+          cache: 'no-store',
+        });
         if (!r.ok) {
           const j = await r.json().catch(() => ({}));
           throw new Error(j.detail || ('HTTP ' + r.status));
         }
         const body = await r.json();
         const policy = body.policy ? body.policy : body;
+        // The session starts when the token is consumed (FR-B.29).
+        session = R.createRevealSession({ ttlSec: R.sessionTTLSec(policy) });
         // Honour the operator's generator, proposal count and parameters.
-        const descriptor = window.SealKeeper.Generation.descriptorFromPolicy(policy);
-        const proposals = await window.SealKeeper.Generation.generate(descriptor);
-        out.hidden = false;
-        out.innerHTML = proposals.map((p, i) => '<div class="card" data-testid="proposal">' +
-          '<div class="pwd" data-testid="password">' + escapeHtml(p.password) + '</div>' +
-          '<div><span class="badge" data-testid="anssi">' + p.anssiLevel + '</span> ' +
-          '<small>' + p.entropyBits.toFixed(1) + ' bits</small></div>' +
-          '<div class="gauge"><div style="width:' + Math.min(100, p.entropyBits) + '%"></div></div>' +
-          '<p style="margin-top:0.5rem"><button type="button" class="secondary" data-copy="' + i + '">Copier</button></p>' +
-          '</div>').join('');
-        out.querySelectorAll('[data-copy]').forEach((b, i) => b.addEventListener('click', async () => {
-          await navigator.clipboard.writeText(proposals[i].password);
-          b.textContent = 'Copié';
-          setTimeout(() => { b.textContent = 'Copier'; navigator.clipboard.writeText(''); }, 30000);
-        }));
+        descriptor = G.descriptorFromPolicy(policy);
+        const proposals = await G.generate(descriptor);
+        if (closed) return;
+        $('decode-row').hidden = true;
+        countdown.hidden = false;
+        $('clip-note').hidden = false;
+        show(proposals);
+        tick();
+        ticker = setInterval(tick, 1000);
       } catch (e) {
         errEl.hidden = false;
         errEl.textContent = e.message || String(e);
       }
     });
 
-    function escapeHtml(s){ return s.replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','\'':'&#39;','"':'&quot;'}[c])); }
+    regenBtn.addEventListener('click', async () => {
+      if (closed || session.expired()) return close();
+      try {
+        show(await G.regenerate(descriptor)); // bounded by regenerateLimit (FR-B.27)
+      } catch (e) {
+        regenBtn.disabled = true;
+      }
+    });
+
+    // Timers are throttled in background tabs: catch up on return, and
+    // retry a clipboard purge the unfocused document could not write.
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') { tick(); void guard.resume(); }
+    });
+    window.addEventListener('focus', () => { tick(); void guard.resume(); });
+    // Leaving the page ends the session, so a back/forward-cache snapshot
+    // never holds the proposals.
+    window.addEventListener('pagehide', () => { if (session) close(); });
   </script>
 {{ end }}
 </main></body></html>`
@@ -1347,7 +1450,7 @@ const landingHTML = `<!doctype html>
 <main>
   <header>
     {{ if .Branding.HasLogo }}<img src="/static/branding/logo" alt="{{ .Branding.InstanceName }} logo">{{ end }}
-    <h1>{{ .Branding.InstanceName }} <small style="font-weight:400;color:var(--stone);font-family:var(--font-body);font-size:0.95rem">{{ .Version }}</small></h1>
+    <h1>{{ .Branding.InstanceName }}</h1>
   </header>
   <p>Request a password by emailing yourself a one-shot reveal link.</p>
   <form id="request-form" method="POST" action="/api/v1/request">
@@ -1380,6 +1483,13 @@ async function submitRequest(ev){
 document.getElementById('request-form').addEventListener('submit', submitRequest);
 </script>
 </body></html>`
+
+// isJSONContentType reports whether a Content-Type header names
+// application/json (parameters such as charset are allowed).
+func isJSONContentType(v string) bool {
+	mt, _, err := mime.ParseMediaType(v)
+	return err == nil && mt == "application/json"
+}
 
 // rateLimitKey folds sub-addressing ("user+tag@example.org") so the per-email
 // cap cannot be dodged — nor a victim's inbox flooded — by varying the tag.

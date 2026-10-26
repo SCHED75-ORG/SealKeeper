@@ -21,7 +21,7 @@ import (
 func newRepo(t *testing.T) *admin.Repo {
 	t.Helper()
 	dsn := storagetest.DSN(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), storagetest.SetupTimeout)
 	defer cancel()
 	s, err := storage.Open(ctx, storage.Options{DSN: dsn})
 	if err != nil {
@@ -536,5 +536,30 @@ func TestVerifyPasswordCountsFailures(t *testing.T) {
 	}
 	if !errors.Is(last, admin.ErrAccountLocked) {
 		t.Fatalf("after repeated step-up failures: %v, want ErrAccountLocked", last)
+	}
+}
+
+// Regression: a disabled account answered ErrAccountDisabled before the
+// password was checked, so any password revealed that the email exists.
+func TestAuthenticateDisabledNeedsPassword(t *testing.T) {
+	t.Parallel()
+	r := newRepo(t)
+	ctx := context.Background()
+	const pw = "supersecret-12chars"
+	if _, err := r.Create(ctx, "keeper@example.test", pw); err != nil {
+		t.Fatal(err)
+	}
+	a, err := r.Create(ctx, "off@example.test", pw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.SetDisabled(ctx, a.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Authenticate(ctx, "off@example.test", "wrong-guess", ""); !errors.Is(err, admin.ErrInvalidCreds) {
+		t.Fatalf("wrong password: err = %v, want ErrInvalidCreds", err)
+	}
+	if _, err := r.Authenticate(ctx, "off@example.test", pw, ""); !errors.Is(err, admin.ErrAccountDisabled) {
+		t.Fatalf("right password: err = %v, want ErrAccountDisabled", err)
 	}
 }

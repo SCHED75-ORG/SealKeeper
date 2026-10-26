@@ -51,7 +51,7 @@ Le document sert de **contrat** entre frontend et backend, et de **référence c
 | ID | Endpoint | Méthode | Description | Auth |
 |---|---|---|---|---|
 | FR-G.11 | `/api/v1/request` | POST | Demande d'un mot de passe par un utilisateur | aucune |
-| FR-G.12 | `/api/v1/policy` | GET | Récupération de la policy descriptor par le JS à partir d'un token | token de session (URL query) |
+| FR-G.12 | `/api/v1/policy` | POST | Récupération de la policy descriptor par le JS à partir d'un token (consommation unique). `GET` sans token = policy par défaut ; `GET ?token=` refusé (400 `token_in_query`) | token de session (corps JSON — jamais dans l'URL, qui finit dans les logs d'accès) |
 | FR-G.13 | `/api/v1/event` | POST | Feedback côté JS : proposition copiée, page fermée, etc. (analytique anonyme) | token de session (URL query) |
 | FR-G.14 | `/healthz` | GET | Liveness probe — retourne 200 OK dès que le binaire répond | aucune |
 | FR-G.15 | `/readyz` | GET | Readiness probe — vérifie DB et migrations | aucune |
@@ -91,13 +91,19 @@ Le document sert de **contrat** entre frontend et backend, et de **référence c
 
 Note : aucun retour ne révèle si l'email est dans l'allowlist, rate-limité, ou autre (cf. E.34-E.40).
 
-#### 3.2.2 GET /api/v1/policy
+#### 3.2.2 POST /api/v1/policy
 
-**Query parameters**
+**Corps JSON** (`Content-Type: application/json`, ≤ 1 KiB)
 
-| Paramètre | Type | Obligatoire | Notes |
+| Champ | Type | Obligatoire | Notes |
 |---|---|---|---|
-| `token` | string | oui | Token de session opaque 128 bits (32 hex) reçu par email |
+| `token` | string | oui | Token de session opaque reçu par email (segment final de `/reveal/<token>`) |
+
+Le token n'est **jamais** accepté en query string : une URL est journalisée
+par les reverse proxies, ingress et SIEM, où un token vivant est un
+identifiant porteur consommable par quiconque lit ces logs.
+`GET /api/v1/policy?token=…` répond `400 token_in_query` sans consommer le
+token ; `GET /api/v1/policy` sans paramètre renvoie la policy par défaut.
 
 **Réponse 200 OK**
 
@@ -445,7 +451,7 @@ sequenceDiagram
 
     API->>Mail: Email avec lien /reveal/{token}
 
-    Reveal->>API: GET /api/v1/policy?token=...
+    Reveal->>API: POST /api/v1/policy {token}
     activate API
     Note over API: Consomme le token<br/>marque consumed_at, ip, user_agent
     API-->>Reveal: 200 OK + PolicyDescriptor

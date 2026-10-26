@@ -13,7 +13,7 @@ import (
 // (SQLite by default) and applies every migration.
 func migrated(t *testing.T) storage.Store {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), storagetest.SetupTimeout)
 	defer cancel()
 	s, err := storage.Open(ctx, storage.Options{DSN: storagetest.DSN(t)})
 	if err != nil {

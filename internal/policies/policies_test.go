@@ -3,14 +3,17 @@ package policies_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
-	"time"
 
+	"encoding/json"
 	"github.com/sched75/sealkeeper/internal/domains"
 	"github.com/sched75/sealkeeper/internal/elevations"
 	"github.com/sched75/sealkeeper/internal/policies"
 	"github.com/sched75/sealkeeper/internal/storage"
 	"github.com/sched75/sealkeeper/internal/storage/storagetest"
+	"os"
 )
 
 type rigs struct {
@@ -22,7 +25,7 @@ type rigs struct {
 func newRig(t *testing.T) rigs {
 	t.Helper()
 	dsn := storagetest.DSN(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), storagetest.SetupTimeout)
 	defer cancel()
 	s, err := storage.Open(ctx, storage.Options{DSN: dsn})
 	if err != nil {
@@ -38,8 +41,15 @@ func newRig(t *testing.T) rigs {
 	return rigs{dr, er, pr}
 }
 
-// g2Params is the smallest parameter set a G2 policy is saved with.
-const g2Params = `{"library":["alpha","bravo","charlie","delta"]}`
+// g2Params is a G2 parameter set clearing the B2 floor (and so B1):
+// 8 words over 256 entries + separator + 4 digits = 80.6 bits.
+var g2Params = func() string {
+	words := make([]string, 256)
+	for i := range words {
+		words[i] = fmt.Sprintf("%q", fmt.Sprintf("w%03d", i))
+	}
+	return `{"library":[` + strings.Join(words, ",") + `],"numberOfWords":8}`
+}()
 
 // ----- Create + validation --------------------------------------------------
 
@@ -247,5 +257,65 @@ func TestCreateRejectsGeneratorParamsTheBundleRefuses(t *testing.T) {
 		if _, err := r.policies.Create(context.Background(), in, nil); !errors.Is(err, policies.ErrInvalidShape) {
 			t.Errorf("case %d: err = %v, want ErrInvalidShape", i, err)
 		}
+	}
+}
+
+// Saving and revealing apply the same rules, so valid edge values still save.
+func TestCreateAcceptsWhatTheBundleAccepts(t *testing.T) {
+	t.Parallel()
+	r := newRig(t)
+	ctx := context.Background()
+	for i, in := range []policies.CreateInputs{
+		{Generator: policies.GeneratorG3, ParamsJSON: `{"length":20,"alphabetSize":62}`, ProposalCount: 50, RegenerateLimit: 100},
+		{Generator: policies.GeneratorG3, ParamsJSON: `{"alphabetSize":57,"excludeAmbiguous":true}`},
+		{Generator: policies.GeneratorG2, ParamsJSON: `{"library":["a","b","b"],"dictionarySize":2,"numberOfWords":64}`},
+	} {
+		d, err := r.domains.Create(ctx, fmt.Sprintf("ok%d.example.com", i), "", true, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		in.DomainID, in.ANSSILevel, in.Name = d.ID, elevations.LevelB1, "x"
+		if _, err := r.policies.Create(ctx, in, nil); err != nil {
+			t.Errorf("case %d: %v", i, err)
+		}
+	}
+}
+
+// testdata/reveal_parity.json is also run through generate() by
+// web/tests/reveal-parity.test.js: both sides must agree on every case.
+func TestValidateForRevealMatchesBundle(t *testing.T) {
+	t.Parallel()
+	raw, err := os.ReadFile("testdata/reveal_parity.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cases []struct {
+		Name   string
+		OK     bool
+		Policy struct {
+			Generator       policies.Generator
+			ProposalCount   int
+			RegenerateLimit int
+			Parameters      json.RawMessage
+		}
+	}
+	if err := json.Unmarshal(raw, &cases); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range cases {
+		t.Run(c.Name, func(t *testing.T) {
+			err := policies.ValidateForReveal(policies.Policy{
+				Generator:       c.Policy.Generator,
+				ProposalCount:   c.Policy.ProposalCount,
+				RegenerateLimit: c.Policy.RegenerateLimit,
+				Params:          c.Policy.Parameters,
+			})
+			if (err == nil) != c.OK {
+				t.Fatalf("err = %v, bundle accepts = %v", err, c.OK)
+			}
+			if err != nil && !errors.Is(err, policies.ErrInvalidShape) {
+				t.Fatalf("err = %v, want ErrInvalidShape", err)
+			}
+		})
 	}
 }

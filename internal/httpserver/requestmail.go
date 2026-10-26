@@ -28,8 +28,12 @@ const (
 	// requestLatencyJitter is the spread added on top of the floor.
 	requestLatencyJitter = 50 * time.Millisecond
 	// mailWorkers caps the reveal mails in flight. When all slots are busy
-	// the mail is dropped and audited rather than delaying the response.
+	// the mail waits in the queue for the next free worker.
 	mailWorkers = 32
+	// mailQueueDepth caps the reveal mails accepted but not yet sent
+	// (in flight plus waiting). Only past it is a mail dropped and audited
+	// rather than delaying the response.
+	mailQueueDepth = 1024
 	// mailSendTimeout bounds one background send, detached from the
 	// request context (which is cancelled as soon as the 202 is written).
 	mailSendTimeout = 60 * time.Second
@@ -68,7 +72,7 @@ func randomDuration(limit time.Duration) time.Duration {
 // is audited (mail.send_failed) since the requester never learns it.
 func (s *Server) sendRevealMail(ctx context.Context, sender mailer.Sender, email, ref string, msg mail.Message) {
 	select {
-	case s.mailSlots <- struct{}{}:
+	case s.mailQueue <- struct{}{}:
 	default:
 		s.logger.Error("mail queue full — reveal mail dropped", "transport", sender.Name())
 		s.auditAppend(ctx, "mail.send_failed", email, ref, map[string]any{
@@ -80,9 +84,13 @@ func (s *Server) sendRevealMail(ctx context.Context, sender mailer.Sender, email
 	s.mailWG.Add(1)
 	// Detached from the request context on purpose: the 202 is written
 	// before the relay answers, and its cancellation must not abort the send.
-	// #nosec G118 -- bounded by mailSlots, fire-and-forget by design
+	// #nosec G118 -- bounded by mailQueue/mailSlots, fire-and-forget by design
 	go func() {
 		defer s.mailWG.Done()
+		defer func() { <-s.mailQueue }()
+		// Wait for a free worker; the send timeout starts only once one
+		// is ours, so a backlog never eats into a queued mail's budget.
+		s.mailSlots <- struct{}{}
 		defer func() { <-s.mailSlots }()
 		ctx, cancel := context.WithTimeout(context.Background(), mailSendTimeout)
 		defer cancel()
@@ -96,7 +104,8 @@ func (s *Server) sendRevealMail(ctx context.Context, sender mailer.Sender, email
 	}()
 }
 
-// WaitMail blocks until every background reveal mail has been handed to
+// WaitMail blocks until every background mail (reveal links and
+// post-consultation notices) has been handed to
 // the relay (or failed), or ctx ends. Used at shutdown and by tests.
 func (s *Server) WaitMail(ctx context.Context) {
 	done := make(chan struct{})

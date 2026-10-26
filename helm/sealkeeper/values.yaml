@@ -33,13 +33,10 @@ config:
   # protocol) on the ingress controller's Service so it sees real client IPs.
   trustedProxyCIDRs: ""
   maxLibrarySizeMB: 10
-  maxActiveSessions: 10000
-  sessionTTLSeconds: 900
   adminSessionTTLSeconds: 28800
   adminSessionIdleSeconds: 1800
   swaggerUiEnabled: false
   demoMode: false
-  maintenanceMode: false
 
 # Secrets — see secret.yaml. In production prefer ExternalSecrets / Sealed
 # Secrets and set `secret.create: false` + `secret.existingSecret: <name>`.
@@ -99,6 +96,29 @@ ingress:
         - sealkeeper.example.com
   annotations:
     nginx.ingress.kubernetes.io/proxy-body-size: "12m"
+  # Reveal links (/reveal/<token>) and the token-consume endpoint get a
+  # second Ingress with the access log OFF: the URL carries a live,
+  # single-use token, and the controller's default log format writes the
+  # full request line — anyone reading those logs (or the SIEM they feed)
+  # could open the link first. The default annotation is for ingress-nginx;
+  # set the equivalent for another controller. Keep it enabled.
+  #
+  # Error log: ingress-nginx cannot redact it either. On an upstream failure
+  # (SealKeeper down — the token is then never consumed and stays live) it
+  # writes `request: "GET /reveal/<token> ..."` at `error` level. No plain
+  # annotation lowers the error-log level per path; with snippet
+  # annotations allowed on the controller (allow-snippet-annotations=true,
+  # annotations-risk-level=Critical), uncomment the snippet below. It is not
+  # on by default because a controller that refuses snippets rejects the
+  # whole Ingress. Otherwise set the controller-wide ConfigMap key
+  # `error-log-level: crit`, or keep the controller's stderr out of any
+  # shared log pipeline.
+  revealPaths:
+    enabled: true
+    annotations:
+      nginx.ingress.kubernetes.io/enable-access-log: "false"
+      # nginx.ingress.kubernetes.io/configuration-snippet: |
+      #   error_log /var/log/nginx/error.log crit;
   # Cert-manager — set issuer to enable.
   certManager:
     enabled: false

@@ -48,6 +48,8 @@ env:
   # 1.26.4..1.26.10 (GO-2026-5037..6809: net/http HTTP/2, html/template,
   # crypto/x509, crypto/tls, net/textproto — see govulncheck history).
   GO_VERSION_DEFAULT: "1.26.10"
+  # Scanner pinned (never @latest); keep in lockstep with security.yml.
+  GOVULNCHECK_VERSION: "v1.9.0"
   NODE_VERSION: "20"
 
 jobs:
@@ -60,18 +62,18 @@ jobs:
     timeout-minutes: 8
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: ${{ env.GO_VERSION_DEFAULT }}
           cache: true
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: "npm"
@@ -93,7 +95,7 @@ jobs:
         # v2.5.0 was built with Go 1.25 and its typechecker rejects modules
         # that declare go 1.26.x. v2.12.x is built with Go 1.26+ and clears
         # the gate.
-        uses: golangci/golangci-lint-action@v8
+        uses: golangci/golangci-lint-action@4afd733a84b1f43292c63897423277bb7f4313a9 # v8.0.0
         with:
           version: v2.12.2
           args: --timeout=5m --config=.golangci.yml
@@ -111,20 +113,20 @@ jobs:
         run: cd web && npx eslint . --max-warnings=0
 
       - name: Hadolint (Dockerfile)
-        uses: hadolint/hadolint-action@v3.1.0
+        uses: hadolint/hadolint-action@54c9adbab1582c2ef04b2016b760714a4bfde3cf # v3.1.0
         with:
           dockerfile: Dockerfile
           config: .hadolint.yaml
           failure-threshold: warning
 
       - name: yamllint
-        uses: ibiqlik/action-yamllint@v3
+        uses: ibiqlik/action-yamllint@2576378a8e339169678f9939646ee3ee325e845c # v3.1.1
         with:
           config_file: .yamllint.yaml
           strict: true
 
       - name: markdownlint
-        uses: DavidAnson/markdownlint-cli2-action@v17
+        uses: DavidAnson/markdownlint-cli2-action@db43aef879112c3119a410d69f66701e0d530809 # v17.0.0
         with:
           globs: |
             **/*.md
@@ -132,7 +134,7 @@ jobs:
             !web/node_modules
 
       - name: shellcheck
-        uses: ludeeus/action-shellcheck@2.0.0
+        uses: ludeeus/action-shellcheck@00cae500b08a931fb5698e11e79bfbd38e612a38 # 2.0.0
         with:
           severity: warning
           scandir: ./scripts
@@ -152,10 +154,10 @@ jobs:
         goarch: [amd64, arm64]
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set up Go ${{ matrix.go }}
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: ${{ matrix.go }}
           cache: true
@@ -174,7 +176,7 @@ jobs:
             ./cmd/sealkeeper
 
       - name: Upload binary artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: sealkeeper-linux-${{ matrix.goarch }}-go${{ matrix.go }}
           path: dist/sealkeeper-linux-${{ matrix.goarch }}
@@ -186,10 +188,10 @@ jobs:
     timeout-minutes: 6
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: "npm"
@@ -205,7 +207,7 @@ jobs:
 
       - name: Upload bundle
         if: hashFiles('web/package-lock.json') != ''
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: web-bundle
           path: web/dist
@@ -224,10 +226,10 @@ jobs:
         go: ["1.26.10", "1.27.3"]
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set up Go ${{ matrix.go }}
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: ${{ matrix.go }}
           cache: true
@@ -256,7 +258,7 @@ jobs:
 
       - name: Upload coverage to Codecov
         if: matrix.go == env.GO_VERSION_DEFAULT
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@b9fd7d16f6d7d1b5d2bec1a2887e65ceed900238 # v4.6.0
         with:
           files: ./coverage.out
           flags: backend-go
@@ -272,10 +274,10 @@ jobs:
     timeout-minutes: 6
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: "npm"
@@ -305,7 +307,7 @@ jobs:
 
       - name: Upload coverage to Codecov
         if: hashFiles('web/package-lock.json') != ''
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@b9fd7d16f6d7d1b5d2bec1a2887e65ceed900238 # v4.6.0
         with:
           files: web/coverage/coverage-final.json
           flags: frontend-js
@@ -321,10 +323,10 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: ${{ env.GO_VERSION_DEFAULT }}
           cache: true
@@ -332,7 +334,7 @@ jobs:
       - name: govulncheck (blocking on high/critical CVE)
         run: |
           set -euo pipefail
-          go install golang.org/x/vuln/cmd/govulncheck@latest
+          go install "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}"
           # FR-L.31: blocking on high/critical. govulncheck exits non-zero on any
           # known affecting vuln; we surface the report and fail the job.
           govulncheck ./...
@@ -341,7 +343,7 @@ jobs:
         # 2.24.6 ships a Go 1.26 toolchain inside its container; older
         # tags (2.21.x) baked in Go 1.23 with GOTOOLCHAIN=local, which
         # made every package fail to load against our go 1.26+ module.
-        uses: securego/gosec@v2.24.6
+        uses: securego/gosec@88835e86bba381290c2f60a1c73610995b1502eb # v2.24.6
         with:
           # Excludes mirror the .golangci.yml gosec section so this standalone
           # run agrees with the lint job on which checks are false positives
@@ -354,7 +356,7 @@ jobs:
         # failure in govulncheck would otherwise leave no artifact and the
         # CodeQL upload action would warn loudly.
         if: always() && hashFiles('gosec.sarif') != ''
-        uses: github/codeql-action/upload-sarif@v4
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
         with:
           sarif_file: gosec.sarif
           category: gosec
@@ -390,28 +392,31 @@ jobs:
   # ---------------------------------------------------------------------------
   e2e-subset:
     name: E2E subset (Chromium happy path)
-    runs-on: ubuntu-latest
+    # Pinned: ubuntu-latest moved to 26.04, which the pinned Playwright
+    # cannot install Chromium on ("does not support chromium on
+    # ubuntu26.04-x64"). Move forward together with a Playwright bump.
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     needs: [build, build-js]
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: ${{ env.GO_VERSION_DEFAULT }}
           cache: true
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: "npm"
           cache-dependency-path: web/package-lock.json
 
       - name: Download linux/amd64 binary
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: sealkeeper-linux-amd64-go${{ env.GO_VERSION_DEFAULT }}
           path: dist
@@ -425,7 +430,7 @@ jobs:
         # generation.umd.js"> returns 404 and the JS generator never
         # populates the proposals — the @happy-path end-to-end reveal
         # test fails on the proposal locator.
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: web-bundle
           path: web/dist
@@ -439,7 +444,7 @@ jobs:
 
       - name: Cache Playwright browsers
         if: hashFiles('tests/e2e/package-lock.json') != ''
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('tests/e2e/package-lock.json') }}
@@ -456,7 +461,7 @@ jobs:
 
       - name: Upload E2E artifacts on failure
         if: failure() && hashFiles('tests/e2e/package-lock.json') != ''
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: e2e-artifacts
           path: |

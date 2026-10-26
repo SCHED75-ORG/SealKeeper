@@ -21,8 +21,10 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/go-webauthn/webauthn/protocol"
 	gowebauthn "github.com/go-webauthn/webauthn/webauthn"
 
 	"github.com/sched75/sealkeeper/internal/storage"
@@ -38,6 +40,10 @@ var (
 	// its signature counter did not move forward from the stored value:
 	// the WebAuthn signal (§6.1.1) that the authenticator may be cloned.
 	ErrCloneDetected = errors.New("webauthn: signature counter did not increase, authenticator may be cloned")
+	// ErrUserNotVerified means the authenticator did not report user
+	// verification (PIN, biometric). A key used in place of TOTP must prove
+	// both possession and the user, or a stolen key is enough on its own.
+	ErrUserNotVerified = errors.New("webauthn: authenticator did not verify the user")
 )
 
 // Credential is the row view used by the admin UI.
@@ -73,9 +79,59 @@ type AdminIdentity struct {
 
 // Repo persists credentials and runs ceremonies via the go-webauthn library.
 type Repo struct {
-	db  *sql.DB
-	wa  *gowebauthn.WebAuthn
-	now func() time.Time
+	db         *sql.DB
+	wa         *gowebauthn.WebAuthn
+	now        func() time.Time
+	challenges *loginChallenges
+}
+
+// loginChallengeTTL bounds how long an issued assertion challenge can be
+// redeemed. It matches the step-up window of the login flow.
+const loginChallengeTTL = 5 * time.Minute
+
+// loginChallenges is the server-side record of every assertion challenge
+// BeginLogin issued and FinishLogin has not yet spent. The client-held
+// session blob is only used to name the challenge: the SessionData that
+// is verified, its owner and its expiry all come from here, and the entry
+// is deleted on the first FinishLogin attempt, so a captured (blob,
+// assertion) pair cannot be replayed, even for authenticators whose
+// signature counter stays at 0. Process-local, like the pending-login
+// store in the HTTP layer: SealKeeper ships as a single binary.
+type loginChallenges struct {
+	mu    sync.Mutex
+	items map[string]loginChallenge
+}
+
+type loginChallenge struct {
+	adminID   int64
+	session   gowebauthn.SessionData
+	expiresAt time.Time
+}
+
+// put records a freshly issued challenge and drops expired ones so the
+// map cannot grow without bound when FinishLogin is never reached.
+func (c *loginChallenges) put(now time.Time, adminID int64, sd gowebauthn.SessionData) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for k := range c.items {
+		if now.After(c.items[k].expiresAt) {
+			delete(c.items, k)
+		}
+	}
+	c.items[sd.Challenge] = loginChallenge{adminID: adminID, session: sd, expiresAt: now.Add(loginChallengeTTL)}
+}
+
+// take removes the challenge and returns its SessionData when it is still
+// live and was issued to adminID. The entry is spent either way.
+func (c *loginChallenges) take(now time.Time, adminID int64, challenge string) (gowebauthn.SessionData, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e, ok := c.items[challenge]
+	delete(c.items, challenge)
+	if !ok || now.After(e.expiresAt) || e.adminID != adminID {
+		return gowebauthn.SessionData{}, false
+	}
+	return e.session, true
 }
 
 // Config tunes the relying-party identity. RPID must be the effective domain
@@ -87,6 +143,10 @@ type Config struct {
 	Origins       []string
 }
 
+// ceremonyTimeout bounds a registration or login ceremony; the session
+// blob carries the matching expiry, checked server-side.
+const ceremonyTimeout = 5 * time.Minute
+
 // NewRepo binds a Repo. It returns an error when the relying-party config
 // is invalid (missing RPID / origin), which lets main.go fail fast at
 // startup rather than at the first registration attempt.
@@ -97,15 +157,33 @@ func NewRepo(db *sql.DB, cfg Config) (*Repo, error) {
 	if len(cfg.Origins) == 0 {
 		return nil, errors.New("webauthn: at least one origin required")
 	}
+	// Keys are a second factor standing in for TOTP, so both ceremonies
+	// require user verification (FR-C.19). Resident keys are discouraged:
+	// the step-up always names the allowed credentials after the password,
+	// so a discoverable credential would only burn a slot on the key.
+	// Attestation is "none": there is no authenticator allow-list (AAGUID
+	// or MDS policy) to check a statement against, and asking for one
+	// would only collect device-identifying data.
 	wa, err := gowebauthn.New(&gowebauthn.Config{
 		RPID:          cfg.RPID,
 		RPDisplayName: cfg.RPDisplayName,
 		RPOrigins:     cfg.Origins,
+		AuthenticatorSelection: protocol.AuthenticatorSelection{
+			ResidentKey:        protocol.ResidentKeyRequirementDiscouraged,
+			RequireResidentKey: protocol.ResidentKeyNotRequired(),
+			UserVerification:   protocol.VerificationRequired,
+		},
+		AttestationPreference: protocol.PreferNoAttestation,
+		Timeouts: gowebauthn.TimeoutsConfig{
+			Login:        gowebauthn.TimeoutConfig{Enforce: true, Timeout: ceremonyTimeout, TimeoutUVD: ceremonyTimeout},
+			Registration: gowebauthn.TimeoutConfig{Enforce: true, Timeout: ceremonyTimeout, TimeoutUVD: ceremonyTimeout},
+		},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("webauthn: %w", err)
 	}
-	return &Repo{db: db, wa: wa, now: time.Now}, nil
+	return &Repo{db: db, wa: wa, now: time.Now,
+		challenges: &loginChallenges{items: make(map[string]loginChallenge)}}, nil
 }
 
 // WithClock for tests.
@@ -155,9 +233,9 @@ func (r *Repo) FinishRegistration(ctx context.Context, who AdminIdentity, friend
 	if len(sessionJSON) == 0 {
 		return Credential{}, ErrSessionMissing
 	}
-	var sd gowebauthn.SessionData
-	if err := json.Unmarshal(sessionJSON, &sd); err != nil {
-		return Credential{}, fmt.Errorf("webauthn: parse session: %w", err)
+	sd, err := parseSession(sessionJSON)
+	if err != nil {
+		return Credential{}, err
 	}
 	user, err := r.loadUser(ctx, who, false)
 	if err != nil {
@@ -166,6 +244,9 @@ func (r *Repo) FinishRegistration(ctx context.Context, who AdminIdentity, friend
 	cred, err := r.wa.FinishRegistration(user, sd, req)
 	if err != nil {
 		return Credential{}, fmt.Errorf("webauthn.FinishRegistration: %w", err)
+	}
+	if !cred.Flags.UserVerified {
+		return Credential{}, ErrUserNotVerified
 	}
 	row, err := r.persist(ctx, who.ID, friendlyName, cred)
 	if err != nil {
@@ -286,6 +367,7 @@ func (r *Repo) BeginLogin(ctx context.Context, who AdminIdentity) (options, sess
 	if err != nil {
 		return nil, nil, err
 	}
+	r.challenges.put(r.now(), who.ID, *sd)
 	return options, session, nil
 }
 
@@ -300,14 +382,25 @@ func (r *Repo) BeginLogin(ctx context.Context, who AdminIdentity) (options, sess
 // ErrCloneDetected and leave the stored counter untouched; the returned
 // Credential then carries only CredentialID and AdminID, for the audit
 // trail.
+//
+// The client blob only names the challenge. The SessionData that is
+// verified comes from the server-side record, which this call spends
+// whatever the outcome: an unknown, expired, already used or foreign
+// challenge yields ErrSessionMissing.
 func (r *Repo) FinishLogin(ctx context.Context, who AdminIdentity, sessionJSON []byte, req *http.Request) (Credential, error) {
 	if len(sessionJSON) == 0 {
 		return Credential{}, ErrSessionMissing
 	}
-	var sd gowebauthn.SessionData
-	if err := json.Unmarshal(sessionJSON, &sd); err != nil {
-		return Credential{}, fmt.Errorf("webauthn: parse session: %w", err)
+	client, err := parseSession(sessionJSON)
+	if err != nil {
+		return Credential{}, err
 	}
+	sd, ok := r.challenges.take(r.now(), who.ID, client.Challenge)
+	if !ok {
+		return Credential{}, ErrSessionMissing
+	}
+	// The stored session decides; user verification stays mandatory.
+	sd.UserVerification = protocol.VerificationRequired
 	user, err := r.loadUser(ctx, who, true)
 	if err != nil {
 		return Credential{}, err
@@ -317,6 +410,9 @@ func (r *Repo) FinishLogin(ctx context.Context, who AdminIdentity, sessionJSON [
 		return Credential{}, fmt.Errorf("webauthn.FinishLogin: %w", err)
 	}
 	id := base64.RawURLEncoding.EncodeToString(cred.ID)
+	if !cred.Flags.UserVerified {
+		return Credential{CredentialID: id, AdminID: who.ID}, ErrUserNotVerified
+	}
 	if cred.Authenticator.CloneWarning {
 		return Credential{CredentialID: id, AdminID: who.ID}, ErrCloneDetected
 	}
@@ -342,6 +438,19 @@ func (r *Repo) FinishLogin(ctx context.Context, who AdminIdentity, sessionJSON [
 	t := now
 	row.LastUsedAt = &t
 	return row, nil
+}
+
+// parseSession decodes the ceremony session blob. The blob travels through
+// the browser, so the user-verification requirement is pinned here rather
+// than trusted from it: go-webauthn only checks the UV flag when the
+// session says "required".
+func parseSession(sessionJSON []byte) (gowebauthn.SessionData, error) {
+	var sd gowebauthn.SessionData
+	if err := json.Unmarshal(sessionJSON, &sd); err != nil {
+		return sd, fmt.Errorf("webauthn: parse session: %w", err)
+	}
+	sd.UserVerification = protocol.VerificationRequired
+	return sd, nil
 }
 
 // ----- gowebauthn.User adapter ---------------------------------------------

@@ -38,6 +38,27 @@ func TestLoad_RejectsMalformedEnv(t *testing.T) {
 	}
 }
 
+// The mail language is an instance setting (never the requester's
+// Accept-Language); an unsupported value is refused, not ignored.
+func TestLoad_MailLanguage(t *testing.T) {
+	evalEnv(t)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.MailLanguage != "en" {
+		t.Errorf("default MailLanguage = %q, want en", cfg.MailLanguage)
+	}
+	t.Setenv("SK_MAIL_LANGUAGE", " FR ")
+	if cfg, err = Load(); err != nil || cfg.MailLanguage != "fr" {
+		t.Errorf("SK_MAIL_LANGUAGE=FR: %q, %v", cfg.MailLanguage, err)
+	}
+	t.Setenv("SK_MAIL_LANGUAGE", "de")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "SK_MAIL_LANGUAGE") {
+		t.Errorf("SK_MAIL_LANGUAGE=de: err = %v, want a refusal", err)
+	}
+}
+
 func TestLoad_AdminSessionKnobs(t *testing.T) {
 	evalEnv(t)
 	t.Setenv("SK_ADMIN_SESSION_TTL_SECONDS", "3600")
@@ -85,6 +106,29 @@ func TestLoad_DeprecatedKnobs(t *testing.T) {
 	}
 	if len(cfg.Warnings) != 2 {
 		t.Errorf("Warnings = %v, want one per ignored knob", cfg.Warnings)
+	}
+}
+
+// Regression: the handover doc listed `demo` as an SK_MODE value while
+// validate refuses it with a message that never mentions the real toggle.
+// Demo is SK_DEMO_MODE=true on top of SK_MODE=eval|production; the refusal
+// must say so.
+func TestLoad_DemoIsAToggleNotAMode(t *testing.T) {
+	evalEnv(t)
+	t.Setenv("SK_MODE", "demo")
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "SK_DEMO_MODE=true") {
+		t.Fatalf("Load(SK_MODE=demo) err = %v, want a refusal pointing at SK_DEMO_MODE=true", err)
+	}
+
+	t.Setenv("SK_MODE", "eval")
+	t.Setenv("SK_DEMO_MODE", "true")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load(SK_MODE=eval, SK_DEMO_MODE=true): %v", err)
+	}
+	if !cfg.IsDemo() || !cfg.IsEval() {
+		t.Errorf("IsDemo=%v IsEval=%v, want both", cfg.IsDemo(), cfg.IsEval())
 	}
 }
 

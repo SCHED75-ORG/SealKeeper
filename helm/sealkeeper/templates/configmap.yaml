@@ -12,10 +12,7 @@ data:
   SK_LOG_LEVEL: {{ .Values.config.logLevel | quote }}
   SK_TRUSTED_PROXY_CIDRS: {{ .Values.config.trustedProxyCIDRs | quote }}
   SK_MAX_LIBRARY_SIZE_MB: {{ .Values.config.maxLibrarySizeMB | quote }}
-  SK_MAX_ACTIVE_SESSIONS: {{ .Values.config.maxActiveSessions | quote }}
-  SK_SESSION_TTL_SECONDS: {{ .Values.config.sessionTTLSeconds | quote }}
   SK_ADMIN_SESSION_TTL_SECONDS: {{ .Values.config.adminSessionTTLSeconds | quote }}
   SK_ADMIN_SESSION_IDLE_SECONDS: {{ .Values.config.adminSessionIdleSeconds | quote }}
   SK_SWAGGER_UI_ENABLED: {{ .Values.config.swaggerUiEnabled | quote }}
   SK_DEMO_MODE: {{ .Values.config.demoMode | quote }}
-  SK_MAINTENANCE_MODE: {{ .Values.config.maintenanceMode | quote }}

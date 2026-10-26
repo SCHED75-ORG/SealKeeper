@@ -20,7 +20,13 @@ permissions:
   issues: write
 
 env:
-  GO_VERSION: "1.25"
+  # Same exact patch as ci.yml / release.yml / Dockerfile: govulncheck reports
+  # stdlib vulns against the toolchain it runs on, so a looser version here
+  # scans a Go that is not the one we ship.
+  GO_VERSION: "1.26.10"
+  # Pinned (never @latest): the scanner itself is supply-chain input. Keep in
+  # lockstep with ci.yml / nightly.yml.
+  GOVULNCHECK_VERSION: "v1.9.0"
   NODE_VERSION: "20"
   IMAGE_REF: ghcr.io/${{ github.repository_owner }}/sealkeeper:latest
   # Pinned release asset + SHA-256 (kept in lockstep with release.yml).
@@ -37,10 +43,10 @@ jobs:
       go_findings: ${{ steps.gov.outputs.findings }}
       npm_findings: ${{ steps.npm.outputs.findings }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with: { go-version: "${{ env.GO_VERSION }}", cache: true }
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: "npm"
@@ -50,14 +56,16 @@ jobs:
         id: gov
         run: |
           set -euo pipefail
-          go install golang.org/x/vuln/cmd/govulncheck@latest
-          set +e
+          go install "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}"
+          # -json ALWAYS exits 0, even when vulns affect our code, so the exit
+          # code cannot be the signal. A finding whose first trace frame names
+          # a function is a symbol-level (reachable) hit — exactly what the
+          # text mode counts as "Your code is affected".
           govulncheck -json ./... > govulncheck.json
-          rc=$?
-          set -e
-          # rc != 0 means at least one affecting vuln; we keep the report and
-          # surface a flag for the issue-creation step.
-          if [ "$rc" -ne 0 ]; then
+          affected="$(jq -s '[.[] | .finding? | select(. != null)
+            | select(.trace[0].function != null) | .osv] | unique | length' govulncheck.json)"
+          echo "govulncheck: ${affected} affecting vulnerabilities"
+          if [ "$affected" -ne 0 ]; then
             echo "findings=true" >> "$GITHUB_OUTPUT"
           else
             echo "findings=false" >> "$GITHUB_OUTPUT"
@@ -75,7 +83,7 @@ jobs:
 
       - name: Upload dep-scan artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: dep-scan-reports
           path: |
@@ -90,7 +98,7 @@ jobs:
     outputs:
       findings: ${{ steps.trivy.outputs.findings }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Compute lowercase image ref
         id: ref
@@ -128,7 +136,7 @@ jobs:
 
       - name: Upload Trivy SARIF
         if: always()
-        uses: github/codeql-action/upload-sarif@v4
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
         with:
           sarif_file: trivy.sarif
           category: trivy-weekly
@@ -142,11 +150,11 @@ jobs:
       needs.deps-rescan.outputs.npm_findings == 'true' ||
       needs.image-rescan.outputs.findings == 'true'
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with: { name: dep-scan-reports, path: reports }
 
       - name: Create or update tracking issue
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         with:
           script: |
             const fs = require('fs');

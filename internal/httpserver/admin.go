@@ -2,9 +2,12 @@ package httpserver
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,6 +28,7 @@ import (
 	"github.com/sched75/sealkeeper/internal/integrations"
 	"github.com/sched75/sealkeeper/internal/libraries"
 	"github.com/sched75/sealkeeper/internal/mail"
+	"github.com/sched75/sealkeeper/internal/mailer"
 	"github.com/sched75/sealkeeper/internal/mailtemplates"
 	"github.com/sched75/sealkeeper/internal/policies"
 	"github.com/sched75/sealkeeper/internal/smtpconfig"
@@ -232,7 +236,7 @@ func (s *Server) handleAdminLoginPost(w http.ResponseWriter, r *http.Request) {
 
 	email := strings.TrimSpace(r.FormValue("email"))
 	password := r.FormValue("password")
-	if !s.loginLimiter.Allow(s.clientIP(r)) {
+	if !s.loginLimiter.Allow(rateLimitIPKey(s.clientIP(r))) {
 		s.auditAppend(r.Context(), "admin.login_failed", email, "", map[string]any{"reason": "rate_limited"})
 		s.adminLoginError(w, r, "rate_limited")
 		return
@@ -240,37 +244,8 @@ func (s *Server) handleAdminLoginPost(w http.ResponseWriter, r *http.Request) {
 	totpCode := strings.TrimSpace(r.FormValue("totp"))
 
 	res, err := s.adminRepo.Authenticate(r.Context(), email, password, totpCode)
-	switch {
-	case errors.Is(err, admin.ErrInvalidCreds):
-		s.auditAppend(r.Context(), "admin.login_failed", email, "", map[string]any{"reason": "credentials"})
-		s.adminLoginError(w, r, "bad_creds")
-		return
-	case errors.Is(err, admin.ErrAccountLocked):
-		s.auditAppend(r.Context(), "admin.login_failed", email, "", map[string]any{"reason": "locked"})
-		s.adminLoginError(w, r, "locked")
-		return
-	case errors.Is(err, admin.ErrAccountDisabled):
-		s.auditAppend(r.Context(), "admin.login_failed", email, "", map[string]any{"reason": "disabled"})
-		s.adminLoginError(w, r, "disabled")
-		return
-	case errors.Is(err, admin.ErrTOTPUnrecoverable):
-		s.logger.Error("admin.Authenticate: TOTP secret unrecoverable", "err", err, "email", email)
-		s.auditAppend(r.Context(), "admin.login_failed", email, "", map[string]any{"reason": "totp_unrecoverable"})
-		s.adminLoginError(w, r, "totp_unrecoverable")
-		return
-	case errors.Is(err, admin.ErrTOTPRequired):
-		// Password OK, but the second factor still needs to be supplied.
-		// Branch to the WebAuthn step-up flow when the admin has at least
-		// one registered key — otherwise re-render the form asking for
-		// the TOTP code on top of the existing inputs.
-		if s.tryWebauthnStepUp(w, r, res.Admin) {
-			return
-		}
-		s.adminLoginError(w, r, "totp_required")
-		return
-	case err != nil:
-		s.logger.Error("admin.Authenticate failed", "err", err)
-		s.adminLoginError(w, r, "internal")
+	if err != nil {
+		s.respondAdminLoginFailure(w, r, email, res.Admin, err)
 		return
 	}
 	if res.UsedRecoveryCode {
@@ -295,6 +270,42 @@ func (s *Server) handleAdminLoginPost(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/admin/dashboard", http.StatusFound)
 }
 
+// respondAdminLoginFailure maps a non-nil Authenticate error to its audit
+// event and login error slug. Every credential failure answers bad_creds;
+// ErrTOTPRequired branches to the WebAuthn step-up when the admin has keys.
+func (s *Server) respondAdminLoginFailure(w http.ResponseWriter, r *http.Request, email string, ad admin.Admin, err error) {
+	switch {
+	case errors.Is(err, admin.ErrInvalidCreds):
+		s.auditAppend(r.Context(), "admin.login_failed", email, "", map[string]any{"reason": "credentials"})
+		s.adminLoginError(w, r, "bad_creds")
+	case errors.Is(err, admin.ErrAccountLocked):
+		// Same slug as a wrong password: unknown emails never lock, so a
+		// distinct "locked" answer would confirm the email is an admin. The
+		// audit log keeps the real reason.
+		s.auditAppend(r.Context(), "admin.login_failed", email, "", map[string]any{"reason": "locked"})
+		s.adminLoginError(w, r, "bad_creds")
+	case errors.Is(err, admin.ErrAccountDisabled):
+		s.auditAppend(r.Context(), "admin.login_failed", email, "", map[string]any{"reason": "disabled"})
+		s.adminLoginError(w, r, "disabled")
+	case errors.Is(err, admin.ErrTOTPUnrecoverable):
+		s.logger.Error("admin.Authenticate: TOTP secret unrecoverable", "err", err, "email", email)
+		s.auditAppend(r.Context(), "admin.login_failed", email, "", map[string]any{"reason": "totp_unrecoverable"})
+		s.adminLoginError(w, r, "totp_unrecoverable")
+	case errors.Is(err, admin.ErrTOTPRequired):
+		// Password OK, but the second factor still needs to be supplied.
+		// Branch to the WebAuthn step-up flow when the admin has at least
+		// one registered key — otherwise re-render the form asking for
+		// the TOTP code on top of the existing inputs.
+		if s.tryWebauthnStepUp(w, r, ad) {
+			return
+		}
+		s.adminLoginError(w, r, "totp_required")
+	default:
+		s.logger.Error("admin.Authenticate failed", "err", err)
+		s.adminLoginError(w, r, "internal")
+	}
+}
+
 func (s *Server) handleAdminLogout(w http.ResponseWriter, r *http.Request) {
 	if c, err := r.Cookie(cookieAdminSession); err == nil {
 		// Require the session's CSRF token so a cross-site POST cannot log
@@ -317,11 +328,11 @@ func (s *Server) handleAdminLogout(w http.ResponseWriter, r *http.Request) {
 // assertion exchange. SameSite=Strict and a 5-minute TTL.
 const cookieAdminLoginStep = "sk_admin_login_step"
 
-// cookieAdminLoginAssertion carries the (encrypted-on-disk-only because
-// it's just a JSON blob signed by the WebAuthn library's own challenge)
-// session data from /begin to /finish so the server can stay stateless
-// about the in-flight assertion. Mirrors how the registration path uses
-// cookieWebauthnSession.
+// cookieAdminLoginAssertion carries the WebAuthn session blob from /begin
+// to /finish, authenticated and bound to the pending-login token by
+// sealCeremony. It only names the challenge: webauthn.Repo keeps the
+// authoritative SessionData server-side and spends it on the first
+// /finish, so editing or replaying the cookie gains nothing.
 const cookieAdminLoginAssertion = "sk_admin_login_assertion"
 
 // tryWebauthnStepUp checks whether the admin has registered any WebAuthn
@@ -420,7 +431,7 @@ func (s *Server) handleAdminLoginWebauthnBegin(w http.ResponseWriter, r *http.Re
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	ad, _, ok := s.loadPendingLogin(r)
+	ad, pendingToken, ok := s.loadPendingLogin(r)
 	if !ok {
 		http.Error(w, "session expired", http.StatusGone)
 		return
@@ -433,7 +444,7 @@ func (s *Server) handleAdminLoginWebauthnBegin(w http.ResponseWriter, r *http.Re
 	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     cookieAdminLoginAssertion,
-		Value:    base64.RawURLEncoding.EncodeToString(session),
+		Value:    s.sealCeremony(session, "login", pendingToken),
 		Path:     "/admin/login/webauthn",
 		HttpOnly: true,
 		SameSite: http.SameSiteStrictMode,
@@ -472,12 +483,8 @@ func (s *Server) handleAdminLoginWebauthnFinish(w http.ResponseWriter, r *http.R
 		http.Error(w, "no assertion session", http.StatusBadRequest)
 		return
 	}
-	if len(sessionCookie.Value) > adminMaxWebauthnSessionBytes {
-		http.Error(w, "session too large", http.StatusBadRequest)
-		return
-	}
-	sessionBytes, err := base64.RawURLEncoding.DecodeString(sessionCookie.Value)
-	if err != nil {
+	sessionBytes, ok := s.openCeremony(sessionCookie.Value, "login", pendingToken)
+	if !ok {
 		http.Error(w, "bad session", http.StatusBadRequest)
 		return
 	}
@@ -617,64 +624,78 @@ func (s *Server) handleAdminSetupPost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Step 1 — password change.
-	if a.ForcePasswordChange {
-		np := r.FormValue("new_password")
-		conf := r.FormValue("new_password_confirm")
-		if np == "" || np != conf {
-			s.adminSetupError(w, r, "passwords_mismatch")
-			return
-		}
-		if err := s.adminRepo.ChangePassword(r.Context(), a.ID, np); err != nil {
-			if errors.Is(err, admin.ErrPasswordTooWeak) {
-				s.adminSetupError(w, r, "password_too_weak&why="+url.QueryEscape(admin.PasswordWeaknessCodes(err)))
-				return
-			}
-			s.logger.Error("ChangePassword failed", "err", err)
-			s.adminSetupError(w, r, "password_invalid")
-			return
-		}
-		_ = s.adminRepo.RevokeOtherSessions(r.Context(), a.ID, sess.Token)
-		s.auditAppend(r.Context(), "admin.password_changed", a.Email, "", nil)
+	if a.ForcePasswordChange && !s.setupChangePassword(w, r, a, sess) {
+		return
 	}
 
 	// Step 2 — TOTP enrollment + verify a fresh code so we know the user
 	// scanned the QR successfully.
-	if a.ForceTOTPEnroll {
-		// The secret and recovery codes come back sealed (SealSetup), never
-		// as client-chosen plaintext: a forged form could otherwise enrol a
-		// secret like "AA" and recovery codes of the attacker's choosing.
-		code := strings.TrimSpace(r.FormValue("totp_code"))
-		blob := strings.TrimSpace(r.FormValue("setup_blob"))
-		if blob == "" || code == "" {
-			s.adminSetupError(w, r, "totp_required")
-			return
-		}
-		secret, codes, err := s.adminRepo.OpenSetup(a.ID, sess.Token, blob)
-		if err != nil {
-			s.adminSetupError(w, r, "totp_invalid")
-			return
-		}
-		step, ok, err := totp.VerifyStep(secret, code, time.Now())
-		if err != nil || !ok {
-			s.adminSetupError(w, r, "totp_invalid")
-			return
-		}
-		if err := s.adminRepo.EnrollTOTP(r.Context(), a.ID, secret, codes); err != nil {
-			s.logger.Error("EnrollTOTP failed", "err", err)
-			s.adminSetupError(w, r, "internal")
-			return
-		}
-		// The enrolment code is spent: it cannot be replayed at login.
-		if _, err := s.adminRepo.UseTOTPStep(r.Context(), a.ID, step); err != nil {
-			s.logger.Error("UseTOTPStep failed", "err", err)
-		}
-		s.auditAppend(r.Context(), "admin.totp_enrolled", a.Email, "", nil)
+	if a.ForceTOTPEnroll && !s.setupEnrollTOTP(w, r, a, sess) {
+		return
 	}
 	// /admin (handleAdminRoot) inspects the session and lands the user
 	// on /admin/dashboard or back on /admin/login as appropriate. Sending
 	// the user there instead of /admin/dashboard means a stale
 	// force_password_change bit can't sneak the admin past the gate.
 	http.Redirect(w, r, "/admin", http.StatusFound)
+}
+
+// setupChangePassword runs setup step 1. It returns false once it has
+// written an error response, in which case the caller must stop.
+func (s *Server) setupChangePassword(w http.ResponseWriter, r *http.Request, a admin.Admin, sess admin.Session) bool {
+	np := r.FormValue("new_password")
+	conf := r.FormValue("new_password_confirm")
+	if np == "" || np != conf {
+		s.adminSetupError(w, r, "passwords_mismatch")
+		return false
+	}
+	if err := s.adminRepo.ChangePassword(r.Context(), a.ID, np); err != nil {
+		if errors.Is(err, admin.ErrPasswordTooWeak) {
+			s.adminSetupError(w, r, "password_too_weak&why="+url.QueryEscape(admin.PasswordWeaknessCodes(err)))
+			return false
+		}
+		s.logger.Error("ChangePassword failed", "err", err)
+		s.adminSetupError(w, r, "password_invalid")
+		return false
+	}
+	_ = s.adminRepo.RevokeOtherSessions(r.Context(), a.ID, sess.Token)
+	s.auditAppend(r.Context(), "admin.password_changed", a.Email, "", nil)
+	return true
+}
+
+// setupEnrollTOTP runs setup step 2. It returns false once it has written
+// an error response, in which case the caller must stop.
+func (s *Server) setupEnrollTOTP(w http.ResponseWriter, r *http.Request, a admin.Admin, sess admin.Session) bool {
+	// The secret and recovery codes come back sealed (SealSetup), never
+	// as client-chosen plaintext: a forged form could otherwise enrol a
+	// secret like "AA" and recovery codes of the attacker's choosing.
+	code := strings.TrimSpace(r.FormValue("totp_code"))
+	blob := strings.TrimSpace(r.FormValue("setup_blob"))
+	if blob == "" || code == "" {
+		s.adminSetupError(w, r, "totp_required")
+		return false
+	}
+	secret, codes, err := s.adminRepo.OpenSetup(a.ID, sess.Token, blob)
+	if err != nil {
+		s.adminSetupError(w, r, "totp_invalid")
+		return false
+	}
+	step, ok, err := totp.VerifyStep(secret, code, time.Now())
+	if err != nil || !ok {
+		s.adminSetupError(w, r, "totp_invalid")
+		return false
+	}
+	if err := s.adminRepo.EnrollTOTP(r.Context(), a.ID, secret, codes); err != nil {
+		s.logger.Error("EnrollTOTP failed", "err", err)
+		s.adminSetupError(w, r, "internal")
+		return false
+	}
+	// The enrolment code is spent: it cannot be replayed at login.
+	if _, err := s.adminRepo.UseTOTPStep(r.Context(), a.ID, step); err != nil {
+		s.logger.Error("UseTOTPStep failed", "err", err)
+	}
+	s.auditAppend(r.Context(), "admin.totp_enrolled", a.Email, "", nil)
+	return true
 }
 
 func (s *Server) handleAdminDashboard(w http.ResponseWriter, r *http.Request) {
@@ -701,7 +722,7 @@ func (s *Server) handleAdminDashboard(w http.ResponseWriter, r *http.Request) {
 		"Mode":           mode,
 		"BaseURL":        s.cfg.BaseURL,
 		"InstanceDomain": s.cfg.InstanceDomain,
-		"SenderName":     s.sender.Name(),
+		"SenderName":     s.currentSender().Name(),
 	})
 }
 
@@ -991,6 +1012,7 @@ func (s *Server) handleAdminPolicies(w http.ResponseWriter, r *http.Request) {
 		"Domains":    doms,
 		"CSRF":       sess.CSRFToken,
 		"Error":      querySlug(r, "err"),
+		"Details":    r.URL.Query().Get("details"),
 		"OK":         querySlug(r, "ok"),
 	})
 }
@@ -1020,6 +1042,9 @@ func (s *Server) handleAdminPolicyAdd(w http.ResponseWriter, r *http.Request) {
 	}
 	p, err := s.policies.Create(r.Context(), in, &a.ID)
 	switch {
+	case errors.Is(err, policies.ErrBelowFloor):
+		http.Redirect(w, r, "/admin/policies?err=below_floor&details="+url.QueryEscape(err.Error()), http.StatusSeeOther)
+		return
 	case errors.Is(err, policies.ErrInvalidShape):
 		http.Redirect(w, r, "/admin/policies?err=invalid&details="+url.QueryEscape(err.Error()), http.StatusSeeOther)
 		return
@@ -1031,11 +1056,7 @@ func (s *Server) handleAdminPolicyAdd(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/admin/policies?err=internal", http.StatusSeeOther)
 		return
 	}
-	s.auditAppend(r.Context(), "policy.created", a.Email, fmt.Sprintf("%d", p.ID), map[string]any{
-		"domain_id": p.DomainID,
-		"level":     string(p.ANSSILevel),
-		"generator": string(p.Generator),
-	})
+	s.auditAppend(r.Context(), "policy.created", a.Email, fmt.Sprintf("%d", p.ID), policySnapshot(p))
 	http.Redirect(w, r, "/admin/policies?ok=created", http.StatusSeeOther)
 }
 
@@ -1083,6 +1104,11 @@ func (s *Server) handleAdminPolicySave(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	before, err := s.policies.Get(r.Context(), id)
+	if err != nil {
+		http.Redirect(w, r, "/admin/policies?err=not_found", http.StatusSeeOther)
+		return
+	}
 	domainID, _ := strconv.ParseInt(r.FormValue("domain_id"), 10, 64)
 	in := policies.CreateInputs{
 		DomainID:          domainID,
@@ -1096,8 +1122,14 @@ func (s *Server) handleAdminPolicySave(w http.ResponseWriter, r *http.Request) {
 		NotifyOnConsult:   r.FormValue("notify_on_consult") == "on",
 		Active:            r.FormValue("active") == "on",
 	}
-	err := s.policies.Update(r.Context(), id, in)
+	err = s.policies.Update(r.Context(), id, in)
 	switch {
+	case errors.Is(err, policies.ErrBelowFloor):
+		http.Redirect(w, r, fmt.Sprintf("/admin/policies/%d/edit?err=below_floor&details=%s", id, url.QueryEscape(err.Error())), http.StatusSeeOther)
+		return
+	case errors.Is(err, policies.ErrNotFound):
+		http.Redirect(w, r, "/admin/policies?err=not_found", http.StatusSeeOther)
+		return
 	case errors.Is(err, policies.ErrInvalidShape):
 		http.Redirect(w, r, fmt.Sprintf("/admin/policies/%d/edit?err=invalid&details=%s", id, url.QueryEscape(err.Error())), http.StatusSeeOther)
 		return
@@ -1109,11 +1141,14 @@ func (s *Server) handleAdminPolicySave(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, fmt.Sprintf("/admin/policies/%d/edit?err=internal", id), http.StatusSeeOther)
 		return
 	}
-	s.auditAppend(r.Context(), "policy.updated", a.Email, fmt.Sprintf("%d", id), map[string]any{
-		"domain_id": in.DomainID,
-		"level":     string(in.ANSSILevel),
-		"generator": string(in.Generator),
-	})
+	// Audit the stored row, not the form: Update leaves domain and level
+	// untouched whatever the form says.
+	after, err := s.policies.Get(r.Context(), id)
+	if err != nil {
+		s.logger.Error("policies.Get after update failed", "err", err)
+		after = before
+	}
+	s.auditAppend(r.Context(), "policy.updated", a.Email, fmt.Sprintf("%d", id), policyUpdateDetails(before, after))
 	http.Redirect(w, r, "/admin/policies?ok=updated", http.StatusSeeOther)
 }
 
@@ -1139,10 +1174,8 @@ func (s *Server) handleAdminPolicyToggle(w http.ResponseWriter, r *http.Request)
 	if next {
 		event = "policy.enabled"
 	}
-	s.auditAppend(r.Context(), event, a.Email, fmt.Sprintf("%d", id), map[string]any{
-		"domain_id": p.DomainID,
-		"level":     string(p.ANSSILevel),
-	})
+	p.Active = next
+	s.auditAppend(r.Context(), event, a.Email, fmt.Sprintf("%d", id), policySnapshot(p))
 	http.Redirect(w, r, "/admin/policies?ok=toggled", http.StatusSeeOther)
 }
 
@@ -1167,10 +1200,7 @@ func (s *Server) handleAdminPolicyDelete(w http.ResponseWriter, r *http.Request)
 		http.Redirect(w, r, "/admin/policies?err=internal", http.StatusSeeOther)
 		return
 	}
-	s.auditAppend(r.Context(), "policy.deleted", a.Email, fmt.Sprintf("%d", id), map[string]any{
-		"domain_id": p.DomainID,
-		"level":     string(p.ANSSILevel),
-	})
+	s.auditAppend(r.Context(), "policy.deleted", a.Email, fmt.Sprintf("%d", id), policySnapshot(p))
 	http.Redirect(w, r, "/admin/policies?ok=deleted", http.StatusSeeOther)
 }
 
@@ -1584,6 +1614,7 @@ func (s *Server) handleAdminTemplateSave(w http.ResponseWriter, r *http.Request)
 	text := r.FormValue("text_body")
 	html := r.FormValue("html_body")
 
+	before, _ := s.mailTpls.Get(r.Context(), kind, lang)
 	if err := s.mailTpls.Upsert(r.Context(), kind, lang, subject, text, html, &a.ID); err != nil {
 		if errors.Is(err, mailtemplates.ErrParse) {
 			http.Redirect(w, r, fmt.Sprintf("/admin/templates/edit?kind=%s&language=%s&err=parse&details=%s",
@@ -1595,8 +1626,9 @@ func (s *Server) handleAdminTemplateSave(w http.ResponseWriter, r *http.Request)
 			kind, lang), http.StatusSeeOther)
 		return
 	}
+	after := mailtemplates.Template{Subject: subject, Text: text, HTML: html}
 	s.auditAppend(r.Context(), "template.saved", a.Email,
-		fmt.Sprintf("%s/%s", kind, lang), map[string]any{"kind": string(kind), "language": lang})
+		fmt.Sprintf("%s/%s", kind, lang), templateChangeDetails(kind, lang, before, after))
 	http.Redirect(w, r,
 		fmt.Sprintf("/admin/templates/edit?kind=%s&language=%s&ok=saved", kind, lang),
 		http.StatusSeeOther)
@@ -1643,13 +1675,15 @@ func (s *Server) handleAdminTemplateReset(w http.ResponseWriter, r *http.Request
 	}
 	kind := mailtemplates.Kind(strings.TrimSpace(r.FormValue("kind")))
 	lang := strings.TrimSpace(r.FormValue("language"))
+	before, _ := s.mailTpls.Get(r.Context(), kind, lang)
 	if err := s.mailTpls.Reset(r.Context(), kind, lang); err != nil {
 		s.logger.Error("mailtemplates.Reset failed", "err", err)
 		http.Redirect(w, r, "/admin/templates?err=internal", http.StatusSeeOther)
 		return
 	}
+	after, _ := s.mailTpls.Get(r.Context(), kind, lang)
 	s.auditAppend(r.Context(), "template.reset", a.Email,
-		fmt.Sprintf("%s/%s", kind, lang), map[string]any{"kind": string(kind), "language": lang})
+		fmt.Sprintf("%s/%s", kind, lang), templateChangeDetails(kind, lang, before, after))
 	http.Redirect(w, r,
 		fmt.Sprintf("/admin/templates/edit?kind=%s&language=%s&ok=reset", kind, lang),
 		http.StatusSeeOther)
@@ -1680,7 +1714,7 @@ func samplePreviewVars(instance string) mailtemplates.Vars {
 
 func templateVarsDocumentation() []map[string]string {
 	return []map[string]string{
-		{"name": ".RevealURL", "doc": "Absolute URL the user clicks to land on /reveal/{token}."},
+		{"name": ".RevealURL", "doc": "Absolute URL the user clicks to land on /reveal/{token}. Use it only as a bare {{ .RevealURL }}: the whole href of an <a> in HTML, on its own in the text body, never in the subject. Remote images, stylesheets and CSS url() are refused."},
 		{"name": ".UserEmail", "doc": "Recipient email address (lowercased)."},
 		{"name": ".ExpiresAt", "doc": "Token expiry timestamp (time.Time)."},
 		{"name": ".ValidityMinutes", "doc": "Convenience integer matching the TTL."},
@@ -1836,7 +1870,10 @@ func (s *Server) handleAdminIntegrationTest(w http.ResponseWriter, r *http.Reque
 		http.Redirect(w, r, "/admin/integrations?err=not_found", http.StatusSeeOther)
 		return
 	}
-	pol := integrations.NetPolicy{AllowPrivate: s.cfg.IntegrationsAllowPrivate}
+	pol := integrations.NetPolicy{
+		AllowPrivate:   s.cfg.IntegrationsAllowPrivate,
+		AllowPlainHTTP: s.cfg.IsEval(),
+	}
 	if err := integrations.TestSink(r.Context(), row, s.cfg.InstanceDomain, pol); err != nil {
 		s.auditAppend(r.Context(), "integration.test_failed", a.Email, row.Name, map[string]any{
 			"error": err.Error(),
@@ -1893,6 +1930,7 @@ func (s *Server) handleAdminBrandingSave(w http.ResponseWriter, r *http.Request)
 		TertiaryColor:  r.FormValue("tertiary_color"),
 		ContactURL:     r.FormValue("contact_url"),
 	}
+	before, _ := s.branding.Get(r.Context())
 	err := s.branding.Update(r.Context(), in, &a.ID)
 	switch {
 	case errors.Is(err, branding.ErrInvalidName):
@@ -1908,8 +1946,10 @@ func (s *Server) handleAdminBrandingSave(w http.ResponseWriter, r *http.Request)
 		http.Redirect(w, r, "/admin/branding?err=internal", http.StatusSeeOther)
 		return
 	}
+	after, _ := s.branding.Get(r.Context())
 	s.auditAppend(r.Context(), "branding.updated", a.Email, "", map[string]any{
-		"instance_name": in.InstanceName,
+		"instance_name": after.InstanceName,
+		"changes":       brandingChanges(before, after),
 	})
 	http.Redirect(w, r, "/admin/branding?ok=saved", http.StatusSeeOther)
 }
@@ -1969,8 +2009,9 @@ func (s *Server) handleAdminBrandingLogo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	s.auditAppend(r.Context(), "branding.logo_updated", a.Email, "", map[string]any{
-		"mime":  mime,
-		"bytes": len(data),
+		"mime":   mime,
+		"bytes":  len(data),
+		"sha256": sha256Hex(data),
 	})
 	http.Redirect(w, r, "/admin/branding?ok=logo_uploaded", http.StatusSeeOther)
 }
@@ -2111,8 +2152,9 @@ func sameOriginPOST(next http.Handler) http.Handler {
 
 // requireCurrentPassword is the step-up for credential changes: a stolen
 // session cookie alone must not let an attacker replace the password, the
-// e-mail or the security keys and lock the operator out. Returns the
-// error slug to show when the check fails.
+// e-mail or the security keys, nor create, disable or delete operator
+// accounts, and lock the operator out. Returns the error slug to show when
+// the check fails.
 func (s *Server) requireCurrentPassword(r *http.Request) (string, bool) {
 	a, _, _ := adminFromCtx(r)
 	err := s.adminRepo.VerifyPassword(r.Context(), a.ID, r.FormValue("current_password"))
@@ -2346,7 +2388,8 @@ const adminLoginTpl = `{{define "login.html"}}{{template "header" .}}
     <code>sealkeeper admin reset-password --email &lt;your-email&gt;</code>
     so you can re-enrol from scratch.
   {{ else if eq .Error "bad_creds" }}
-    Email, password or authenticator code is incorrect.
+    Email, password or authenticator code is incorrect. After repeated
+    failures an account is locked for 15 minutes.
   {{ else if eq .Error "locked" }}
     Too many failed attempts — this account is locked for the next 15 minutes.
   {{ else if eq .Error "rate_limited" }}
@@ -2483,6 +2526,8 @@ const adminSetupTpl = `{{define "setup.html"}}{{template "header" .}}
 {{template "footer" .}}{{end}}
 `
 
+// The production how-to shows an example DSN with a placeholder password.
+// #nosec G101 -- documentation text, not a credential
 const adminDashboardTpl = `{{define "dashboard.html"}}{{template "header" .}}
 <main>
 <h2>Welcome, {{ .Admin.Email }}</h2>
@@ -2513,12 +2558,13 @@ const adminDashboardTpl = `{{define "dashboard.html"}}{{template "header" .}}
 {{ if ne .Mode "production" }}
 <section style="margin-top:1.5rem; background:#FBF7EE; border:1px solid var(--gold); border-radius:2px; padding:1rem 1.25rem">
   <h3 style="margin-top:0; color:var(--ink)">Switching to production mode</h3>
-  <p style="margin:0.4rem 0">The run mode is decided at startup by the <code>SK_MODE</code> environment variable. Switching requires a restart with the right env in place.</p>
+  <p style="margin:0.4rem 0">The run mode is decided at startup by the <code>SK_MODE</code> environment variable (<code>eval</code> or <code>production</code>); the public demo is the separate <code>SK_DEMO_MODE</code> toggle. Switching requires a restart with the right env in place.</p>
   <p style="margin:0.4rem 0"><strong>Minimum production envelope</strong> (set before <code>docker run</code>):</p>
   <pre style="margin:0.5rem 0">SK_MODE=production
+SK_DEMO_MODE=false
 SK_BASE_URL=https://seal.example.eu
 SK_MASTER_SECRET=$(openssl rand -base64 32)
-SK_DATABASE_URL=postgres://sk:secret@db:5432/sealkeeper?sslmode=require
+SK_DATABASE_URL=postgres://sk:&lt;password&gt;@db:5432/sealkeeper?sslmode=require
 SK_INSTANCE_DOMAIN=seal.example.eu</pre>
   <p style="margin:0.4rem 0">In production the <em>Evaluation mode</em> and <em>Public demo</em> banners both disappear, the in-memory mail capture is replaced by the real SMTP relay (see <a href="/admin/smtp">SMTP</a>), and rate-limiting / lockout durations apply at full strength.</p>
   <p style="margin:0.4rem 0; color:var(--stone); font-size:0.875rem">Reference recipe: see the <em>Operator docs</em> at <a href="https://github.com/sched75/SealKeeper/blob/main/docs/prd/H-deployment.md">docs/prd/H-deployment.md</a> and the production Compose stack at <code>docker-compose.yml</code> in the repo root.</p>
@@ -2609,7 +2655,7 @@ const adminDomainsTpl = `{{define "domains.html"}}{{template "header" .}}
 const adminPoliciesTpl = `{{define "policies.html"}}{{template "header" .}}
 <main>
 <h2>Policies</h2>
-{{ if .Error }}<div class="err">{{ .Error }}</div>{{ end }}
+{{ if .Error }}<div class="err">{{ .Error }}{{ if .Details }} — <code>{{ .Details }}</code>{{ end }}</div>{{ end }}
 {{ if .OK }}<div style="background:#dcfce7;color:#166534;padding:0.5rem 1rem;border-radius:4px;margin-bottom:1rem">{{ .OK }}</div>{{ end }}
 <p>One policy per (domain, ANSSI level). When no policy is configured for an email's bucket the public flow drops the request silently (FR-B.13). Policies must reference an allowed domain — add one in <a href="/admin/domains">Domains</a> first.</p>
 
@@ -2658,16 +2704,15 @@ const adminPoliciesTpl = `{{define "policies.html"}}{{template "header" .}}
   <label for="generator">Generator</label>
   <select id="generator" name="generator" required>
     <option value="G1">G1 — citation + transforms (B1 target)</option>
-    <option value="G2" selected>G2 — Diceware (B2 target)</option>
-    <option value="G3">G3 — random alphanumeric (B3 target)</option>
+    <option value="G2">G2 — Diceware (B2 target)</option>
+    <option value="G3" selected>G3 — random alphanumeric (B3 target)</option>
   </select>
   <label for="params_json">Parameters (JSON)</label>
   <textarea id="params_json" name="params_json" rows="8" style="width:100%;font-family:ui-monospace,monospace;padding:0.5rem">{
-  "library": ["alpha","beta","gamma","delta","epsilon","zeta","eta","theta"],
-  "numberOfWords": 6,
-  "separatorOptions": ["-","_",".","/","+",":","|",";",",","~"]
+  "length": 20,
+  "excludeAmbiguous": true
 }</textarea>
-  <small style="display:block;color:#6b7280;margin-top:0.25rem">PolicyDescriptor parameters per module A. Validated as a JSON object.</small>
+  <small style="display:block;color:#6b7280;margin-top:0.25rem">PolicyDescriptor parameters per module A. Saving is refused when the guaranteed entropy is below the level's ANSSI floor (B1 ≥ 50, B2 ≥ 80, B3 ≥ 100 bits).</small>
 
   <fieldset id="entropy-preview" data-testid="entropy-preview"
     style="margin-top:1rem;padding:0.75rem 1rem;border:1px solid #d1d5db;border-radius:4px;background:#f9fafb">
@@ -2812,8 +2857,8 @@ const adminPoliciesTpl = `{{define "policies.html"}}{{template "header" .}}
     var thresholds = { B1: 50, B2: 80, B3: 100 };
     if (target in thresholds && report.expectedBits < thresholds[target]) {
       warn.style.display = '';
-      warn.textContent = 'Expected entropy is below the configured ' + target +
-        ' threshold (' + thresholds[target] + ' bits). You can save anyway — SealKeeper advises, the admin decides.';
+      warn.textContent = 'Guaranteed entropy is below the ' + target + ' floor (' + thresholds[target] +
+        ' bits): the server will refuse to save this policy. Strengthen the parameters or pick a lower level.';
     } else {
       warn.style.display = 'none';
     }
@@ -3322,6 +3367,10 @@ func (s *Server) handleAdminAdminAdd(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/admin/admins?err=demo_readonly", http.StatusSeeOther)
 		return
 	}
+	if slug, ok := s.requireCurrentPassword(r); !ok {
+		http.Redirect(w, r, "/admin/admins?err="+slug, http.StatusSeeOther)
+		return
+	}
 	email := strings.TrimSpace(r.FormValue("email"))
 	pwd, err := opaqueToken(15) // 20-char URL-safe random; satisfies ≥ 12.
 	if err != nil {
@@ -3355,6 +3404,10 @@ func (s *Server) handleAdminAdminToggle(w http.ResponseWriter, r *http.Request) 
 	a, _, _ := adminFromCtx(r)
 	if err := r.ParseForm(); err != nil || !s.checkSessionCSRF(r) {
 		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if slug, ok := s.requireCurrentPassword(r); !ok {
+		http.Redirect(w, r, "/admin/admins?err="+slug, http.StatusSeeOther)
 		return
 	}
 	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
@@ -3394,6 +3447,10 @@ func (s *Server) handleAdminAdminDelete(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
+	if slug, ok := s.requireCurrentPassword(r); !ok {
+		http.Redirect(w, r, "/admin/admins?err="+slug, http.StatusSeeOther)
+		return
+	}
 	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if id == a.ID {
 		http.Redirect(w, r, "/admin/admins?err=self_delete", http.StatusSeeOther)
@@ -3426,14 +3483,57 @@ func (s *Server) handleAdminAdminDelete(w http.ResponseWriter, r *http.Request) 
 
 // ----- webauthn enrollment -------------------------------------------------
 
-// cookieWebauthnSession holds the opaque ceremony state between
-// /admin/security/begin and /admin/security/finish. It is set with
+// cookieWebauthnSession holds the ceremony state between
+// /admin/security/begin and /admin/security/finish, sealed to the admin
+// session and friendly name by sealCeremony. It is set with
 // SameSite=Strict + HttpOnly and lives only for a few minutes.
 const cookieWebauthnSession = "sk_webauthn_enroll"
 
 // adminMaxWebauthnSessionBytes caps the size of the cookie we accept back —
 // keeps a malicious client from filling memory with arbitrary blobs.
 const adminMaxWebauthnSessionBytes = 4 * 1024
+
+// sealCeremony authenticates a WebAuthn ceremony session blob for the
+// trip through the browser and binds it to its context (purpose, then the
+// admin session or pending-login token, ...). The blob decides the
+// challenge, user handle, expiry and UV requirement go-webauthn checks
+// against, so the client must not be able to mint or alter one: an
+// unauthenticated blob let a hijacked admin session skip the
+// current-password step-up of /admin/security/begin entirely.
+func (s *Server) sealCeremony(session []byte, binding ...string) string {
+	return base64.RawURLEncoding.EncodeToString(session) + "." +
+		base64.RawURLEncoding.EncodeToString(s.ceremonyMAC(session, binding))
+}
+
+// openCeremony verifies a value produced by sealCeremony for the same
+// binding and returns the session blob.
+func (s *Server) openCeremony(value string, binding ...string) ([]byte, bool) {
+	if len(value) > adminMaxWebauthnSessionBytes {
+		return nil, false
+	}
+	body, tag, ok := strings.Cut(value, ".")
+	if !ok {
+		return nil, false
+	}
+	session, err := base64.RawURLEncoding.DecodeString(body)
+	if err != nil {
+		return nil, false
+	}
+	mac, err := base64.RawURLEncoding.DecodeString(tag)
+	if err != nil || !hmac.Equal(mac, s.ceremonyMAC(session, binding)) {
+		return nil, false
+	}
+	return session, true
+}
+
+func (s *Server) ceremonyMAC(session []byte, binding []string) []byte {
+	m := hmac.New(sha256.New, s.ceremonyKey)
+	for _, part := range append(binding, string(session)) {
+		_, _ = m.Write(binary.BigEndian.AppendUint32(nil, uint32(len(part))))
+		_, _ = m.Write([]byte(part))
+	}
+	return m.Sum(nil)
+}
 
 func (s *Server) handleAdminSecurity(w http.ResponseWriter, r *http.Request) {
 	a, sess, _ := adminFromCtx(r)
@@ -3463,7 +3563,7 @@ func (s *Server) handleAdminSecurity(w http.ResponseWriter, r *http.Request) {
 // stashes the opaque ceremony session in a short-lived cookie. The browser
 // posts the cookie back along with the credential response in /finish.
 func (s *Server) handleAdminWebauthnBegin(w http.ResponseWriter, r *http.Request) {
-	a, _, _ := adminFromCtx(r)
+	a, sess, _ := adminFromCtx(r)
 	if s.webauthn == nil {
 		http.Error(w, "webauthn not configured", http.StatusServiceUnavailable)
 		return
@@ -3490,7 +3590,7 @@ func (s *Server) handleAdminWebauthnBegin(w http.ResponseWriter, r *http.Request
 	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     cookieWebauthnSession,
-		Value:    base64.RawURLEncoding.EncodeToString(session),
+		Value:    s.sealCeremony(session, "enrol", sess.Token, name),
 		Path:     "/admin/security",
 		HttpOnly: true,
 		SameSite: http.SameSiteStrictMode,
@@ -3514,7 +3614,7 @@ func (s *Server) handleAdminWebauthnBegin(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) handleAdminWebauthnFinish(w http.ResponseWriter, r *http.Request) {
-	a, _, _ := adminFromCtx(r)
+	a, sess, _ := adminFromCtx(r)
 	if s.webauthn == nil {
 		http.Error(w, "webauthn not configured", http.StatusServiceUnavailable)
 		return
@@ -3528,15 +3628,6 @@ func (s *Server) handleAdminWebauthnFinish(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "no enrollment session", http.StatusBadRequest)
 		return
 	}
-	if len(sessionCookie.Value) > adminMaxWebauthnSessionBytes {
-		http.Error(w, "session too large", http.StatusBadRequest)
-		return
-	}
-	sessionBytes, err := base64.RawURLEncoding.DecodeString(sessionCookie.Value)
-	if err != nil {
-		http.Error(w, "bad session", http.StatusBadRequest)
-		return
-	}
 	nameCookie, err := r.Cookie(cookieWebauthnSession + "_name")
 	if err != nil {
 		http.Error(w, "no friendly name", http.StatusBadRequest)
@@ -3545,6 +3636,13 @@ func (s *Server) handleAdminWebauthnFinish(w http.ResponseWriter, r *http.Reques
 	nameBytes, err := base64.RawURLEncoding.DecodeString(nameCookie.Value)
 	if err != nil {
 		http.Error(w, "bad name", http.StatusBadRequest)
+		return
+	}
+	// Only a ceremony issued by /begin, after the current-password
+	// step-up, to this admin session and for this name, is accepted.
+	sessionBytes, ok := s.openCeremony(sessionCookie.Value, "enrol", sess.Token, string(nameBytes))
+	if !ok {
+		http.Error(w, "bad session", http.StatusBadRequest)
 		return
 	}
 	cred, err := s.webauthn.FinishRegistration(r.Context(),
@@ -3958,6 +4056,7 @@ const adminAdminsTpl = `{{define "admins.html"}}{{template "header" .}}
       {{ if ne .ID $.Admin.ID }}
         <form method="POST" action="/admin/admins/{{ .ID }}/toggle" style="display:inline">
           <input type="hidden" name="csrf_token" value="{{ $.CSRF }}">
+          <input name="current_password" type="password" required autocomplete="current-password" placeholder="Your password" aria-label="Your current password" style="width:auto;display:inline-block">
           <button type="submit" class="secondary">{{ if .Disabled }}Re-enable{{ else }}Disable{{ end }}</button>
         </form>
         <details style="display:inline-block;margin-left:0.5rem"><summary>Delete</summary>
@@ -3965,6 +4064,7 @@ const adminAdminsTpl = `{{define "admins.html"}}{{template "header" .}}
             <input type="hidden" name="csrf_token" value="{{ $.CSRF }}">
             <label>Type <code>{{ .Email }}</code> to confirm:</label>
             <input name="confirm" type="text" required style="width:auto;display:inline-block">
+            <input name="current_password" type="password" required autocomplete="current-password" placeholder="Your password" aria-label="Your current password" style="width:auto;display:inline-block">
             <button type="submit" style="background:#991b1b;border-color:#991b1b">Delete</button>
           </form>
         </details>
@@ -3982,6 +4082,8 @@ const adminAdminsTpl = `{{define "admins.html"}}{{template "header" .}}
   <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
   <label for="add-email">Email</label>
   <input id="add-email" name="email" type="email" required autocomplete="off">
+  <label for="cp-add">Your current password</label>
+  <input id="cp-add" name="current_password" type="password" required autocomplete="current-password">
   <p style="margin-top:1rem"><button type="submit">Create admin</button></p>
 </form>
 </main>
@@ -4020,7 +4122,7 @@ func (s *Server) handleAdminSMTP(w http.ResponseWriter, r *http.Request) {
 		"Config":      cfg,
 		"Configured":  configured,
 		"HasPassword": hasPassword,
-		"SenderName":  s.sender.Name(),
+		"SenderName":  s.currentSender().Name(),
 		"OK":          querySlug(r, "ok"),
 		"Error":       querySlug(r, "err"),
 		"Details":     r.URL.Query().Get("details"),
@@ -4127,19 +4229,23 @@ func (s *Server) handleAdminSMTPTest(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
-	if err := s.sender.Send(ctx, msg); err != nil {
+	sender := s.currentSender()
+	if err := sender.Send(ctx, msg); err != nil {
+		// The full error (with the remote reply text) stays in the server
+		// log; the UI and the audit chain only get the sanitised status.
 		s.logger.Warn("smtp test failed", "to", to, "err", err)
+		status := mailer.FailureStatus(err)
 		s.auditAppend(r.Context(), "smtp.test_failed", a.Email, to, map[string]any{
-			"transport": s.sender.Name(),
-			"error":     err.Error(),
+			"transport": sender.Name(),
+			"status":    status,
 		})
 		http.Redirect(w, r,
-			"/admin/smtp?err=test_failed&details="+url.QueryEscape(err.Error()),
+			"/admin/smtp?err=test_failed&details="+url.QueryEscape(status),
 			http.StatusSeeOther)
 		return
 	}
 	s.auditAppend(r.Context(), "smtp.test_sent", a.Email, to, map[string]any{
-		"transport": s.sender.Name(),
+		"transport": sender.Name(),
 	})
 	http.Redirect(w, r, "/admin/smtp?ok=test_sent", http.StatusSeeOther)
 }
@@ -4232,8 +4338,9 @@ const adminPolicyEditTpl = `{{define "policy_edit.html"}}{{template "header" .}}
     {{ $current := .Policy.DomainID }}
     {{ range .Domains }}<option value="{{ .ID }}" {{ if eq .ID $current }}selected{{ end }}>{{ .Name }}</option>{{ end }}
   </select>
-  <label for="anssi_level">ANSSI level</label>
-  <select id="anssi_level" name="anssi_level" required>
+  <label for="anssi_level">ANSSI level <small style="font-weight:400;color:var(--stone)">(fixed: delete and re-create the policy to change it)</small></label>
+  <input type="hidden" name="anssi_level" value="{{ .Policy.ANSSILevel }}">
+  <select id="anssi_level" disabled>
     <option value="B1" {{ if eq (printf "%s" .Policy.ANSSILevel) "B1" }}selected{{ end }}>B1 — default (every user not elevated)</option>
     <option value="B2" {{ if eq (printf "%s" .Policy.ANSSILevel) "B2" }}selected{{ end }}>B2 — elevated managers</option>
     <option value="B3" {{ if eq (printf "%s" .Policy.ANSSILevel) "B3" }}selected{{ end }}>B3 — elevated system admins</option>
@@ -4248,7 +4355,7 @@ const adminPolicyEditTpl = `{{define "policy_edit.html"}}{{template "header" .}}
   </select>
   <label for="params_json">Parameters (JSON)</label>
   <textarea id="params_json" name="params_json" rows="10" style="width:100%;font-family:var(--font-mono);padding:0.5rem">{{ .ParamsJSON }}</textarea>
-  <small style="display:block;color:var(--stone);margin-top:0.25rem">PolicyDescriptor parameters per module A. Saved as-is (validated for JSON-ness).</small>
+  <small style="display:block;color:var(--stone);margin-top:0.25rem">PolicyDescriptor parameters per module A. Saving is refused when the guaranteed entropy is below the level's ANSSI floor (B1 ≥ 50, B2 ≥ 80, B3 ≥ 100 bits).</small>
 
   <fieldset id="entropy-preview" data-testid="entropy-preview"
     style="margin-top:1rem;padding:0.75rem 1rem;border:1px solid var(--rule);border-radius:2px;background:var(--bg-elev)">
@@ -4377,8 +4484,8 @@ const adminPolicyEditTpl = `{{define "policy_edit.html"}}{{template "header" .}}
     var thresholds = { B1: 50, B2: 80, B3: 100 };
     if (target in thresholds && report.expectedBits < thresholds[target]) {
       warn.style.display = '';
-      warn.textContent = 'Expected entropy is below the configured ' + target +
-        ' threshold (' + thresholds[target] + ' bits). You can save anyway — SealKeeper advises, the admin decides.';
+      warn.textContent = 'Guaranteed entropy is below the ' + target + ' floor (' + thresholds[target] +
+        ' bits): the server will refuse to save this policy. Strengthen the parameters or pick a lower level.';
     } else {
       warn.style.display = 'none';
     }

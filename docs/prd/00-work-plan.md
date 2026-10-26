@@ -360,7 +360,7 @@ Lecture : C est central et débloque A, B, D. G fédère D et B vers F, E, H, L.
 **Périmètre.**
 - Endpoints publics :
   - `POST /api/v1/request` — soumission email
-  - `GET /api/v1/policy?token=...` — récupération policy par le JS
+  - `POST /api/v1/policy` (corps JSON `{"token": …}`, jamais dans l'URL) — récupération policy par le JS
   - `POST /api/v1/event` — feedback côté JS (proposition copiée, etc.)
 - Endpoints admin (préfixe `/api/v1/admin/`) :
   - CRUD domaines, policies, listes, bibliothèques

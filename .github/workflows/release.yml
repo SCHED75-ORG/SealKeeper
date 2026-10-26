@@ -399,6 +399,29 @@ jobs:
           set -euo pipefail
           echo "image_ref=${REPO}@${DIGEST}" >> "$GITHUB_OUTPUT"
 
+      # The JS generation bundle is built from web/src inside the Dockerfile
+      # (webbuild stage), so it is part of the digest cosign signs and SLSA
+      # attests below. Refuse to sign an image whose /app/web lacks it.
+      - name: Assert JS bundle is in the image (every platform)
+        env:
+          IMAGE_REF: ${{ steps.imgref.outputs.image_ref }}
+        run: |
+          set -euo pipefail
+          for platform in linux/amd64 linux/arm64; do
+            docker pull --quiet --platform "$platform" "$IMAGE_REF" >/dev/null
+            cid="$(docker create --platform "$platform" "$IMAGE_REF")"
+            rm -rf bundle-check && mkdir bundle-check
+            if ! docker cp "$cid:/app/web/sealkeeper-generation.umd.js" bundle-check/; then
+              docker rm "$cid" >/dev/null
+              echo "::error::$platform image has no /app/web/sealkeeper-generation.umd.js"
+              exit 1
+            fi
+            docker rm "$cid" >/dev/null
+            test -s bundle-check/sealkeeper-generation.umd.js
+            grep -q 'SealKeeper' bundle-check/sealkeeper-generation.umd.js
+            echo "$platform bundle sha256: $(sha256sum bundle-check/sealkeeper-generation.umd.js | cut -d' ' -f1)"
+          done
+
       - name: Install Trivy (pinned + checksum)
         run: |
           set -euo pipefail
@@ -852,22 +875,35 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Pull by the signed digest, not the mutable tag. The eval SQLite file
+      # lives in /data, which the bare image lacks (and UID 65532 cannot
+      # create): give it a tmpfs owned by that UID.
       - name: Pull and run (eval mode)
         env:
-          VERSION: ${{ needs.verify-tag.outputs.version }}
+          IMAGE_REF: ${{ needs.build-image.outputs.image_ref }}
         run: |
           set -euo pipefail
-          repo=$(printf '%s' "$IMAGE_REPO" | tr '[:upper:]' '[:lower:]')
-          docker pull "${repo}:${VERSION}"
-          docker run -d --rm --name sk-smoke -p 8443:8443 \
+          docker pull "$IMAGE_REF"
+          docker run -d --name sk-smoke -p 8443:8443 \
+            --tmpfs /data:rw,uid=65532,gid=65532,mode=0700 \
             -e SK_MODE=eval \
-            "${repo}:${VERSION}"
+            "$IMAGE_REF"
           for i in $(seq 1 30); do
             curl -fsS http://localhost:8443/healthz >/dev/null 2>&1 && break
             sleep 1
           done
-          curl -fsS http://localhost:8443/healthz >/dev/null
-          docker stop sk-smoke
+          if ! curl -fsS http://localhost:8443/healthz >/dev/null; then
+            docker logs sk-smoke || true
+            exit 1
+          fi
+          # The reveal page cannot generate anything without the JS bundle.
+          if ! curl -fsS -o bundle.js http://localhost:8443/static/sealkeeper-generation.umd.js; then
+            echo "::error::image does not serve the JS generation bundle"
+            exit 1
+          fi
+          test -s bundle.js
+          grep -q 'SealKeeper' bundle.js
+          docker rm -f sk-smoke >/dev/null
 
   # ---------------------------------------------------------------------------
   # 9. Publish GitHub Release (gated on all upstream jobs including smokes)

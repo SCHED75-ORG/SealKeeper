@@ -25,25 +25,37 @@ func (s *sqlStore) Ping(ctx context.Context) error {
 // MigrateUp applies every pending migration from the embedded set matching
 // the dialect. Idempotent — safe to call at every boot (FR-H.63 step 4).
 func (s *sqlStore) MigrateUp(ctx context.Context) error {
+	_, err := s.MigrateUpApplied(ctx)
+	return err
+}
+
+// MigrateUpApplied is MigrateUp that also reports the versions this call
+// applied, in order (empty when the schema was already current).
+func (s *sqlStore) MigrateUpApplied(ctx context.Context) ([]int64, error) {
 	migrations, err := migrationsSub(s.dialect)
 	if err != nil {
-		return fmt.Errorf("storage.MigrateUp: open migrations FS: %w", err)
+		return nil, fmt.Errorf("storage.MigrateUp: open migrations FS: %w", err)
 	}
 
 	gooseDialect, err := gooseDialectFor(s.dialect)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	provider, err := goose.NewProvider(gooseDialect, s.db, migrations)
 	if err != nil {
-		return fmt.Errorf("storage.MigrateUp: new provider: %w", err)
+		return nil, fmt.Errorf("storage.MigrateUp: new provider: %w", err)
 	}
 
-	if _, err := provider.Up(ctx); err != nil {
-		return fmt.Errorf("storage.MigrateUp: up: %w", err)
+	results, err := provider.Up(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("storage.MigrateUp: up: %w", err)
 	}
-	return nil
+	applied := make([]int64, 0, len(results))
+	for _, res := range results {
+		applied = append(applied, res.Source.Version)
+	}
+	return applied, nil
 }
 
 // SchemaVersion returns the most recently applied migration version per

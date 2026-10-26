@@ -34,3 +34,53 @@ spec:
           {{- end }}
     {{- end }}
 {{- end }}
+{{- if and .Values.ingress.enabled .Values.ingress.revealPaths.enabled }}
+---
+# Reveal links carry a live, single-use token in the URL (/reveal/<token>):
+# a bearer credential that the controller's access log — and any SIEM fed
+# by it — would otherwise hold in clear. These paths get their own Ingress
+# so the access log can be switched off for them alone (see
+# ingress.revealPaths.annotations).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "sealkeeper.fullname" . }}-reveal
+  labels:
+    {{- include "sealkeeper.labels" . | nindent 4 }}
+  annotations:
+    {{- with .Values.ingress.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+    {{- with .Values.ingress.revealPaths.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+    {{- if .Values.ingress.certManager.enabled }}
+    cert-manager.io/cluster-issuer: {{ .Values.ingress.certManager.clusterIssuer | quote }}
+    {{- end }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- with .Values.ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    {{- range .Values.ingress.hosts }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          - path: /reveal/
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "sealkeeper.fullname" $ }}
+                port:
+                  number: {{ $.Values.service.port }}
+          - path: /api/v1/policy
+            pathType: Exact
+            backend:
+              service:
+                name: {{ include "sealkeeper.fullname" $ }}
+                port:
+                  number: {{ $.Values.service.port }}
+    {{- end }}
+{{- end }}

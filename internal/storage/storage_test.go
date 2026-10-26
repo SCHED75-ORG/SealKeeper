@@ -5,10 +5,12 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
 	"github.com/sched75/sealkeeper/internal/storage"
+	"github.com/sched75/sealkeeper/internal/storage/storagetest"
 )
 
 // withSQLite returns a Store backed by a fresh on-disk SQLite database. We
@@ -20,7 +22,7 @@ func withSQLite(t *testing.T) storage.Store {
 	dir := t.TempDir()
 	dsn := "sqlite://" + filepath.ToSlash(filepath.Join(dir, "sk.db"))
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), storagetest.SetupTimeout)
 	defer cancel()
 
 	s, err := storage.Open(ctx, storage.Options{DSN: dsn})
@@ -45,7 +47,7 @@ func TestParseDSNDialects(t *testing.T) {
 		{"file:sk.db?cache=shared", storage.DialectSQLite},
 	}
 	for _, c := range cases {
-		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), storagetest.SetupTimeout)
 		_, err := storage.Open(ctx, storage.Options{DSN: c.dsn})
 		cancel()
 		// We don't expect Open to succeed for non-existent Postgres servers;
@@ -119,6 +121,31 @@ func TestMigrateUpAndIdempotency(t *testing.T) {
 	v2, _ := s.SchemaVersion(ctx)
 	if v2 != v {
 		t.Fatalf("MigrateUp re-applied something: version went %d -> %d", v, v2)
+	}
+}
+
+// The audit anchor seal keys off the versions a run applied (0014), so the
+// report must list them on the first run and nothing afterwards.
+func TestMigrateUpAppliedReportsVersions(t *testing.T) {
+	t.Parallel()
+	s := withSQLite(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	applied, err := s.MigrateUpApplied(ctx)
+	if err != nil {
+		t.Fatalf("MigrateUpApplied first run: %v", err)
+	}
+	v, _ := s.SchemaVersion(ctx)
+	if int64(len(applied)) != v || applied[0] != 1 || applied[len(applied)-1] != v || !slices.Contains(applied, 14) {
+		t.Fatalf("applied = %v, want 1..%d", applied, v)
+	}
+	again, err := s.MigrateUpApplied(ctx)
+	if err != nil {
+		t.Fatalf("MigrateUpApplied second run: %v", err)
+	}
+	if len(again) != 0 {
+		t.Fatalf("second run applied %v, want none", again)
 	}
 }
 
@@ -196,7 +223,7 @@ func TestPostgresIntegration(t *testing.T) {
 		t.Skip("TEST_PG_DSN not set — skipping Postgres integration test")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), storagetest.SetupTimeout)
 	defer cancel()
 
 	s, err := storage.Open(ctx, storage.Options{DSN: dsn})

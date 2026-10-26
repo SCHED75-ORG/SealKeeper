@@ -103,7 +103,7 @@ Tables principales (modèle de référence : §5.1 du module C qui décrit le sc
 | ID | Exigence | Niveau |
 |---|---|---|
 | FR-D.31 | Le serveur expose deux préfixes de routes : **`/api/v1/`** pour les endpoints API JSON, **`/admin/`** pour la console admin (HTML server-side rendered) | MUST |
-| FR-D.32 | Endpoints publics (sans authentification) : `GET /`, `GET /reveal/{token}`, `POST /api/v1/request`, `GET /api/v1/policy?token=...`, `POST /api/v1/event` | MUST |
+| FR-D.32 | Endpoints publics (sans authentification) : `GET /`, `GET /reveal/{token}`, `POST /api/v1/request`, `GET /api/v1/policy` (policy par défaut), `POST /api/v1/policy` (token dans le corps JSON), `POST /api/v1/event` | MUST |
 | FR-D.33 | Endpoints admin (authentification requise) : `/admin/...` (UI), `/api/v1/admin/...` (API JSON pour les actions XHR) | MUST |
 | FR-D.34 | Endpoints observabilité : `GET /healthz` (sans auth), `GET /readyz` (sans auth), `GET /metrics` (sans auth, ou avec bearer token configurable) | MUST |
 | FR-D.35 | Assets statiques (CSS, JS, polices, logo) servis depuis `/static/` avec en-têtes **`Cache-Control: public, max-age=31536000, immutable`** pour les assets versionnés | MUST |

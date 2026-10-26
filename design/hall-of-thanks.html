@@ -97,10 +97,10 @@
 <div class="container">
 
 <div class="callout callout--gold">
-  <strong>Note.</strong> SealKeeper is currently in pre-release. No vulnerability
-  has been reported yet, so no researcher is listed below. This page exists
-  ahead of need so that contributors know the recognition framework before
-  they invest time looking at the code.
+  <strong>Thank you.</strong> SealKeeper's first external vulnerability reports
+  arrived during the pre-release of 0.1.0. They were confirmed, fixed and
+  published with credit, and they prompted the full security audit that shaped
+  that release. The researchers below made SealKeeper safer for every operator.
 </div>
 
 <hr>
@@ -141,8 +141,7 @@
 <h2 id="recipients">Recipients of thanks</h2>
 
 <div class="callout callout--night">
-  <strong>None yet.</strong> Be the first researcher to claim a SealKeeper
-  certificate of thanks. The disclosure procedure is documented in
+  <strong>Found something?</strong> The disclosure procedure is documented in
   <a href="/security.html">our security policy</a> — both an email channel
   (<code>security@sealkeeper.eu</code>, PGP-encrypted preferred) and a private
   GitHub advisory channel are available.
@@ -160,9 +159,18 @@
   </thead>
   <tbody>
     <tr>
-      <td colspan="5" style="text-align: center; color: var(--fg-muted); padding: 2rem 0;">
-        <em>No entries yet.</em>
-      </td>
+      <td>2026-10-26</td>
+      <td>Sri Charan Pedhiti (<a href="https://github.com/Char0n1507" rel="external">@Char0n1507</a>)</td>
+      <td>Admin second factor could be brute-forced: the lockout counter was reset before the authenticator code was checked</td>
+      <td>Medium</td>
+      <td><a href="https://github.com/sched75/SealKeeper/security/advisories/GHSA-xr59-fxvh-vx8h" rel="external">GHSA-xr59-fxvh-vx8h</a></td>
+    </tr>
+    <tr>
+      <td>2026-10-26</td>
+      <td>Sri Charan Pedhiti (<a href="https://github.com/Char0n1507" rel="external">@Char0n1507</a>)</td>
+      <td>Reveal page ignored the administrator's password policy and showed a misleading strength rating</td>
+      <td>Medium</td>
+      <td><a href="https://github.com/sched75/SealKeeper/security/advisories/GHSA-h3vw-xg58-625j" rel="external">GHSA-h3vw-xg58-625j</a></td>
     </tr>
   </tbody>
 </table>

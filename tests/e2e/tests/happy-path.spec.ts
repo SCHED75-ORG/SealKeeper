@@ -11,7 +11,52 @@
 // /__captured_mail endpoint that backs FR-H.17.
 // =============================================================================
 
-import { expect, test } from "@playwright/test";
+import {
+  expect,
+  test,
+  type APIRequestContext,
+  type Page,
+} from "@playwright/test";
+
+// stubbedRevealURL returns a reveal link for tests that stub the policy
+// endpoint: the token is never consumed, so one link serves them all and
+// the suite stays under the eval per-IP request limit.
+let stubbedURL: string | undefined;
+async function stubbedRevealURL(request: APIRequestContext): Promise<string> {
+  if (stubbedURL) return stubbedURL;
+  const accept = await request.post("/api/v1/request", {
+    data: { email: `stubbed+${Date.now()}@example.test` },
+    headers: { "Content-Type": "application/json" },
+  });
+  expect(accept.status()).toBe(202);
+  const { debug_reveal_url: url } = (await accept.json()) as {
+    debug_reveal_url: string;
+  };
+  expect(typeof url).toBe("string");
+  stubbedURL = url;
+  return url;
+}
+
+// stubPolicy answers the token consumption with a small G3 policy so the
+// tests need no admin setup.
+async function stubPolicy(page: Page, extra: Record<string, unknown>) {
+  // The reveal page consumes the token with POST {"token":…}.
+  await page.route("**/api/v1/policy", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        policy: {
+          generator: "G3",
+          proposalCount: 2,
+          anssiLevel: "B3",
+          parameters: { length: 24 },
+          ...extra,
+        },
+      }),
+    }),
+  );
+}
 
 test.describe("@happy-path public flow", () => {
   test("landing page advertises the available routes in eval mode", async ({
@@ -110,9 +155,18 @@ test.describe("@happy-path public flow", () => {
     const decode = page.getByRole("button", { name: /Décoder/i });
     await expect(decode).toBeVisible();
 
-    // 3. Clicking "Décoder" consumes the token via /api/v1/policy?token=…
-    //    and runs window.SealKeeper.Generation.generate() in the page.
+    // 3. Clicking "Décoder" consumes the token via POST /api/v1/policy
+    //    (token in the JSON body, never the URL) and runs
+    //    window.SealKeeper.Generation.generate() in the page.
+    const consumed = page.waitForRequest(
+      (req) => req.url().endsWith("/api/v1/policy") && req.method() === "POST",
+    );
     await decode.click();
+    const consumeReq = await consumed;
+    expect(consumeReq.url()).not.toContain("token=");
+    expect(consumeReq.postDataJSON()).toEqual({
+      token: revealURL.split("/").pop(),
+    });
 
     // 4. Wait for the proposals to render. We expect at least 1 card with a
     //    visible password and an ANSSI badge.
@@ -133,17 +187,12 @@ test.describe("@happy-path public flow", () => {
     page,
     request,
   }) => {
-    const accept = await request.post("/api/v1/request", {
-      data: { email: `policy+${Date.now()}@example.test` },
-      headers: { "Content-Type": "application/json" },
-    });
-    expect(accept.status()).toBe(202);
-    const { debug_reveal_url: revealURL } = (await accept.json()) as {
-      debug_reveal_url: string;
-    };
+    const revealURL = await stubbedRevealURL(request);
 
-    await page.route("**/api/v1/policy?token=*", (route) =>
-      route.fulfill({
+    await page.route("**/api/v1/policy", (route) => {
+      expect(route.request().method()).toBe("POST");
+      expect(route.request().url()).not.toContain("token=");
+      return route.fulfill({
         status: 200,
         contentType: "application/json",
         body: JSON.stringify({
@@ -154,8 +203,8 @@ test.describe("@happy-path public flow", () => {
             parameters: { length: 32, blockSize: 8, blockSeparator: "." },
           },
         }),
-      }),
-    );
+      });
+    });
 
     await page.goto(revealURL);
     await page.getByRole("button", { name: /Décoder/i }).click();
@@ -170,6 +219,125 @@ test.describe("@happy-path public flow", () => {
     );
   });
 
+  // FR-B.27..29: the reveal page used to ignore sessionTTLSec and
+  // regenerateLimit — proposals stayed on screen forever and there was no
+  // way to regenerate. Time is faked so the TTL elapses instantly.
+  test("reveal session: countdown, bounded regeneration, expiry", async ({
+    page,
+    request,
+  }) => {
+    const revealURL = await stubbedRevealURL(request);
+    await page.clock.install();
+    await stubPolicy(page, { regenerateLimit: 1, sessionTTLSec: 180 });
+    await page.goto(revealURL);
+    await page.getByRole("button", { name: /Décoder/i }).click();
+
+    const passwords = page.locator('[data-testid="password"]');
+    await expect(passwords).toHaveCount(2);
+    const countdown = page.getByTestId("countdown");
+    await expect(countdown).toContainText("3 min");
+
+    const first = await passwords.allTextContents();
+    const regen = page.getByRole("button", { name: /Nouvelles propositions/i });
+    await regen.click();
+    await expect
+      .poll(async () => (await passwords.allTextContents()).join())
+      .not.toBe(first.join());
+    await expect(regen).toBeDisabled(); // limit of 1 reached
+
+    await page.clock.fastForward(61_000);
+    await expect(countdown).toContainText("2 min");
+    await page.clock.fastForward(60_000);
+    await expect(countdown).toContainText("moins d'une minute");
+    await page.clock.fastForward(60_000);
+    await expect(page.getByTestId("expired")).toBeVisible();
+    await expect(passwords).toHaveCount(0);
+    await expect(page.getByRole("button", { name: /Copier/i })).toHaveCount(0);
+    await expect(regen).toBeHidden();
+  });
+
+  // FR-B.32: the purge used to overwrite the clipboard unconditionally,
+  // wiping whatever the user had copied since.
+  test("clipboard purge clears only our own value", async ({
+    page,
+    context,
+    request,
+    browserName,
+  }) => {
+    test.skip(
+      browserName !== "chromium",
+      "clipboard permissions are Chromium-only",
+    );
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+    const revealURL = await stubbedRevealURL(request);
+    await page.clock.install();
+    await stubPolicy(page, {});
+    await page.goto(revealURL);
+    await page.getByRole("button", { name: /Décoder/i }).click();
+    const password = await page
+      .locator('[data-testid="password"]')
+      .first()
+      .textContent();
+    const readClipboard = () =>
+      page.evaluate(() => navigator.clipboard.readText());
+
+    await page
+      .getByRole("button", { name: /Copier/i })
+      .first()
+      .click();
+    await expect.poll(readClipboard).toBe(password);
+    await page.clock.fastForward(30_000);
+    await expect.poll(readClipboard).toBe("");
+
+    await page
+      .getByRole("button", { name: /Copier/i })
+      .first()
+      .click();
+    await expect.poll(readClipboard).toBe(password);
+    await page.evaluate(() => navigator.clipboard.writeText("not ours"));
+    await page.clock.fastForward(30_000);
+    await page.clock.runFor(1_000);
+    expect(await readClipboard()).toBe("not ours");
+  });
+
+  // Leaving the page (or a bfcache snapshot) must not keep the secrets.
+  test("pagehide purges the proposals and the clipboard", async ({
+    page,
+    context,
+    request,
+    browserName,
+  }) => {
+    test.skip(
+      browserName !== "chromium",
+      "clipboard permissions are Chromium-only",
+    );
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+    const revealURL = await stubbedRevealURL(request);
+    await stubPolicy(page, {});
+    const res = await page.goto(revealURL);
+    expect(res?.headers()["cache-control"]).toBe("no-store");
+    await page.getByRole("button", { name: /Décoder/i }).click();
+    const password = page.locator('[data-testid="password"]').first();
+    await expect(password).toHaveAttribute("translate", "no");
+    await page
+      .getByRole("button", { name: /Copier/i })
+      .first()
+      .click();
+    await expect
+      .poll(() => page.evaluate(() => navigator.clipboard.readText()))
+      .toBe(await password.textContent());
+
+    await page.evaluate(() =>
+      window.dispatchEvent(
+        new PageTransitionEvent("pagehide", { persisted: true }),
+      ),
+    );
+    await expect(page.locator('[data-testid="password"]')).toHaveCount(0);
+    await expect
+      .poll(() => page.evaluate(() => navigator.clipboard.readText()))
+      .toBe("");
+  });
+
   test("@happy-path token is single-use (second consumption returns 410)", async ({
     request,
   }) => {
@@ -182,10 +350,21 @@ test.describe("@happy-path public flow", () => {
     };
     const token = url.split("/").pop()!;
 
-    const first = await request.get(`/api/v1/policy?token=${token}`);
+    // A token in the URL ends up in access logs: it is refused and NOT
+    // consumed (the POST below still succeeds).
+    const inQuery = await request.get(`/api/v1/policy?token=${token}`);
+    expect(inQuery.status()).toBe(400);
+    expect((await inQuery.json()).title).toBe("token_in_query");
+
+    const consume = () =>
+      request.post("/api/v1/policy", {
+        data: { token },
+        headers: { "Content-Type": "application/json" },
+      });
+    const first = await consume();
     expect(first.status()).toBe(200);
 
-    const second = await request.get(`/api/v1/policy?token=${token}`);
+    const second = await consume();
     expect(second.status()).toBe(410);
     expect(second.headers()["content-type"]).toMatch(
       /application\/problem\+json/,

@@ -2,11 +2,17 @@ package demo_test
 
 import (
 	"context"
+	"errors"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/sched75/sealkeeper/internal/audit"
 	"github.com/sched75/sealkeeper/internal/demo"
+	"github.com/sched75/sealkeeper/internal/libraries"
 	"github.com/sched75/sealkeeper/internal/mailcapture"
 	"github.com/sched75/sealkeeper/internal/storage"
 	"github.com/sched75/sealkeeper/internal/storage/storagetest"
@@ -15,7 +21,7 @@ import (
 func openStore(t *testing.T) storage.Store {
 	t.Helper()
 	dsn := storagetest.DSN(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), storagetest.SetupTimeout)
 	defer cancel()
 	s, err := storage.Open(ctx, storage.Options{DSN: dsn})
 	if err != nil {
@@ -190,5 +196,60 @@ func TestResetOnceLeavesAuditChainIntact(t *testing.T) {
 	}
 	if bad, err := ar.VerifyChain(ctx); err != nil || bad != 0 {
 		t.Fatalf("after reset + append: VerifyChain = %d, %v; want intact", bad, err)
+	}
+}
+
+// Regression: the reset deleted non-system library rows but left their
+// files on disk, so uploaded dictionaries outlived every reset as orphans.
+func TestResetOnceRemovesNonSystemLibraryFiles(t *testing.T) {
+	t.Parallel()
+	s := openStore(t)
+	ctx := context.Background()
+	dir := t.TempDir()
+	libs, err := libraries.NewRepo(s.DB(), dir)
+	if err != nil {
+		t.Fatalf("NewRepo: %v", err)
+	}
+	upload := func(name, body string, system bool) libraries.Library {
+		t.Helper()
+		lib, _, err := libs.Upload(ctx, libraries.UploadInputs{
+			Name: name, Kind: libraries.KindDictionary, Language: "fr",
+			System: system, Content: strings.NewReader(body),
+		})
+		if err != nil {
+			t.Fatalf("Upload %s: %v", name, err)
+		}
+		return lib
+	}
+	sys := upload("system", "alpha\nbravo\ncharlie\n", true)
+	user := upload("visitor", "delta\necho\nfoxtrot\n", false)
+	// A file a previous reset already orphaned (no row any more).
+	stale := filepath.Join(dir, strings.Repeat("ab", 32)+".txt")
+	if err := os.WriteFile(stale, []byte("golf\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Anything that is not a library blob is left alone.
+	other := filepath.Join(dir, "README")
+	if err := os.WriteFile(other, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := demo.NewResetter(s.DB(), nil, time.Hour).WithLibrariesDir(dir).ResetOnce(ctx); err != nil {
+		t.Fatalf("ResetOnce: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(dir, user.FilePath)); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("non-system library file survived the reset (stat err = %v)", err)
+	}
+	if _, err := os.Stat(stale); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("orphaned library file survived the reset (stat err = %v)", err)
+	}
+	for _, keep := range []string{filepath.Join(dir, sys.FilePath), other} {
+		if _, err := os.Stat(keep); err != nil {
+			t.Errorf("%s removed by the reset: %v", keep, err)
+		}
+	}
+	if _, err := libs.Get(ctx, sys.ID); err != nil {
+		t.Errorf("system library row: %v", err)
 	}
 }

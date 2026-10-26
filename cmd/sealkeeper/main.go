@@ -19,6 +19,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -140,11 +141,12 @@ func runServe(args []string) int {
 		}
 	}()
 
+	var applied []int64
 	if cfg.IsEval() {
 		// Eval mode runs migrations automatically so `docker run … -e SK_MODE=eval`
 		// works with zero ceremony (FR-H.11..19). Production deployments are
 		// expected to run `sealkeeper migrate up` as a discrete step (FR-H.63).
-		if err := store.MigrateUp(ctx); err != nil {
+		if applied, err = store.MigrateUpApplied(ctx); err != nil {
 			logger.Error("eval auto-migrate failed", "err", err)
 			return 1
 		}
@@ -153,7 +155,7 @@ func runServe(args []string) int {
 	srv := httpserver.New(cfg, logger)
 	srv.Readiness().Add(storage.NewReadinessCheck("database", store))
 	srv.SetTokens(tokens.NewRepo(store.DB()))
-	auditRepo, err := openAuditRepo(ctx, cfg, store.DB(), logger)
+	auditRepo, err := openAuditRepo(ctx, cfg, store.DB(), logger, applied)
 	if err != nil {
 		logger.Error("audit init failed", "err", err)
 		return 1
@@ -176,7 +178,7 @@ func runServe(args []string) int {
 	admin.SessionTTL = cfg.AdminSessionTTL
 	admin.SessionIdleTTL = cfg.AdminSessionIdleTimeout
 	adminRepo := admin.NewRepo(store.DB(), box).WithPasswordContext(cfg.InstanceDomain)
-	if err := bootstrapAdminIfNeeded(ctx, adminRepo, logger, cfg.IsEval()); err != nil {
+	if err := bootstrapAdminIfNeeded(ctx, adminRepo, auditRepo, logger, cfg.IsEval()); err != nil {
 		logger.Error("admin bootstrap failed", "err", err)
 		return 1
 	}
@@ -195,7 +197,12 @@ func runServe(args []string) int {
 	srv.SetLibraries(librariesRepo)
 	srv.SetMailTemplates(mailtemplates.NewRepo(store.DB()))
 
-	integrationsRepo := integrations.NewRepo(store.DB(), box)
+	// SSRF guard + https requirement (plain http sinks only in eval mode).
+	sinkPolicy := integrations.NetPolicy{
+		AllowPrivate:   cfg.IntegrationsAllowPrivate,
+		AllowPlainHTTP: cfg.IsEval(),
+	}
+	integrationsRepo := integrations.NewRepo(store.DB(), box).WithNetPolicy(sinkPolicy)
 	// Seal integration credentials still stored in clear (pre-0015 rows).
 	if n, err := integrationsRepo.SealLegacyConfigs(ctx); err != nil {
 		logger.Error("sealing legacy integration configs failed", "err", err)
@@ -204,7 +211,7 @@ func runServe(args []string) int {
 		logger.Info("sealed legacy integration configs", "rows", n)
 	}
 	dispatcher := integrations.NewDispatcher(integrationsRepo, logger, 256, 10*time.Second).
-		WithNetPolicy(integrations.NetPolicy{AllowPrivate: cfg.IntegrationsAllowPrivate})
+		WithNetPolicy(sinkPolicy)
 	dispatcher.Start(ctx)
 	defer dispatcher.Stop()
 	srv.SetIntegrations(integrationsRepo, dispatcher)
@@ -239,7 +246,9 @@ func runServe(args []string) int {
 	// every reset restores, so it is taken before any visitor gets in.
 	if cfg.IsDemo() {
 		logger.Info("demo mode active — data reset every 24h")
-		resetter := demo.NewResetter(store.DB(), logger, 24*time.Hour).WithMailStore(srv.MailStore())
+		resetter := demo.NewResetter(store.DB(), logger, 24*time.Hour).
+			WithMailStore(srv.MailStore()).
+			WithLibrariesDir(librariesRepo.Dir())
 		if err := resetter.Snapshot(ctx); err != nil {
 			logger.Error("demo snapshot failed", "err", err)
 			return 1
@@ -288,25 +297,7 @@ func runMigrate(args []string) int {
 
 	switch sub {
 	case "up":
-		if err := store.MigrateUp(ctx); err != nil {
-			logger.Error("migrate up failed", "err", err)
-			return 1
-		}
-		// Seal the audit head anchor right after migration 0014 so a
-		// migrated legacy log is anchored before anything else runs. Eval
-		// mode may run on a throw-away secret; its serve step seals instead.
-		if !cfg.IsEval() && cfg.MasterSecret != "" {
-			if _, err := openAuditRepo(ctx, cfg, store.DB(), logger); err != nil {
-				logger.Error("audit init failed", "err", err)
-				return 1
-			}
-		}
-		v, _ := store.SchemaVersion(ctx)
-		logger.Info("migrate up complete",
-			"dialect", string(store.Dialect()),
-			"schema_version", v,
-			"database_url", redactDSN(cfg.DatabaseURL),
-		)
+		return runMigrateUp(ctx, cfg, store, logger)
 	case "status":
 		v, err := store.SchemaVersion(ctx)
 		if err != nil {
@@ -321,6 +312,52 @@ func runMigrate(args []string) int {
 	default:
 		fmt.Fprintf(os.Stderr, "unknown migrate sub-command %q (want: up | status)\n", sub)
 		return 2
+	}
+	return 0
+}
+
+// runMigrateUp applies pending migrations, then (when a master secret is
+// configured) opens the keyed audit chain and records the schema change.
+func runMigrateUp(ctx context.Context, cfg config.Config, store storage.Store, logger *slog.Logger) int {
+	// An unreadable version (fresh database) counts as 0.
+	before, _ := store.SchemaVersion(ctx)
+	applied, err := store.MigrateUpApplied(ctx)
+	if err != nil {
+		logger.Error("migrate up failed", "err", err)
+		return 1
+	}
+	v, _ := store.SchemaVersion(ctx)
+	// Seal the audit head anchor right after migration 0014 so a
+	// migrated legacy log is anchored before anything else runs: only
+	// the process that applied 0014 may take the legacy rows under the
+	// key (see audit.SealAnchor).
+	if cfg.MasterSecret != "" {
+		if code := auditMigration(ctx, cfg, store, logger, applied, before, v); code != 0 {
+			return code
+		}
+	}
+	logger.Info("migrate up complete",
+		"dialect", string(store.Dialect()),
+		"schema_version", v,
+		"database_url", redactDSN(cfg.DatabaseURL),
+	)
+	return 0
+}
+
+// auditMigration opens the audit repo (sealing the anchor when this
+// process applied 0014) and appends schema.migrated when the version
+// moved. An append failure is logged, not fatal.
+func auditMigration(ctx context.Context, cfg config.Config, store storage.Store, logger *slog.Logger, applied []int64, before, v int64) int {
+	auditRepo, err := openAuditRepo(ctx, cfg, store.DB(), logger, applied)
+	if err != nil {
+		logger.Error("audit init failed", "err", err)
+		return 1
+	}
+	if v != before {
+		if _, err := auditRepo.Append(ctx, "schema.migrated", "cli", "",
+			map[string]any{"from_version": before, "to_version": v, "dialect": string(store.Dialect())}); err != nil {
+			logger.Error("audit append failed", "err", err)
+		}
 	}
 	return 0
 }
@@ -414,7 +451,7 @@ func buildSender(cfg config.Config, logger *slog.Logger) (mailer.Sender, error) 
 // password — used by the screenshot / demo tooling that needs a
 // predictable login. Outside eval mode the env var is ignored so a
 // production deployment can't accidentally pin a weak password.
-func bootstrapAdminIfNeeded(ctx context.Context, repo *admin.Repo, logger *slog.Logger, evalMode bool) error {
+func bootstrapAdminIfNeeded(ctx context.Context, repo *admin.Repo, auditRepo *audit.Repo, logger *slog.Logger, evalMode bool) error {
 	n, err := repo.Count(ctx)
 	if err != nil {
 		return err
@@ -436,8 +473,15 @@ func bootstrapAdminIfNeeded(ctx context.Context, repo *admin.Repo, logger *slog.
 		}
 	}
 	const email = "admin@localhost"
-	if _, err := repo.Create(ctx, email, pwd); err != nil {
+	a, err := repo.Create(ctx, email, pwd)
+	if err != nil {
 		return err
+	}
+	if auditRepo != nil {
+		if _, err := auditRepo.Append(ctx, "admin.bootstrapped", "system", email,
+			map[string]any{"admin_id": a.ID}); err != nil {
+			logger.Error("audit append failed", "event", "admin.bootstrapped", "err", err)
+		}
 	}
 	logger.Info("================================================================")
 	logger.Info("BOOTSTRAP ADMIN PASSWORD — record this NOW, it will not be reprinted",
@@ -471,22 +515,25 @@ func runAdmin(args []string) int {
 }
 
 // openAuditRepo binds the audit log to the HKDF-derived chain key
-// (FR-E.3) and seals the head anchor. A seal failure (e.g. migrations not
-// applied yet) is logged, not fatal: VerifyChain reports the chain as
-// unanchored until it succeeds.
-func openAuditRepo(ctx context.Context, cfg config.Config, db *sql.DB, logger *slog.Logger) (*audit.Repo, error) {
+// (FR-E.3) and seals the head anchor. applied lists the migrations this
+// process just ran; a legacy log is blessed only when 0014 is among them.
+// A seal failure (e.g. migrations not applied yet) is logged, not fatal:
+// VerifyChain reports the chain as unanchored until it succeeds.
+func openAuditRepo(ctx context.Context, cfg config.Config, db *sql.DB, logger *slog.Logger, applied []int64) (*audit.Repo, error) {
 	key, err := audit.DeriveKey(cfg.MasterSecret)
 	if err != nil {
 		return nil, err
 	}
 	repo := audit.NewRepo(db, key)
-	if err := repo.SealAnchor(ctx); err != nil {
+	if err := repo.SealAnchor(ctx, slices.Contains(applied, audit.HeadMigration)); err != nil {
 		logger.Warn("audit anchor seal failed", "err", err)
 	}
 	return repo, nil
 }
 
-// appendCLIAudit records a CLI action in the keyed audit chain.
+// appendCLIAudit records a CLI action in the keyed audit chain. The chain
+// is HMAC-keyed from the master secret: derive the same key the server
+// uses, or the row would break the chain.
 func appendCLIAudit(ctx context.Context, repo *admin.Repo, event, target string, details map[string]any) error {
 	cfg, err := config.Load()
 	if err != nil {
@@ -513,9 +560,18 @@ func openAdminRepo(ctx context.Context) (*admin.Repo, func(), error) {
 		return nil, func() {}, fmt.Errorf("storage: %w", err)
 	}
 	cleanup := func() { _ = store.Close() }
-	if err := store.MigrateUp(ctx); err != nil {
+	applied, err := store.MigrateUpApplied(ctx)
+	if err != nil {
 		cleanup()
 		return nil, func() {}, fmt.Errorf("migrate: %w", err)
+	}
+	// An admin subcommand can be the first run after an upgrade; it must
+	// seal the cut-over itself, no later boot is allowed to.
+	if slices.Contains(applied, audit.HeadMigration) {
+		if _, err := openAuditRepo(ctx, cfg, store.DB(), buildLogger(cfg), applied); err != nil {
+			cleanup()
+			return nil, func() {}, fmt.Errorf("audit: %w", err)
+		}
 	}
 	box, err := cryptobox.New(cfg.MasterSecret)
 	if err != nil {
@@ -561,6 +617,11 @@ func runAdminResetPassword(args []string) int {
 	if err := repo.ResetForBootstrap(ctx, a.ID, pwd); err != nil {
 		fmt.Fprintf(os.Stderr, "admin reset-password: %v\n", err)
 		return 1
+	}
+	// An out-of-band credential reset must not be invisible to the console.
+	if err := appendCLIAudit(ctx, repo, "admin.password_reset", a.Email,
+		map[string]any{"admin_id": a.ID, "via": "cli", "generated": *customPwd == ""}); err != nil {
+		fmt.Fprintf(os.Stderr, "admin reset-password: audit append failed: %v\n", err)
 	}
 	fmt.Println("================================================================")
 	fmt.Println("ADMIN PASSWORD RESET — record this NOW, it will not be reprinted")

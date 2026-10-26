@@ -63,3 +63,39 @@ func TestSubjectIsRFC2047Encoded(t *testing.T) {
 		t.Errorf("non-ASCII subject not encoded: %.200s", m.String())
 	}
 }
+
+// Regression: the Message-ID was cut from the hex of the boundary's
+// constant "----=_SK" prefix, so every mail carried the same
+// <2d2d2d2d3d5f534b@domain>. Receivers deduplicate on Message-ID, so a
+// second reveal mail could be dropped or threaded with the first.
+func TestMessageIDIsUniqueAndRandom(t *testing.T) {
+	t.Parallel()
+	seen := map[string]bool{}
+	for range 50 {
+		for _, build := range []func() (Message, error){
+			func() (Message, error) {
+				return Assemble(AssembleInputs{To: "a@b.com", InstanceDomain: "sk.test", Subject: "s", Text: "t"})
+			},
+			func() (Message, error) {
+				return BuildReveal(RevealInputs{To: "a@b.com", InstanceDomain: "sk.test", RevealURL: "https://sk.test/reveal/x"})
+			},
+		} {
+			m, err := build()
+			if err != nil {
+				t.Fatal(err)
+			}
+			id := m.Headers["Message-ID"]
+			if seen[id] {
+				t.Fatalf("Message-ID %s repeated", id)
+			}
+			seen[id] = true
+			local := strings.TrimSuffix(strings.TrimPrefix(id, "<"), "@sk.test>")
+			if len(local) < 32 {
+				t.Fatalf("Message-ID %s: local part shorter than 128 bits of hex", id)
+			}
+			if strings.Contains(m.Headers["Content-Type"], local) {
+				t.Fatalf("Message-ID %s is derived from the MIME boundary", id)
+			}
+		}
+	}
+}

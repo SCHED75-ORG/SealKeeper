@@ -21,7 +21,7 @@ import (
 // newAdminServer wires a Server to a fresh database with one admin.
 func newAdminServer(t *testing.T) (*Server, *admin.Repo) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), storagetest.SetupTimeout)
 	defer cancel()
 	st, err := storage.Open(ctx, storage.Options{DSN: storagetest.DSN(t)})
 	if err != nil {
@@ -150,5 +150,42 @@ func TestSessionCSRFBoundToSession(t *testing.T) {
 	}
 	if try("", "") {
 		t.Error("empty token accepted")
+	}
+}
+
+// Regression: the login slug told an existing admin email apart from an
+// unknown one. Wrong passwords against a real account ended in err=locked
+// once its attempts were spent, and a disabled account answered
+// err=disabled before any password check, while an unknown email always got
+// err=bad_creds. Without the password, every account must look alike.
+func TestAdminLoginSlugDoesNotEnumerateAdmins(t *testing.T) {
+	t.Parallel()
+	s, repo := newAdminServer(t)
+	s.loginLimiter = ratelimit.New(1000, time.Hour)
+	ctx := context.Background()
+	const pw = "supersecret-12chars"
+	if _, err := repo.Create(ctx, "real@example.test", pw); err != nil {
+		t.Fatal(err)
+	}
+	off, err := repo.Create(ctx, "off@example.test", pw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SetDisabled(ctx, off.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	slug := func(w *httptest.ResponseRecorder) string {
+		u, err := url.Parse(w.Header().Get("Location"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return u.Query().Get("err")
+	}
+	for _, email := range []string{"real@example.test", "off@example.test", "ghost@example.test"} {
+		for i := 0; i <= admin.MaxFailedAttempts+1; i++ {
+			if got := slug(postLogin(s, "203.0.113.9:1", email, "wrong-guess")); got != "bad_creds" {
+				t.Fatalf("%s attempt %d: err=%q, want bad_creds", email, i+1, got)
+			}
+		}
 	}
 }

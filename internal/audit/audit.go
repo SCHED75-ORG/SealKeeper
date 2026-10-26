@@ -49,15 +49,22 @@
 // the keyed part of the chain.
 //
 // Sealing: the anchor starts unsealed (head_mac = ""). The first Append
-// seals it on an empty log; SealAnchor, called by the server at startup,
-// seals a freshly migrated legacy log. That startup seal is the only path
-// that accepts an unsealed anchor in front of existing rows; Append treats
-// that state as tampering and records it in broken_seq.
+// seals it on an empty log; SealAnchor seals a freshly migrated legacy
+// log, but only when told that the calling process itself just applied
+// migration 0014 (storage MigrateUpApplied reports it). That is the only
+// path that accepts an unsealed anchor in front of existing rows. At any
+// other time (an ordinary boot, Append) the state is indistinguishable
+// from a keyless downgrade — rows rehashed as v1, legacy_until raised and
+// the anchor reset — so it is treated as tampering and recorded in
+// broken_seq.
 //
 // Residual risk, by design of a symmetric scheme: an attacker who wipes the
 // whole log and resets the anchor to its unsealed state leaves an empty,
-// consistent log. Continuity across that point is only visible from the
-// outside (the SIEM receives real sequence numbers, so it sees the gap).
+// consistent log. Likewise, one who rolls the schema back to before 0014
+// (drops audit_head and every later migration's objects, deletes their
+// goose_db_version rows) makes the next migration re-run the cut-over.
+// Continuity across either point is only visible from the outside (the
+// SIEM receives real sequence numbers, so it sees the gap or the rewrite).
 package audit
 
 import (
@@ -92,6 +99,10 @@ const (
 	keyInfo = "sealkeeper-audit-v1"
 	// KeySize is the length of the audit chain key in bytes.
 	KeySize = 32
+
+	// HeadMigration is the schema version that creates audit_head and
+	// records the legacy cut-over (see SealAnchor).
+	HeadMigration int64 = 14
 
 	entryTag = "sealkeeper-audit-entry-v2"
 	headTag  = "sealkeeper-audit-head-v1"
@@ -233,11 +244,17 @@ func (r *Repo) Append(ctx context.Context, eventType, actor, target string, deta
 	}, nil
 }
 
-// SealAnchor seals an unsealed head anchor over the current tail. It is
-// the startup hook that takes a freshly migrated legacy log under the key
-// (see the package comment). An already sealed anchor is left untouched,
-// so a tampered anchor is never re-blessed.
-func (r *Repo) SealAnchor(ctx context.Context) error {
+// SealAnchor seals an unsealed head anchor over the current tail. An
+// already sealed anchor is left untouched, so a tampered anchor is never
+// re-blessed.
+//
+// legacyMigrated must be true only when this very process just applied
+// migration HeadMigration (see the package comment): that is the one moment
+// an unsealed anchor in front of existing rows is the genuine cut-over
+// state. Any other time the same state is what someone with database
+// write access but no key leaves behind after rewriting the log as v1 and
+// resetting the anchor, so it is sealed with the break recorded instead.
+func (r *Repo) SealAnchor(ctx context.Context, legacyMigrated bool) error {
 	if len(r.key) == 0 {
 		return fmt.Errorf("audit.SealAnchor: %w", ErrNoKey)
 	}
@@ -263,7 +280,7 @@ func (r *Repo) SealAnchor(ctx context.Context) error {
 		legacyUntil: h.legacyUntil,
 		seq:         t.seq,
 		hash:        t.hash,
-		broken:      r.anchorBreak(h, t, true),
+		broken:      r.anchorBreak(h, t, legacyMigrated),
 	}
 	if err := r.writeHead(ctx, tx, next); err != nil {
 		return fmt.Errorf("audit.SealAnchor: %w", err)
@@ -382,7 +399,7 @@ func (r *Repo) rowValid(seq int64, occurred any, evt, actor, target, details, pr
 // anchorBreak returns the first sequence number the anchor shows to be
 // broken given the newest row, or 0 when they agree. allowUnsealedLegacy
 // accepts the post-migration state (unsealed anchor, rows only at or below
-// legacy_until); only SealAnchor passes true.
+// legacy_until); only SealAnchor right after migration 0014 passes true.
 func (r *Repo) anchorBreak(h head, t tail, allowUnsealedLegacy bool) int64 {
 	switch {
 	case !h.present:

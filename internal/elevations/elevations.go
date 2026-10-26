@@ -229,48 +229,62 @@ func (r *Repo) Import(ctx context.Context, src io.Reader, resolve DomainResolver
 			return out, fmt.Errorf("elevations.Import: parse line %d: %w", line+1, err)
 		}
 		line++
-		if len(row) == 0 {
-			continue
-		}
-		if len(row) < 3 {
-			out.Errors = append(out.Errors, ImportError{Line: line, Reason: "expected at least domain,email,level"})
-			continue
-		}
-		domain := strings.TrimSpace(row[0])
-		email := strings.TrimSpace(row[1])
-		level := strings.ToUpper(strings.TrimSpace(row[2]))
-		if line == 1 {
-			lower := strings.ToLower(domain)
-			if lower == "domain" || lower == "domain name" {
-				continue
-			}
-		}
-		if domain == "" || email == "" {
-			out.Errors = append(out.Errors, ImportError{Line: line, Email: email, Reason: "empty domain or email"})
-			continue
-		}
-		reason := ""
-		if len(row) >= 4 {
-			reason = strings.TrimSpace(row[3])
-		}
-		domainID, err := resolve(ctx, domain)
-		if err != nil {
-			out.Errors = append(out.Errors, ImportError{Line: line, Email: email, Reason: "domain not in allowlist: " + domain})
-			continue
-		}
-		_, err = r.Create(ctx, domainID, email, Level(level), reason, adminID)
-		switch {
-		case errors.Is(err, ErrAlreadyExists):
-			out.Skipped++
-		case errors.Is(err, ErrInvalidLevel):
-			out.Errors = append(out.Errors, ImportError{Line: line, Email: email, Reason: "invalid level: " + level})
-		case err != nil:
-			out.Errors = append(out.Errors, ImportError{Line: line, Email: email, Reason: err.Error()})
-		default:
-			out.Created++
-		}
+		r.importRow(ctx, &out, line, row, resolve, adminID)
 	}
 	return out, nil
+}
+
+// importRow processes one CSV row, recording its outcome (created,
+// skipped, or an ImportError) on out. Header and empty rows are ignored.
+func (r *Repo) importRow(ctx context.Context, out *ImportSummary, line int, row []string, resolve DomainResolver, adminID *int64) {
+	if len(row) == 0 {
+		return
+	}
+	if len(row) < 3 {
+		out.Errors = append(out.Errors, ImportError{Line: line, Reason: "expected at least domain,email,level"})
+		return
+	}
+	domain := strings.TrimSpace(row[0])
+	email := strings.TrimSpace(row[1])
+	level := strings.ToUpper(strings.TrimSpace(row[2]))
+	if line == 1 && isHeaderColumn(domain) {
+		return
+	}
+	if domain == "" || email == "" {
+		out.Errors = append(out.Errors, ImportError{Line: line, Email: email, Reason: "empty domain or email"})
+		return
+	}
+	reason := ""
+	if len(row) >= 4 {
+		reason = strings.TrimSpace(row[3])
+	}
+	domainID, err := resolve(ctx, domain)
+	if err != nil {
+		out.Errors = append(out.Errors, ImportError{Line: line, Email: email, Reason: "domain not in allowlist: " + domain})
+		return
+	}
+	_, err = r.Create(ctx, domainID, email, Level(level), reason, adminID)
+	recordCreate(out, line, email, level, err)
+}
+
+// isHeaderColumn reports whether the first column of row 1 is a header.
+func isHeaderColumn(domain string) bool {
+	lower := strings.ToLower(domain)
+	return lower == "domain" || lower == "domain name"
+}
+
+// recordCreate tallies the outcome of one Create call on out.
+func recordCreate(out *ImportSummary, line int, email, level string, err error) {
+	switch {
+	case errors.Is(err, ErrAlreadyExists):
+		out.Skipped++
+	case errors.Is(err, ErrInvalidLevel):
+		out.Errors = append(out.Errors, ImportError{Line: line, Email: email, Reason: "invalid level: " + level})
+	case err != nil:
+		out.Errors = append(out.Errors, ImportError{Line: line, Email: email, Reason: err.Error()})
+	default:
+		out.Created++
+	}
 }
 
 // ----- internals ------------------------------------------------------------

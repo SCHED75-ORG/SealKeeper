@@ -5,9 +5,10 @@ import (
 	"time"
 )
 
-// TestPolicy lets httptest servers on 127.0.0.1 through the SSRF guard.
-// Only compiled into this package's tests.
-var TestPolicy = NetPolicy{allowLoopback: true}
+// TestPolicy lets httptest servers (plain http on 127.0.0.1) through the
+// SSRF guard and the https requirement. Only compiled into this package's
+// tests.
+var TestPolicy = NetPolicy{allowLoopback: true, AllowPlainHTTP: true}
 
 // CheckAddr exposes NetPolicy.checkAddr to the external test package.
 func (p NetPolicy) CheckAddr(ip netip.Addr) error { return p.checkAddr(ip) }

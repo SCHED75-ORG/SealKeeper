@@ -2,10 +2,10 @@ package mailtemplates_test
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/sched75/sealkeeper/internal/mailtemplates"
 	"github.com/sched75/sealkeeper/internal/storage"
@@ -14,8 +14,14 @@ import (
 
 func newRepo(t *testing.T) *mailtemplates.Repo {
 	t.Helper()
+	r, _ := newRepoDB(t)
+	return r
+}
+
+func newRepoDB(t *testing.T) (*mailtemplates.Repo, *sql.DB) {
+	t.Helper()
 	dsn := storagetest.DSN(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), storagetest.SetupTimeout)
 	defer cancel()
 	s, err := storage.Open(ctx, storage.Options{DSN: dsn})
 	if err != nil {
@@ -25,7 +31,7 @@ func newRepo(t *testing.T) *mailtemplates.Repo {
 		t.Fatalf("MigrateUp: %v", err)
 	}
 	t.Cleanup(func() { _ = s.Close() })
-	return mailtemplates.NewRepo(s.DB())
+	return mailtemplates.NewRepo(s.DB()), s.DB()
 }
 
 // ----- defaults -------------------------------------------------------------
@@ -176,26 +182,6 @@ func TestRenderTemplateInlineWorksWithoutDB(t *testing.T) {
 	}
 	if got.Subject != "S Acme" || got.Text != "T u" {
 		t.Errorf("got = %+v", got)
-	}
-}
-
-// ----- PickLanguage ---------------------------------------------------------
-
-func TestPickLanguage(t *testing.T) {
-	t.Parallel()
-	cases := map[string]string{
-		"":                           "en",
-		"fr":                         "fr",
-		"fr-FR":                      "fr",
-		"fr-FR,fr;q=0.9,en;q=0.8":    "fr",
-		"de-DE,de;q=0.9,en;q=0.8":    "en",
-		"es-MX,es;q=0.9,fr-FR;q=0.5": "fr",
-		"x-klingon":                  "en",
-	}
-	for accept, want := range cases {
-		if got := mailtemplates.PickLanguage(accept); got != want {
-			t.Errorf("PickLanguage(%q) = %q, want %q", accept, got, want)
-		}
 	}
 }
 
