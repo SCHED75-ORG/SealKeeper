@@ -23,7 +23,9 @@ import (
 	"errors"
 	htmltemplate "html/template"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/netip"
 	"strings"
 	"time"
 
@@ -88,6 +90,9 @@ type Server struct {
 	webauthn     *webauthn.Repo
 	smtpConfig   *smtpconfig.Repo
 	loginPending *loginPendingStore
+
+	// trustedProxies gates X-Forwarded-For (FR-H.42). Empty = never trust.
+	trustedProxies []netip.Prefix
 }
 
 // New builds an HTTP server with the given configuration.
@@ -136,22 +141,31 @@ func New(cfg config.Config, logger *slog.Logger) *Server {
 		defaultSender = &mailer.CaptureSender{Store: mailStore}
 	}
 
+	// config.Load already rejected malformed entries; a Config built by
+	// hand (tests) with a bad CIDR degrades to "trust nobody".
+	trusted, err := cfg.TrustedProxyPrefixes()
+	if err != nil {
+		logger.Warn("ignoring invalid SK_TRUSTED_PROXY_CIDRS; X-Forwarded-For will not be trusted", "err", err)
+		trusted = nil
+	}
+
 	return &Server{
-		cfg:          cfg,
-		logger:       logger,
-		readyz:       readiness.New(),
-		mail:         mailStore,
-		sender:       defaultSender,
-		limiter:      limiter,
-		reqCount:     reqCount,
-		reqDur:       reqDur,
-		rateHits:     rateHits,
-		registry:     reg,
-		revealTpl:    htmltemplate.Must(htmltemplate.New("reveal").Parse(revealHTML)),
-		landingTpl:   htmltemplate.Must(htmltemplate.New("landing").Parse(landingHTML)),
-		adminLabel:   cfg.InstanceDomain,
-		adminTpl:     adminTpls,
-		loginPending: newLoginPendingStore(5 * time.Minute),
+		trustedProxies: trusted,
+		cfg:            cfg,
+		logger:         logger,
+		readyz:         readiness.New(),
+		mail:           mailStore,
+		sender:         defaultSender,
+		limiter:        limiter,
+		reqCount:       reqCount,
+		reqDur:         reqDur,
+		rateHits:       rateHits,
+		registry:       reg,
+		revealTpl:      htmltemplate.Must(htmltemplate.New("reveal").Parse(revealHTML)),
+		landingTpl:     htmltemplate.Must(htmltemplate.New("landing").Parse(landingHTML)),
+		adminLabel:     cfg.InstanceDomain,
+		adminTpl:       adminTpls,
+		loginPending:   newLoginPendingStore(5 * time.Minute),
 	}
 }
 
@@ -304,7 +318,9 @@ func (s *Server) Limiter() ratelimit.Composite { return s.limiter }
 func (s *Server) Router() http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
-	r.Use(middleware.RealIP)
+	// No middleware.RealIP: it trusts X-Forwarded-For / X-Real-IP from any
+	// peer (GO-2026-5774/5775/5777). Client IPs come from s.clientIP, which
+	// honours forwarding headers only from SK_TRUSTED_PROXY_CIDRS.
 	r.Use(s.instrumentation)
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(30 * time.Second))
@@ -468,7 +484,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	email := strings.ToLower(strings.TrimSpace(p.Email))
-	ip := clientIP(r)
+	ip := s.clientIP(r)
 	ipHash := hashShort(ip)
 	uaHash := hashShort(r.UserAgent())
 
@@ -678,25 +694,53 @@ func (s *Server) auditAppend(ctx context.Context, event, actor, target string, d
 	}
 }
 
-// clientIP returns the best-guess client IP for a request. Honours
-// X-Forwarded-For only when the immediate peer is within
-// SK_TRUSTED_PROXY_CIDRS; otherwise uses r.RemoteAddr (FR-H.42).
-//
-// For v0.1 the trusted-proxy filter just trusts XFF when set — the strict
-// CIDR check lands when the reverse-proxy middleware is wired in module D.
-func clientIP(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		// First entry is the originating client.
-		if comma := strings.IndexByte(xff, ','); comma > 0 {
-			return strings.TrimSpace(xff[:comma])
+// clientIP returns the client IP for a request (FR-H.42). X-Forwarded-For
+// is honoured only when the immediate peer (r.RemoteAddr) is within
+// SK_TRUSTED_PROXY_CIDRS. The header is then walked right-to-left, skipping
+// trusted hops: the first untrusted address is the client. Entries left of
+// it are client-controlled and never read — taking the leftmost entry would
+// let any caller rotate a fake XFF to dodge the per-IP rate limit (FR-B.12).
+func (s *Server) clientIP(r *http.Request) string {
+	peer := remoteHost(r.RemoteAddr)
+	peerAddr, err := netip.ParseAddr(peer)
+	if err != nil || !s.isTrustedProxy(peerAddr) {
+		return peer
+	}
+	client := peerAddr
+	hops := r.Header.Values("X-Forwarded-For")
+	for i := len(hops) - 1; i >= 0; i-- {
+		parts := strings.Split(hops[i], ",")
+		for j := len(parts) - 1; j >= 0; j-- {
+			hop, err := netip.ParseAddr(strings.TrimSpace(parts[j]))
+			if err != nil {
+				// Malformed hop: stop at the last address we could vouch for.
+				return client.String()
+			}
+			client = hop.Unmap()
+			if !s.isTrustedProxy(client) {
+				return client.String()
+			}
 		}
-		return strings.TrimSpace(xff)
 	}
-	// r.RemoteAddr looks like "host:port".
-	if i := strings.LastIndex(r.RemoteAddr, ":"); i > 0 {
-		return r.RemoteAddr[:i]
+	return client.String()
+}
+
+func (s *Server) isTrustedProxy(addr netip.Addr) bool {
+	addr = addr.Unmap()
+	for _, p := range s.trustedProxies {
+		if p.Contains(addr) {
+			return true
+		}
 	}
-	return r.RemoteAddr
+	return false
+}
+
+// remoteHost strips the port from r.RemoteAddr ("host:port", "[v6]:port").
+func remoteHost(remoteAddr string) string {
+	if host, _, err := net.SplitHostPort(remoteAddr); err == nil {
+		return host
+	}
+	return remoteAddr
 }
 
 // handlePolicy serves /api/v1/policy. With ?token=… present, the token is
@@ -712,7 +756,7 @@ func (s *Server) handlePolicy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"storage_unavailable"}`, http.StatusServiceUnavailable)
 		return
 	}
-	ipHash := hashShort(r.RemoteAddr)
+	ipHash := hashShort(s.clientIP(r))
 	uaHash := hashShort(r.UserAgent())
 	tok, err := s.tokens.Consume(r.Context(), tokenParam, ipHash, uaHash)
 	switch {

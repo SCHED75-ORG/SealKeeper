@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net/netip"
 	"net/url"
 	"os"
 	"strconv"
@@ -235,7 +236,36 @@ func (c Config) validate() error {
 	default:
 		return fmt.Errorf("invalid SK_LOG_FORMAT %q", c.LogFormat)
 	}
+	if _, err := c.TrustedProxyPrefixes(); err != nil {
+		return err
+	}
 	return nil
+}
+
+// TrustedProxyPrefixes parses TrustedProxyCIDRs (FR-H.42). A bare IP is
+// accepted as a single-host prefix. Empty entries are skipped.
+func (c Config) TrustedProxyPrefixes() ([]netip.Prefix, error) {
+	out := make([]netip.Prefix, 0, len(c.TrustedProxyCIDRs))
+	for _, raw := range c.TrustedProxyCIDRs {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		if !strings.Contains(raw, "/") {
+			addr, err := netip.ParseAddr(raw)
+			if err != nil {
+				return nil, fmt.Errorf("invalid SK_TRUSTED_PROXY_CIDRS entry %q: %w", raw, err)
+			}
+			out = append(out, netip.PrefixFrom(addr.Unmap(), addr.Unmap().BitLen()))
+			continue
+		}
+		p, err := netip.ParsePrefix(raw)
+		if err != nil {
+			return nil, fmt.Errorf("invalid SK_TRUSTED_PROXY_CIDRS entry %q: %w", raw, err)
+		}
+		out = append(out, p.Masked())
+	}
+	return out, nil
 }
 
 // IsEval reports whether the instance runs in evaluation mode.
