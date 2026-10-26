@@ -868,11 +868,17 @@ func (s *Server) handlePolicy(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	s.auditAppend(r.Context(), audit.EventTokenConsumed, tok.Email, tokenRef(tok.Token), map[string]any{
-		"ip_hash": ipHash,
-		"ua_hash": uaHash,
-		"domain":  tok.Domain,
-	})
+	consumed := map[string]any{
+		"ip_hash":       ipHash,
+		"ua_hash":       uaHash,
+		"domain":        tok.Domain,
+		"policy_sha256": descriptorSHA256(resolved),
+		"policy_id":     "builtin_default",
+	}
+	if id, ok := resolved["id"]; ok {
+		consumed["policy_id"] = id
+	}
+	s.auditAppend(r.Context(), audit.EventTokenConsumed, tok.Email, tokenRef(tok.Token), consumed)
 
 	// FR-B.39..41 — optional post-consultation notification. Fire and
 	// forget: the assertion-policy roundtrip must not wait on SMTP, and
@@ -1026,6 +1032,13 @@ func (s *Server) resolvedPolicy(ctx context.Context, email string) (map[string]a
 	if err != nil {
 		return nil, err
 	}
+	return policyDescriptor(row)
+}
+
+// policyDescriptor is the policy as served to the reveal page. Its
+// fingerprint (descriptorSHA256) is what ties a token.consumed audit row
+// to a policy.created / policy.updated row.
+func policyDescriptor(row policies.Policy) (map[string]any, error) {
 	out := map[string]any{
 		"id":              row.ID,
 		"domain":          row.DomainName,

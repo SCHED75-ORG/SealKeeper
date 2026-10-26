@@ -1031,11 +1031,7 @@ func (s *Server) handleAdminPolicyAdd(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/admin/policies?err=internal", http.StatusSeeOther)
 		return
 	}
-	s.auditAppend(r.Context(), "policy.created", a.Email, fmt.Sprintf("%d", p.ID), map[string]any{
-		"domain_id": p.DomainID,
-		"level":     string(p.ANSSILevel),
-		"generator": string(p.Generator),
-	})
+	s.auditAppend(r.Context(), "policy.created", a.Email, fmt.Sprintf("%d", p.ID), policySnapshot(p))
 	http.Redirect(w, r, "/admin/policies?ok=created", http.StatusSeeOther)
 }
 
@@ -1083,6 +1079,11 @@ func (s *Server) handleAdminPolicySave(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	before, err := s.policies.Get(r.Context(), id)
+	if err != nil {
+		http.Redirect(w, r, "/admin/policies?err=not_found", http.StatusSeeOther)
+		return
+	}
 	domainID, _ := strconv.ParseInt(r.FormValue("domain_id"), 10, 64)
 	in := policies.CreateInputs{
 		DomainID:          domainID,
@@ -1096,7 +1097,7 @@ func (s *Server) handleAdminPolicySave(w http.ResponseWriter, r *http.Request) {
 		NotifyOnConsult:   r.FormValue("notify_on_consult") == "on",
 		Active:            r.FormValue("active") == "on",
 	}
-	err := s.policies.Update(r.Context(), id, in)
+	err = s.policies.Update(r.Context(), id, in)
 	switch {
 	case errors.Is(err, policies.ErrInvalidShape):
 		http.Redirect(w, r, fmt.Sprintf("/admin/policies/%d/edit?err=invalid&details=%s", id, url.QueryEscape(err.Error())), http.StatusSeeOther)
@@ -1109,11 +1110,14 @@ func (s *Server) handleAdminPolicySave(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, fmt.Sprintf("/admin/policies/%d/edit?err=internal", id), http.StatusSeeOther)
 		return
 	}
-	s.auditAppend(r.Context(), "policy.updated", a.Email, fmt.Sprintf("%d", id), map[string]any{
-		"domain_id": in.DomainID,
-		"level":     string(in.ANSSILevel),
-		"generator": string(in.Generator),
-	})
+	// Audit the stored row, not the form: Update leaves domain and level
+	// untouched whatever the form says.
+	after, err := s.policies.Get(r.Context(), id)
+	if err != nil {
+		s.logger.Error("policies.Get after update failed", "err", err)
+		after = before
+	}
+	s.auditAppend(r.Context(), "policy.updated", a.Email, fmt.Sprintf("%d", id), policyUpdateDetails(before, after))
 	http.Redirect(w, r, "/admin/policies?ok=updated", http.StatusSeeOther)
 }
 
@@ -1139,10 +1143,8 @@ func (s *Server) handleAdminPolicyToggle(w http.ResponseWriter, r *http.Request)
 	if next {
 		event = "policy.enabled"
 	}
-	s.auditAppend(r.Context(), event, a.Email, fmt.Sprintf("%d", id), map[string]any{
-		"domain_id": p.DomainID,
-		"level":     string(p.ANSSILevel),
-	})
+	p.Active = next
+	s.auditAppend(r.Context(), event, a.Email, fmt.Sprintf("%d", id), policySnapshot(p))
 	http.Redirect(w, r, "/admin/policies?ok=toggled", http.StatusSeeOther)
 }
 
@@ -1167,10 +1169,7 @@ func (s *Server) handleAdminPolicyDelete(w http.ResponseWriter, r *http.Request)
 		http.Redirect(w, r, "/admin/policies?err=internal", http.StatusSeeOther)
 		return
 	}
-	s.auditAppend(r.Context(), "policy.deleted", a.Email, fmt.Sprintf("%d", id), map[string]any{
-		"domain_id": p.DomainID,
-		"level":     string(p.ANSSILevel),
-	})
+	s.auditAppend(r.Context(), "policy.deleted", a.Email, fmt.Sprintf("%d", id), policySnapshot(p))
 	http.Redirect(w, r, "/admin/policies?ok=deleted", http.StatusSeeOther)
 }
 
@@ -1584,6 +1583,7 @@ func (s *Server) handleAdminTemplateSave(w http.ResponseWriter, r *http.Request)
 	text := r.FormValue("text_body")
 	html := r.FormValue("html_body")
 
+	before, _ := s.mailTpls.Get(r.Context(), kind, lang)
 	if err := s.mailTpls.Upsert(r.Context(), kind, lang, subject, text, html, &a.ID); err != nil {
 		if errors.Is(err, mailtemplates.ErrParse) {
 			http.Redirect(w, r, fmt.Sprintf("/admin/templates/edit?kind=%s&language=%s&err=parse&details=%s",
@@ -1595,8 +1595,9 @@ func (s *Server) handleAdminTemplateSave(w http.ResponseWriter, r *http.Request)
 			kind, lang), http.StatusSeeOther)
 		return
 	}
+	after := mailtemplates.Template{Subject: subject, Text: text, HTML: html}
 	s.auditAppend(r.Context(), "template.saved", a.Email,
-		fmt.Sprintf("%s/%s", kind, lang), map[string]any{"kind": string(kind), "language": lang})
+		fmt.Sprintf("%s/%s", kind, lang), templateChangeDetails(kind, lang, before, after))
 	http.Redirect(w, r,
 		fmt.Sprintf("/admin/templates/edit?kind=%s&language=%s&ok=saved", kind, lang),
 		http.StatusSeeOther)
@@ -1643,13 +1644,15 @@ func (s *Server) handleAdminTemplateReset(w http.ResponseWriter, r *http.Request
 	}
 	kind := mailtemplates.Kind(strings.TrimSpace(r.FormValue("kind")))
 	lang := strings.TrimSpace(r.FormValue("language"))
+	before, _ := s.mailTpls.Get(r.Context(), kind, lang)
 	if err := s.mailTpls.Reset(r.Context(), kind, lang); err != nil {
 		s.logger.Error("mailtemplates.Reset failed", "err", err)
 		http.Redirect(w, r, "/admin/templates?err=internal", http.StatusSeeOther)
 		return
 	}
+	after, _ := s.mailTpls.Get(r.Context(), kind, lang)
 	s.auditAppend(r.Context(), "template.reset", a.Email,
-		fmt.Sprintf("%s/%s", kind, lang), map[string]any{"kind": string(kind), "language": lang})
+		fmt.Sprintf("%s/%s", kind, lang), templateChangeDetails(kind, lang, before, after))
 	http.Redirect(w, r,
 		fmt.Sprintf("/admin/templates/edit?kind=%s&language=%s&ok=reset", kind, lang),
 		http.StatusSeeOther)
@@ -1893,6 +1896,7 @@ func (s *Server) handleAdminBrandingSave(w http.ResponseWriter, r *http.Request)
 		TertiaryColor:  r.FormValue("tertiary_color"),
 		ContactURL:     r.FormValue("contact_url"),
 	}
+	before, _ := s.branding.Get(r.Context())
 	err := s.branding.Update(r.Context(), in, &a.ID)
 	switch {
 	case errors.Is(err, branding.ErrInvalidName):
@@ -1908,8 +1912,10 @@ func (s *Server) handleAdminBrandingSave(w http.ResponseWriter, r *http.Request)
 		http.Redirect(w, r, "/admin/branding?err=internal", http.StatusSeeOther)
 		return
 	}
+	after, _ := s.branding.Get(r.Context())
 	s.auditAppend(r.Context(), "branding.updated", a.Email, "", map[string]any{
-		"instance_name": in.InstanceName,
+		"instance_name": after.InstanceName,
+		"changes":       brandingChanges(before, after),
 	})
 	http.Redirect(w, r, "/admin/branding?ok=saved", http.StatusSeeOther)
 }
@@ -1969,8 +1975,9 @@ func (s *Server) handleAdminBrandingLogo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	s.auditAppend(r.Context(), "branding.logo_updated", a.Email, "", map[string]any{
-		"mime":  mime,
-		"bytes": len(data),
+		"mime":   mime,
+		"bytes":  len(data),
+		"sha256": sha256Hex(data),
 	})
 	http.Redirect(w, r, "/admin/branding?ok=logo_uploaded", http.StatusSeeOther)
 }
