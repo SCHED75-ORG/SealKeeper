@@ -391,42 +391,55 @@ func transforms(params obj) ([]transform, error) {
 	}
 	var out []transform
 	for _, t := range list {
-		switch t.(type) {
-		case map[string]any, []any:
-		default:
-			return nil, shapeErr("transform must be an object")
-		}
-		codeV, _ := jsGet(t, "code")
-		code, _ := codeV.(string)
-		if !contains(transformCodes, code) {
-			return nil, shapeErr("unknown transform %v", codeV)
-		}
-		if active, _ := jsGet(t, "active"); !truthy(active) {
-			continue
-		}
-		for _, o := range out {
-			if o.code == code {
-				return nil, shapeErr("transform %s listed twice", code)
-			}
-		}
-		tr := transform{code: code}
-		if m, ok := jsGet(t, "mode"); ok {
-			s, _ := m.(string)
-			if s != "random" && s != "deterministic" {
-				return nil, shapeErr("transform %s mode %v", code, m)
-			}
-			tr.mode = s
-		}
-		tp, ok := jsGet(t, "parameters")
-		if !ok || tp == nil {
-			tp = obj{}
-		}
-		if err := transformParameters(&tr, tp); err != nil {
+		tr, active, err := parseTransform(t, out)
+		if err != nil {
 			return nil, err
 		}
-		out = append(out, tr)
+		if active {
+			out = append(out, tr)
+		}
 	}
 	return out, nil
+}
+
+// parseTransform validates one entry of the transforms array. Inactive
+// entries are still shape- and code-checked, then reported with active=false.
+// prev holds the active transforms accepted so far (duplicate detection).
+func parseTransform(t any, prev []transform) (tr transform, active bool, err error) {
+	switch t.(type) {
+	case map[string]any, []any:
+	default:
+		return tr, false, shapeErr("transform must be an object")
+	}
+	codeV, _ := jsGet(t, "code")
+	code, _ := codeV.(string)
+	if !contains(transformCodes, code) {
+		return tr, false, shapeErr("unknown transform %v", codeV)
+	}
+	if a, _ := jsGet(t, "active"); !truthy(a) {
+		return tr, false, nil
+	}
+	for _, o := range prev {
+		if o.code == code {
+			return tr, false, shapeErr("transform %s listed twice", code)
+		}
+	}
+	tr = transform{code: code}
+	if m, ok := jsGet(t, "mode"); ok {
+		s, _ := m.(string)
+		if s != "random" && s != "deterministic" {
+			return tr, false, shapeErr("transform %s mode %v", code, m)
+		}
+		tr.mode = s
+	}
+	tp, ok := jsGet(t, "parameters")
+	if !ok || tp == nil {
+		tp = obj{}
+	}
+	if err := transformParameters(&tr, tp); err != nil {
+		return tr, false, err
+	}
+	return tr, true, nil
 }
 
 func transformParameters(t *transform, p any) error {
@@ -562,6 +575,25 @@ type libFacts struct {
 }
 
 func entropyG1(p g1Params) EntropyReport {
+	c := newG1Calc(p)
+	var b breakdown
+	b.push("citation-selection", c.citationBits())
+	if len(p.groups) > 0 || !c.spacesMayBeGone(len(c.ts)) {
+		b.push("separator", math.Log2(float64(len(p.separators))))
+	}
+	b.push("digit-groups", float64(totalDigits(p.groups))*math.Log2(10))
+	for i, t := range c.ts {
+		if t.mode != "random" {
+			continue // FR-A.E.2: deterministic → 0 bits.
+		}
+		b.push("transform-"+t.code, c.transformBits(i, t))
+	}
+	return b.finalize()
+}
+
+// newG1Calc indexes the transform chain (first T05, leet keys, joiners) and
+// precomputes the library facts the per-transform rules depend on.
+func newG1Calc(p g1Params) *g1Calc {
 	c := &g1Calc{p: p, ts: p.transforms, text: newJSText(),
 		views: map[string][]string{}, folds: map[string]string{}}
 	for i := range c.ts {
@@ -576,67 +608,89 @@ func entropyG1(p g1Params) EntropyReport {
 		}
 	}
 	c.lib = c.libraryFacts()
+	return c
+}
 
-	var b breakdown
-	b.push("citation-selection", c.citationBits())
-	if len(p.groups) > 0 || !c.spacesMayBeGone(len(c.ts)) {
-		b.push("separator", math.Log2(float64(len(p.separators))))
-	}
+func totalDigits(groups []numericGroup) int {
 	digits := 0
-	for _, g := range p.groups {
+	for _, g := range groups {
 		digits += g.digitsCount
 	}
-	b.push("digit-groups", float64(digits)*math.Log2(10))
+	return digits
+}
 
-	for i, t := range c.ts {
-		if t.mode != "random" {
-			continue // FR-A.E.2: deterministic → 0 bits.
-		}
-		bits := 0.0
-		switch t.code {
-		case "T01":
-			if !c.after(i, isCode("T07")) {
-				multiWord := !c.spacesMayBeGone(i) && !c.after(i, isCode("T05"))
-				startCased := c.lib.allStartCased && !c.before(i, isCode("T04"))
-				if startCased || !c.after(i, isCode("T05")) {
-					bits = caseBits(t.candidates, multiWord, startCased, c.lib.allViewsCased)
-				}
-			}
-		case "T02", "T03":
-			bits = c.leetBits(t, i)
-		case "T04":
-			bits = c.choiceBits(i, func(s string) []string {
-				return []string{s, c.text.reverseChars(s), c.text.reverseWords(s)}
-			})
-		case "T05":
-			bits = c.choiceBits(i, func(s string) []string {
-				v := c.text.variantsT05(s, t.firstN)
-				return []string{s, v[1], v[2]}
-			})
-		case "T06":
-			if c.lib.allHaveDiacritics && c.t05 == nil {
-				bits = 1
-			}
-		case "T07":
-			if c.lib.allViewsCased && !c.after(i, isCode("T01")) {
-				bits = 1
-			}
-		case "T08":
-			if !c.spacesMayBeGone(i) && !c.after(i, isCode("T05")) {
-				bits = math.Log2(float64(len(t.symbols)))
-			}
-		case "T09":
-			if !c.after(i, isCode("T05")) {
-				perChar := 4
-				if c.after(i, isLeet) {
-					perChar = 3
-				}
-				bits = math.Min(float64(perChar*t.length), t09MaxBits)
-			}
-		}
-		b.push("transform-"+t.code, bits)
+// transformBits: entropy contributed by the random-mode transform t at index i.
+func (c *g1Calc) transformBits(i int, t transform) float64 {
+	switch t.code {
+	case "T01":
+		return c.t01Bits(i, t)
+	case "T02", "T03":
+		return c.leetBits(t, i)
+	case "T04":
+		return c.choiceBits(i, func(s string) []string {
+			return []string{s, c.text.reverseChars(s), c.text.reverseWords(s)}
+		})
+	case "T05":
+		return c.choiceBits(i, func(s string) []string {
+			v := c.text.variantsT05(s, t.firstN)
+			return []string{s, v[1], v[2]}
+		})
+	case "T06":
+		return c.t06Bits()
+	case "T07":
+		return c.t07Bits(i)
+	case "T08":
+		return c.t08Bits(i, t)
+	case "T09":
+		return c.t09Bits(i, t)
 	}
-	return b.finalize()
+	return 0
+}
+
+// t01Bits: random case. Nothing survives a later T07; after a later T05 only
+// the start-of-text casing can still be observed.
+func (c *g1Calc) t01Bits(i int, t transform) float64 {
+	if c.after(i, isCode("T07")) {
+		return 0
+	}
+	multiWord := !c.spacesMayBeGone(i) && !c.after(i, isCode("T05"))
+	startCased := c.lib.allStartCased && !c.before(i, isCode("T04"))
+	if startCased || !c.after(i, isCode("T05")) {
+		return caseBits(t.candidates, multiWord, startCased, c.lib.allViewsCased)
+	}
+	return 0
+}
+
+func (c *g1Calc) t06Bits() float64 {
+	if c.lib.allHaveDiacritics && c.t05 == nil {
+		return 1
+	}
+	return 0
+}
+
+func (c *g1Calc) t07Bits(i int) float64 {
+	if c.lib.allViewsCased && !c.after(i, isCode("T01")) {
+		return 1
+	}
+	return 0
+}
+
+func (c *g1Calc) t08Bits(i int, t transform) float64 {
+	if !c.spacesMayBeGone(i) && !c.after(i, isCode("T05")) {
+		return math.Log2(float64(len(t.symbols)))
+	}
+	return 0
+}
+
+func (c *g1Calc) t09Bits(i int, t transform) float64 {
+	if c.after(i, isCode("T05")) {
+		return 0
+	}
+	perChar := 4
+	if c.after(i, isLeet) {
+		perChar = 3
+	}
+	return math.Min(float64(perChar*t.length), t09MaxBits)
 }
 
 func isCode(code string) func(transform) bool {
