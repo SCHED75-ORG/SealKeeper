@@ -69,6 +69,10 @@ type Store interface {
 
 	// MigrateUp runs all pending up migrations. Idempotent.
 	MigrateUp(ctx context.Context) error
+	// MigrateUpApplied is MigrateUp that also returns the versions this
+	// call applied. Callers use it for one-shot work tied to a specific
+	// migration (the audit anchor seal after 0014).
+	MigrateUpApplied(ctx context.Context) ([]int64, error)
 	// SchemaVersion returns the version recorded by goose. Zero means no
 	// migration has ever been applied.
 	SchemaVersion(ctx context.Context) (int64, error)

@@ -19,6 +19,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -140,11 +141,12 @@ func runServe(args []string) int {
 		}
 	}()
 
+	var applied []int64
 	if cfg.IsEval() {
 		// Eval mode runs migrations automatically so `docker run … -e SK_MODE=eval`
 		// works with zero ceremony (FR-H.11..19). Production deployments are
 		// expected to run `sealkeeper migrate up` as a discrete step (FR-H.63).
-		if err := store.MigrateUp(ctx); err != nil {
+		if applied, err = store.MigrateUpApplied(ctx); err != nil {
 			logger.Error("eval auto-migrate failed", "err", err)
 			return 1
 		}
@@ -153,7 +155,7 @@ func runServe(args []string) int {
 	srv := httpserver.New(cfg, logger)
 	srv.Readiness().Add(storage.NewReadinessCheck("database", store))
 	srv.SetTokens(tokens.NewRepo(store.DB()))
-	auditRepo, err := openAuditRepo(ctx, cfg, store.DB(), logger)
+	auditRepo, err := openAuditRepo(ctx, cfg, store.DB(), logger, applied)
 	if err != nil {
 		logger.Error("audit init failed", "err", err)
 		return 1
@@ -297,16 +299,18 @@ func runMigrate(args []string) int {
 	case "up":
 		// An unreadable version (fresh database) counts as 0.
 		before, _ := store.SchemaVersion(ctx)
-		if err := store.MigrateUp(ctx); err != nil {
+		applied, err := store.MigrateUpApplied(ctx)
+		if err != nil {
 			logger.Error("migrate up failed", "err", err)
 			return 1
 		}
 		v, _ := store.SchemaVersion(ctx)
 		// Seal the audit head anchor right after migration 0014 so a
-		// migrated legacy log is anchored before anything else runs. Eval
-		// mode may run on a throw-away secret; its serve step seals instead.
-		if !cfg.IsEval() && cfg.MasterSecret != "" {
-			auditRepo, err := openAuditRepo(ctx, cfg, store.DB(), logger)
+		// migrated legacy log is anchored before anything else runs: only
+		// the process that applied 0014 may take the legacy rows under the
+		// key (see audit.SealAnchor).
+		if cfg.MasterSecret != "" {
+			auditRepo, err := openAuditRepo(ctx, cfg, store.DB(), logger, applied)
 			if err != nil {
 				logger.Error("audit init failed", "err", err)
 				return 1
@@ -494,16 +498,17 @@ func runAdmin(args []string) int {
 }
 
 // openAuditRepo binds the audit log to the HKDF-derived chain key
-// (FR-E.3) and seals the head anchor. A seal failure (e.g. migrations not
-// applied yet) is logged, not fatal: VerifyChain reports the chain as
-// unanchored until it succeeds.
-func openAuditRepo(ctx context.Context, cfg config.Config, db *sql.DB, logger *slog.Logger) (*audit.Repo, error) {
+// (FR-E.3) and seals the head anchor. applied lists the migrations this
+// process just ran; a legacy log is blessed only when 0014 is among them.
+// A seal failure (e.g. migrations not applied yet) is logged, not fatal:
+// VerifyChain reports the chain as unanchored until it succeeds.
+func openAuditRepo(ctx context.Context, cfg config.Config, db *sql.DB, logger *slog.Logger, applied []int64) (*audit.Repo, error) {
 	key, err := audit.DeriveKey(cfg.MasterSecret)
 	if err != nil {
 		return nil, err
 	}
 	repo := audit.NewRepo(db, key)
-	if err := repo.SealAnchor(ctx); err != nil {
+	if err := repo.SealAnchor(ctx, slices.Contains(applied, audit.HeadMigration)); err != nil {
 		logger.Warn("audit anchor seal failed", "err", err)
 	}
 	return repo, nil
@@ -538,9 +543,18 @@ func openAdminRepo(ctx context.Context) (*admin.Repo, func(), error) {
 		return nil, func() {}, fmt.Errorf("storage: %w", err)
 	}
 	cleanup := func() { _ = store.Close() }
-	if err := store.MigrateUp(ctx); err != nil {
+	applied, err := store.MigrateUpApplied(ctx)
+	if err != nil {
 		cleanup()
 		return nil, func() {}, fmt.Errorf("migrate: %w", err)
+	}
+	// An admin subcommand can be the first run after an upgrade; it must
+	// seal the cut-over itself, no later boot is allowed to.
+	if slices.Contains(applied, audit.HeadMigration) {
+		if _, err := openAuditRepo(ctx, cfg, store.DB(), buildLogger(cfg), applied); err != nil {
+			cleanup()
+			return nil, func() {}, fmt.Errorf("audit: %w", err)
+		}
 	}
 	box, err := cryptobox.New(cfg.MasterSecret)
 	if err != nil {

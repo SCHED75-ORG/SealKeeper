@@ -180,7 +180,7 @@ func TestVerifyChainAcceptsLegacyNanosecondRows(t *testing.T) {
 		`UPDATE audit_head SET legacy_until = (SELECT MAX(sequence_no) FROM audit_log)`); err != nil {
 		t.Fatalf("set legacy_until: %v", err)
 	}
-	if err := r.SealAnchor(ctx); err != nil {
+	if err := r.SealAnchor(ctx, true); err != nil {
 		t.Fatalf("SealAnchor: %v", err)
 	}
 	if _, err := r.Append(ctx, "evt", "actor", "", nil); err != nil {

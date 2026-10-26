@@ -252,7 +252,7 @@ func TestLegacyRowsStillVerify(t *testing.T) {
 	exec(t, db, `UPDATE audit_head SET legacy_until = (SELECT MAX(sequence_no) FROM audit_log)`)
 
 	r := NewRepo(db, chainKey)
-	if err := r.SealAnchor(ctx); err != nil {
+	if err := r.SealAnchor(ctx, true); err != nil {
 		t.Fatalf("SealAnchor: %v", err)
 	}
 	if bad := verify(t, r); bad != 0 {
@@ -300,13 +300,42 @@ func TestAppendDoesNotBlessUnsealedLegacyAnchor(t *testing.T) {
 	}
 }
 
+// Regression: SealAnchor ran at every boot and accepted an unsealed anchor
+// in front of existing rows, so a keyless v1 rewrite plus an anchor reset
+// verified as intact after the next restart. Only the process that just
+// applied migration 0014 may bless that state.
+func TestRestartDoesNotBlessDowngradedAnchor(t *testing.T) {
+	t.Parallel()
+	db := openDB(t)
+	r := NewRepo(db, chainKey)
+	entries := appendN(t, r, 4)
+	exec(t, db, `UPDATE audit_log SET actor = ?, details_json = '{}' WHERE sequence_no = ?`, "someone-else@corp", entries[1].SequenceNo)
+	seq, _ := rechain(t, db, legacyHash)
+	exec(t, db, `UPDATE audit_head SET legacy_until = ?, head_seq = 0, head_hash = '', broken_seq = 0, head_mac = ''`, seq)
+
+	restarted := NewRepo(db, chainKey)
+	if err := restarted.SealAnchor(context.Background(), false); err != nil {
+		t.Fatalf("SealAnchor: %v", err)
+	}
+	if bad := verify(t, restarted); bad == 0 {
+		t.Fatal("boot sealed a downgraded anchor as intact")
+	}
+	appendN(t, restarted, 1)
+	if err := restarted.SealAnchor(context.Background(), false); err != nil {
+		t.Fatalf("SealAnchor: %v", err)
+	}
+	if bad := verify(t, restarted); bad == 0 {
+		t.Fatal("downgraded anchor verifies intact after a restart and an append")
+	}
+}
+
 func TestSealAnchorNeverReblessesSealedAnchor(t *testing.T) {
 	t.Parallel()
 	db := openDB(t)
 	r := NewRepo(db, chainKey)
 	entries := appendN(t, r, 3)
 	exec(t, db, `DELETE FROM audit_log WHERE sequence_no = ?`, entries[2].SequenceNo)
-	if err := r.SealAnchor(context.Background()); err != nil {
+	if err := r.SealAnchor(context.Background(), true); err != nil {
 		t.Fatalf("SealAnchor: %v", err)
 	}
 	if bad := verify(t, r); bad != entries[2].SequenceNo {
