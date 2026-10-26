@@ -25,7 +25,7 @@ const SITE = path.resolve(
   process.env.SITE_ROOT ?? path.join(REPO_ROOT, "design"),
 );
 const PAGES = readdirSync(SITE).filter((f) => f.endsWith(".html"));
-const RAW_PREFIX = "https://raw.githubusercontent.com/sched75/sealkeeper/main/";
+const RAW_PREFIX = "https://raw.githubusercontent.com/SCHED75-ORG/SealKeeper/main/";
 
 const STUB_SVG =
   '<svg xmlns="http://www.w3.org/2000/svg" width="80" height="20"></svg>';
@@ -185,7 +185,7 @@ test.describe("@site", () => {
     }
     expect(fields.get("contact")).toEqual([
       "mailto:security@sealkeeper.eu",
-      "https://github.com/sched75/sealkeeper/security/advisories/new",
+      "https://github.com/SCHED75-ORG/SealKeeper/security/advisories/new",
     ]);
     expect(fields.get("expires")).toHaveLength(1);
     const days =
