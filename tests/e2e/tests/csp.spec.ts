@@ -103,6 +103,8 @@ test.describe("@csp", () => {
     // never carried in a redirect URL.
     await page.goto("/admin/admins");
     await page.locator("#add-email").fill(`second+${Date.now()}@example.test`);
+    // Adding an admin is a credential change: it needs the step-up.
+    await page.locator("#cp-add").fill("Csp#Wn4j!Rb8sQ3-yHc6");
     await page.getByRole("button", { name: /create admin/i }).click();
     await expect(
       page.locator('[data-testid="bootstrap-password"]'),
