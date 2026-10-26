@@ -27,6 +27,13 @@ import (
 // from the environment.
 var ErrNotConfigured = errors.New("smtpconfig: no override saved")
 
+// ErrPasswordRequired is returned by Update when KeepPassword is set but
+// the relay destination or identity changed (host, port, username, TLS
+// mode, TLS server name, or certificate verification turned off). The
+// stored password is write-only: carrying it over to a new destination
+// would hand it to whatever server the form now points at (SK-23).
+var ErrPasswordRequired = errors.New("smtpconfig: password must be re-entered when the relay destination changes")
+
 // Config is the editable surface of the smtp_config row.
 type Config struct {
 	Host           string
@@ -155,13 +162,16 @@ func (r *Repo) Update(ctx context.Context, in UpdateInputs, adminID *int64) erro
 		tlsMode = "auto"
 	}
 
-	// Build the password ciphertext. If KeepPassword is set we read
-	// the existing one and re-seal it (no-op semantically, keeps the
-	// UPDATE single-statement).
+	// Build the password ciphertext. If KeepPassword is set (and no new
+	// password typed) we read the existing one and re-seal it — but only
+	// when the relay destination and identity are unchanged.
 	pwd := in.Password
-	if in.KeepPassword {
+	if in.KeepPassword && pwd == "" {
 		prev, err := r.Get(ctx)
 		if err == nil && prev.Password != "" {
+			if retargeted(prev, in.Host, port, in.Username, tlsMode, in.ServerName, in.InsecureTLS) {
+				return ErrPasswordRequired
+			}
 			pwd = prev.Password
 		}
 	}
@@ -201,6 +211,18 @@ func (r *Repo) Update(ctx context.Context, in UpdateInputs, adminID *int64) erro
 }
 
 // ----- helpers --------------------------------------------------------------
+
+// retargeted reports whether the submitted relay settings would send the
+// stored credential somewhere (or to someone) else than it was saved for.
+// Turning certificate verification *off* counts; turning it on does not.
+func retargeted(prev Config, host string, port int, username, tlsMode, serverName string, insecure bool) bool {
+	return !strings.EqualFold(strings.TrimSpace(prev.Host), strings.TrimSpace(host)) ||
+		prev.Port != port ||
+		prev.Username != username ||
+		!strings.EqualFold(prev.TLSMode, tlsMode) ||
+		!strings.EqualFold(strings.TrimSpace(prev.ServerName), strings.TrimSpace(serverName)) ||
+		(insecure && !prev.InsecureTLS)
+}
 
 // smtpAAD ties the encrypted password to its purpose so the same
 // blob, copied to e.g. the admin TOTP column, would not decrypt.
