@@ -50,8 +50,9 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - traefik-acme:/letsencrypt
     networks:
-      - frontend
-      - backend
+      frontend:
+        ipv4_address: 172.31.251.10 # == SK_TRUSTED_PROXY_CIDRS default
+      backend: {}
     security_opt:
       - no-new-privileges:true
     logging: *json-logging
@@ -94,7 +95,10 @@ services:
       SK_MASTER_SECRET: ${SK_MASTER_SECRET:?SK_MASTER_SECRET must be set}
       SK_LOG_FORMAT: ${SK_LOG_FORMAT:-json}
       SK_LOG_LEVEL: ${SK_LOG_LEVEL:-info}
-      SK_TRUSTED_PROXY_CIDRS: ${SK_TRUSTED_PROXY_CIDRS:-172.16.0.0/12}
+      # SK-35 — trust X-Forwarded-For only from Traefik's pinned address on
+      # sealkeeper-frontend (the network Traefik uses to reach this service,
+      # see traefik.docker.network below).
+      SK_TRUSTED_PROXY_CIDRS: ${SK_TRUSTED_PROXY_CIDRS:-172.31.251.10/32}
     volumes:
       - sealkeeper-data:/data
     networks:
@@ -141,6 +145,12 @@ networks:
     name: sealkeeper-backend
     driver: bridge
     internal: true
+  # Subnet pinned so Traefik's address is stable (SK-35). If it collides with
+  # another host network, change the subnet, Traefik's ipv4_address and
+  # SK_TRUSTED_PROXY_CIDRS together.
   frontend:
     name: sealkeeper-frontend
     driver: bridge
+    ipam:
+      config:
+        - subnet: 172.31.251.0/24

@@ -38,6 +38,33 @@ SealKeeper {{ .Chart.AppVersion }} has been installed as release "{{ .Release.Na
        values for a real PVC.
 {{- end }}
 
+{{- if and .Values.ingress.enabled (not .Values.config.trustedProxyCIDRs) }}
+
+   ⚠️  config.trustedProxyCIDRs is empty: X-Forwarded-For is ignored, so every
+       client is seen as the ingress controller pod's IP and all users share
+       ONE per-IP rate-limit bucket (10 requests/hour by default). Set it to
+       the ingress controller's pod CIDR only, for example:
+
+         helm upgrade {{ .Release.Name }} <chart> --reuse-values \
+           --set config.trustedProxyCIDRs=10.244.3.0/24
+
+       and give the ingress controller's Service
+       `externalTrafficPolicy: Local` (or enable the PROXY protocol) so it
+       sees real client addresses. Never trust all of 10.0.0.0/8.
+{{- end }}
+
+{{- if .Values.networkPolicy.enabled }}
+
+   ℹ️  NetworkPolicy is on: only namespace "{{ .Values.networkPolicy.ingressNamespaceLabel }}"
+       may reach port 8443. If your ingress controller runs elsewhere, set
+       networkPolicy.ingressNamespaceLabel or traffic will be dropped.
+{{- else }}
+
+   ⚠️  NetworkPolicy is disabled — any pod in the cluster can call SealKeeper
+       directly{{ if .Values.config.trustedProxyCIDRs }} and, from inside
+       {{ .Values.config.trustedProxyCIDRs }}, forge X-Forwarded-For{{ end }}.
+{{- end }}
+
 {{- if not .Values.podDisruptionBudget.enabled }}
 
    ℹ️  PodDisruptionBudget is disabled — node drains can interrupt service.

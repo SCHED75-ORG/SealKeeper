@@ -24,8 +24,14 @@ config:
   httpListen: ":8443"
   logFormat: json
   logLevel: info
-  # FR-H.42 / D-H.22 — narrow to the ingress controller's pod CIDR in prod.
-  trustedProxyCIDRs: "10.0.0.0/8"
+  # FR-H.42 / D-H.22 / SK-35 — comma-separated CIDR(s) allowed to set
+  # X-Forwarded-For. Empty = trust nobody: no spoofing, but behind an ingress
+  # every client then shares the controller pod's IP (one rate-limit bucket).
+  # Set it to the ingress controller's pod CIDR ONLY, e.g. "10.244.3.0/24" —
+  # never a blanket "10.0.0.0/8", which also trusts every other pod and the
+  # SNATed node IPs. Pair with `externalTrafficPolicy: Local` (or the PROXY
+  # protocol) on the ingress controller's Service so it sees real client IPs.
+  trustedProxyCIDRs: ""
   maxLibrarySizeMB: 10
   maxActiveSessions: 10000
   sessionTTLSeconds: 900
@@ -142,11 +148,27 @@ podDisruptionBudget:
   enabled: true
   minAvailable: 1
 
-# NetworkPolicy — disabled by default to keep the chart applicable on
-# clusters without a network plugin that enforces them.
+# NetworkPolicy (FR-H.32, SK-35) — enabled by default. Ingress to :8443 is
+# allowed only from the ingress controller namespace, so no other pod can
+# reach SealKeeper directly and forge X-Forwarded-For. On clusters whose CNI
+# does not enforce NetworkPolicy the object is inert.
 networkPolicy:
-  enabled: false
+  enabled: true
+  # `kubernetes.io/metadata.name` of the namespace running the ingress
+  # controller. Change it if yours is not `ingress-nginx`, or traffic will be
+  # dropped.
   ingressNamespaceLabel: ingress-nginx
+  # Namespace of the Prometheus scraper when /metrics is scraped in-cluster
+  # (e.g. "monitoring"). Empty = no extra ingress rule.
+  metricsNamespaceLabel: ""
+  # Egress filtering is opt-in: when enabled, only DNS plus the destinations
+  # listed below are reachable. List the database first or the pod cannot
+  # start.
+  egress:
+    enabled: false
+  database:
+    cidrs: []          # e.g. ["10.20.0.15/32"]
+    port: 5432
   # Egress CIDRs are conservative-ish; narrow in prod.
   smtp:
     enabled: false

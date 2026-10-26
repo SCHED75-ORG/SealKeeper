@@ -68,8 +68,12 @@ services:
       SK_LOG_FORMAT: ${SK_LOG_FORMAT:-json}
       SK_LOG_LEVEL: ${SK_LOG_LEVEL:-info}
 
-      # Trusted proxies (FR-H.42 / D-H.22) — limited to Caddy's network range
-      SK_TRUSTED_PROXY_CIDRS: ${SK_TRUSTED_PROXY_CIDRS:-172.16.0.0/12}
+      # Trusted proxies (FR-H.42 / D-H.22 / SK-35) — Caddy's pinned address on
+      # the backend network ONLY. Caddy reaches SealKeeper through the
+      # backend-scoped alias `sealkeeper-backend`, so this /32 is the only
+      # peer whose X-Forwarded-For is honoured. Keep in sync with
+      # services.caddy.networks.backend.ipv4_address below.
+      SK_TRUSTED_PROXY_CIDRS: ${SK_TRUSTED_PROXY_CIDRS:-172.31.250.10/32}
 
       # Optional knobs
       SK_METRICS_TOKEN: ${SK_METRICS_TOKEN:-}
@@ -84,8 +88,11 @@ services:
     volumes:
       - sealkeeper-data:/data # libraries + (eval) SQLite
     networks:
-      - backend
-      - frontend
+      backend:
+        # Network-scoped alias: resolving it always yields SealKeeper's
+        # backend address, so Caddy's source IP is its pinned backend IP.
+        aliases: [sealkeeper-backend]
+      frontend: {} # egress (SMTP relay, SIEM sinks) — backend is internal
     healthcheck: # FR-H.24
       test: ["CMD", "/usr/local/bin/healthcheck"]
       interval: 10s
@@ -117,11 +124,12 @@ services:
       - caddy-config:/config
     environment:
       SK_DOMAIN: ${SK_DOMAIN:?SK_DOMAIN must be set in .env (e.g. sealkeeper.example.com)}
-      SK_UPSTREAM: sealkeeper:8443
+      SK_UPSTREAM: sealkeeper-backend:8443
       ACME_EMAIL: ${ACME_EMAIL:-}
     networks:
-      - frontend
-      - backend # to reach sealkeeper:8443
+      frontend: {}
+      backend: # to reach sealkeeper-backend:8443
+        ipv4_address: 172.31.250.10 # == SK_TRUSTED_PROXY_CIDRS default
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:2019/config/"]
       interval: 30s
@@ -138,9 +146,16 @@ volumes:
   caddy-config:
 
 networks:
-  # `backend` is internal — no traffic from the host (FR-H.22, FR-H.75)
+  # `backend` is internal — no traffic from the host (FR-H.22, FR-H.75).
+  # Subnet pinned so Caddy gets a stable address that SealKeeper can trust
+  # for X-Forwarded-For (SK-35). If 172.31.250.0/24 collides with another
+  # network on the host, change the subnet, Caddy's ipv4_address and
+  # SK_TRUSTED_PROXY_CIDRS together.
   backend:
     driver: bridge
     internal: true
+    ipam:
+      config:
+        - subnet: 172.31.250.0/24
   frontend:
     driver: bridge

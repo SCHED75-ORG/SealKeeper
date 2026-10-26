@@ -6,7 +6,8 @@
 #
 # Environment variables consumed (set by docker-compose.yml or your runner):
 #   SK_DOMAIN     bare hostname, e.g. sealkeeper.example.com
-#   SK_UPSTREAM   internal Compose address of SealKeeper (defaults sealkeeper:8443)
+#   SK_UPSTREAM   internal Compose address of SealKeeper (defaults sealkeeper-backend:8443,
+#                 the backend-network alias declared in docker-compose.yml)
 #   ACME_EMAIL    contact email for Let's Encrypt account (optional but
 #                 recommended — used for expiry notifications)
 # =============================================================================
@@ -25,8 +26,12 @@
 {$SK_DOMAIN} {
 	# Reverse proxy to SealKeeper. SealKeeper terminates plain HTTP on :8443
 	# and trusts X-Forwarded-* only when the source is in
-	# SK_TRUSTED_PROXY_CIDRS (FR-H.42, D-H.22).
-	reverse_proxy {$SK_UPSTREAM:sealkeeper:8443} {
+	# SK_TRUSTED_PROXY_CIDRS (FR-H.42, D-H.22). In the bundled Compose stack
+	# that is Caddy's pinned backend address 172.31.250.10/32, reached via the
+	# backend-only alias `sealkeeper-backend` (SK-35).
+	reverse_proxy {$SK_UPSTREAM:sealkeeper-backend:8443} {
+		# Caddy is the edge: overwrite (never append to) any client-supplied
+		# X-Forwarded-For so the first hop SealKeeper sees is the real peer.
 		header_up X-Real-IP {remote_host}
 		header_up X-Forwarded-For {remote_host}
 		header_up X-Forwarded-Proto https

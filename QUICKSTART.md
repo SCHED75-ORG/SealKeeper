@@ -45,6 +45,8 @@ docker compose logs -f sealkeeper
 
 Caddy will obtain a real TLS certificate for `SK_DOMAIN` automatically (you need a public DNS record pointing at the host and port 80 + 443 reachable from the Internet).
 
+The stack pins the internal `backend` network to `172.31.250.0/24` and gives Caddy the fixed address `172.31.250.10`, which is the only peer SealKeeper trusts for `X-Forwarded-For` (`SK_TRUSTED_PROXY_CIDRS` default). If that subnet collides with an existing Docker network on the host, change the subnet, Caddy's `ipv4_address` and `SK_TRUSTED_PROXY_CIDRS` together in `docker-compose.yml`.
+
 **Verify**:
 
 ```bash
@@ -101,7 +103,15 @@ helm upgrade --install sealkeeper helm/sealkeeper \
   --set ingress.hosts[0].paths[0].path=/ \
   --set ingress.hosts[0].paths[0].pathType=Prefix \
   --set ingress.tls[0].secretName=sealkeeper-tls \
-  --set ingress.tls[0].hosts[0]=sealkeeper.example.com
+  --set ingress.tls[0].hosts[0]=sealkeeper.example.com \
+  --set config.trustedProxyCIDRs=<ingress-controller-pod-CIDR>
+
+# trustedProxyCIDRs: the ingress controller's pod CIDR only (never all of
+# 10.0.0.0/8). Leaving it empty is safe but makes every client share the
+# controller's IP for rate limiting — see the chart NOTES and
+# k8s/README.md § "Client IP and trusted proxies". The chart's NetworkPolicy
+# is on by default and admits only the `ingress-nginx` namespace; change
+# networkPolicy.ingressNamespaceLabel if your controller runs elsewhere.
 
 # 4. Watch the rollout
 kubectl -n sealkeeper rollout status deploy/sealkeeper

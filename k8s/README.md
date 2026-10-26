@@ -71,6 +71,33 @@ kubectl -n sealkeeper run sk-migrate --rm -it --restart=Never \
 
 Once migrations succeed, the rolling update completes itself.
 
+## Client IP and trusted proxies
+
+SealKeeper's per-IP rate limit (10 requests/hour by default) and the audit
+log key on the client IP. The server honours `X-Forwarded-For` only when the
+TCP peer is inside `SK_TRUSTED_PROXY_CIDRS`, and walks the header right to
+left, stopping at the first untrusted hop.
+
+`configmap.yaml` ships `SK_TRUSTED_PROXY_CIDRS: ""` (trust nobody). That is
+safe against spoofing but, behind an ingress controller, every client then
+appears as the controller pod's IP and shares one rate-limit bucket. Set it
+to **the ingress controller's pod CIDR only** (e.g. the node pod range
+`10.244.0.0/16` on a kubeadm/flannel cluster, or the `/24` of the nodes
+running ingress-nginx) — never a blanket `10.0.0.0/8`, which also trusts every
+other pod and the SNATed node IPs.
+
+For the controller itself to see real client addresses:
+
+- Set `externalTrafficPolicy: Local` on the ingress controller's
+  `LoadBalancer`/`NodePort` Service (otherwise kube-proxy SNATs every client
+  to a node IP), or enable the PROXY protocol between the cloud load balancer
+  and ingress-nginx (`use-proxy-protocol: "true"`).
+- Leave ingress-nginx's `use-forwarded-headers` at `false` unless another
+  trusted proxy sits in front of it.
+
+`networkpolicy.yaml` makes sure only the ingress controller namespace can
+reach port 8443, so other pods cannot inject forged `X-Forwarded-For` values.
+
 ## NetworkPolicy notes
 
 `networkpolicy.yaml` is conservative: ingress is allowed only from the
