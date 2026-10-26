@@ -51,13 +51,15 @@
       "description": "Group GitHub Actions updates",
       "matchManagers": ["github-actions"],
       "groupName": "github actions",
-      "addLabels": ["ci"]
+      "addLabels": ["ci"],
+      "minimumReleaseAge": "7 days"
     },
     {
       "description": "Pin GitHub Actions to commit SHAs (supply chain)",
       "matchManagers": ["github-actions"],
       "matchDepTypes": ["action"],
-      "pinDigests": true
+      "pinDigests": true,
+      "minimumReleaseAge": "7 days"
     },
     {
       "description": "Major updates require explicit review",
