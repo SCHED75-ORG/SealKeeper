@@ -315,6 +315,7 @@ Vitest 4, 90% coverage threshold. Generator + entropy + transforms all have spec
 * **`a11y.spec.ts`** — axe-core checks. CI-optional.
 * **`nightly.spec.ts`** — extended public flow.
 * **`screenshots.spec.ts`** — manual: drives the public + admin flow and saves PNGs to `design/screenshots/`. Run with `SK_BOOTSTRAP_ADMIN_PASSWORD=…` so the spec can log in deterministically.
+* **`site/site.spec.ts`** — the static website in `design/` (own config: `npx playwright test -c playwright.site.config.ts`). `site/serve.mjs` serves the folder and applies `design/_headers` the way Cloudflare Workers static assets does; every page must render with zero CSP violations and zero console errors. The site CSP has `script-src 'self'`: never add an inline `<script>` or a CDN script to `design/` — put behaviour in `design/site.js`, third-party bundles under `design/vendor/` with a versioned file name and a `SHA256SUMS` line.
 
 Playwright launches the SealKeeper binary itself via `webServer:` in `playwright.config.ts`. `SEALKEEPER_BIN=/path/to/sk` shortcircuits the `go run` fallback when iterating against a pre-built binary.
 

@@ -1,0 +1,46 @@
+# SealKeeper website — response headers (Cloudflare Workers static assets).
+# Format: https://developers.cloudflare.com/workers/static-assets/headers/
+# This file is parsed by Workers and never served. Max 100 rules, 2000 chars
+# per line. Verified by tests/e2e/site/site.spec.ts (see tests/e2e/site/serve.mjs).
+#
+# Content-Security-Policy, directive by directive:
+#   script-src 'self'       every script is a same-origin file: /site.js and the
+#                           version-pinned /vendor/ bundles (marked, mermaid).
+#                           No inline script, no eval, no third-party origin.
+#   style-src 'unsafe-inline'
+#                           needed, not convenience: mermaid writes a <style>
+#                           element into every SVG it renders, and the pages
+#                           carry style="" attributes plus a few <style> blocks.
+#                           Inline CSS cannot execute script, and script-src
+#                           stays strict, so the residual risk is CSS-only
+#                           injection on a site that renders no user input.
+#   fonts.bunny.net         font stylesheet (style-src) and font files (font-src).
+#   img.shields.io          README-style badges on the home page.
+#   raw.githubusercontent.com
+#                           governance pages fetch CODE_OF_CONDUCT.md,
+#                           CONTRIBUTING.md and SECURITY.md from the repo.
+#   data: in img-src        inline SVG data URIs.
+#
+# HSTS has no includeSubDomains / preload on purpose: both commit every
+# sealkeeper.eu subdomain to HTTPS and are hard to undo. Add them once every
+# subdomain is known to serve HTTPS.
+
+/*
+  Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.bunny.net; font-src https://fonts.bunny.net; img-src 'self' data: https://img.shields.io; connect-src 'self' https://raw.githubusercontent.com; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'; upgrade-insecure-requests
+  Strict-Transport-Security: max-age=31536000
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: DENY
+  Referrer-Policy: strict-origin-when-cross-origin
+  Permissions-Policy: accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()
+  Cross-Origin-Opener-Policy: same-origin
+
+# File names carry the exact upstream version, so a given URL never changes.
+/vendor/*.js
+  Cache-Control: public, max-age=31536000, immutable
+
+/.well-known/security.txt
+  Content-Type: text/plain; charset=utf-8
+
+# Uploaded alongside the site (kept out of git by the *.asc ignore rule).
+/.well-known/pgp-key.asc
+  Content-Type: application/pgp-keys
