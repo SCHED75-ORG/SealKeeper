@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { anssiLevel, calculateEntropy } from "../src/entropy.js";
 
+// Entropy is computed from the library actually shipped in the policy, so
+// the fixtures carry real (synthetic) entries rather than a size number.
+const library = (n, prefix) => Array.from({ length: n }, (_, i) => `${prefix}${i}`);
+const CORPUS_5000 = library(5000, "citation ");
+const DICT_7776 = library(7776, "word");
+
 describe("calculateEntropy", () => {
   it("anssiLevel maps thresholds correctly", () => {
     expect(anssiLevel(49)).toBeNull();
@@ -22,7 +28,7 @@ describe("calculateEntropy", () => {
   });
 
   it("G1 baseline (5000 corpus, 10 separators, 3×3 digits) ≥ 30 bits", () => {
-    const r = calculateEntropy({ generator: "G1" });
+    const r = calculateEntropy({ generator: "G1", parameters: { library: CORPUS_5000 } });
     expect(r.expectedBits).toBeGreaterThanOrEqual(30);
     expect(r.anssiLevels.B1).toBe(false); // baseline alone is below B1
   });
@@ -31,7 +37,7 @@ describe("calculateEntropy", () => {
     const r = calculateEntropy({
       generator: "G1",
       parameters: {
-        corpusSize: 5000,
+        library: CORPUS_5000,
         transforms: ["T01", "T02", "T03", "T04", "T05", "T06", "T07", "T08", "T09"].map((code) => ({
           code,
           active: true,
@@ -44,7 +50,7 @@ describe("calculateEntropy", () => {
   });
 
   it("G2 default policy (6 words × 7776) reaches B2", () => {
-    const r = calculateEntropy({ generator: "G2" });
+    const r = calculateEntropy({ generator: "G2", parameters: { library: DICT_7776 } });
     expect(r.expectedBits).toBeGreaterThanOrEqual(80);
     expect(r.anssiLevels.B2).toBe(true);
   });
@@ -56,10 +62,14 @@ describe("calculateEntropy", () => {
   });
 
   it("deterministic transforms add 0 bits", () => {
-    const without = calculateEntropy({ generator: "G1", parameters: { transforms: [] } });
+    const without = calculateEntropy({
+      generator: "G1",
+      parameters: { library: CORPUS_5000, transforms: [] },
+    });
     const withDet = calculateEntropy({
       generator: "G1",
       parameters: {
+        library: CORPUS_5000,
         transforms: [{ code: "T01", active: true, mode: "deterministic" }],
       },
     });
@@ -71,7 +81,7 @@ describe("calculateEntropy", () => {
     for (const code of codes) {
       const r = calculateEntropy({
         generator: "G2",
-        parameters: { transforms: [{ code, active: true, mode: "random" }] },
+        parameters: { library: DICT_7776, transforms: [{ code, active: true, mode: "random" }] },
       });
       expect(r.expectedBits).toBeGreaterThan(80); // G2 baseline already ≥ 80
     }

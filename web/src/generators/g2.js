@@ -9,6 +9,7 @@
 // =============================================================================
 
 import { cryptoRandomChoice, cryptoRandomInt } from "../crypto.js";
+import { uniqueLibrary } from "../library.js";
 
 const DEFAULT_SEPARATORS = ["-", "_", ".", "/", "+", ":", "|", ";", ",", "~"];
 
@@ -18,9 +19,8 @@ const DEFAULT_SEPARATORS = ["-", "_", ".", "/", "+", ":", "|", ";", ",", "~"];
  * @returns {string}
  */
 export function generateG2(policy, dictionary) {
-  if (!Array.isArray(dictionary) || dictionary.length < 1) {
-    throw new Error("LibraryNotFound: G2 requires a non-empty dictionary");
-  }
+  // Distinct entries only, so the draw matches the log2(size) entropy credit.
+  const entries = uniqueLibrary(dictionary, "G2");
   const params = policy.parameters ?? {};
   const wordCount = params.numberOfWords ?? 6;
   const separator = cryptoRandomChoice(params.separatorOptions ?? DEFAULT_SEPARATORS);
@@ -30,7 +30,7 @@ export function generateG2(policy, dictionary) {
 
   const words = [];
   for (let i = 0; i < wordCount; i++) {
-    words.push(cryptoRandomChoice(dictionary));
+    words.push(cryptoRandomChoice(entries));
   }
   const digits = randomDigits(digitsCount);
   if (attached) {

@@ -7,6 +7,9 @@
 //   - Same function used by user UI and admin console (FR-A.E.4).
 // =============================================================================
 
+import { InvalidPolicyDescriptor } from "./errors.js";
+import { resolveLibrary } from "./library.js";
+
 const LOG2 = Math.log2;
 
 /** ANSSI level for a given expected entropy. */
@@ -33,7 +36,7 @@ export function anssiLevel(bits) {
  */
 export function calculateEntropy(policy) {
   if (!policy || typeof policy !== "object") {
-    throw new TypeError("InvalidPolicyDescriptor: policy must be an object");
+    throw new InvalidPolicyDescriptor("policy must be an object");
   }
   switch (policy.generator) {
     case "G1":
@@ -43,19 +46,17 @@ export function calculateEntropy(policy) {
     case "G3":
       return entropyG3(policy);
     default:
-      throw new Error(`InvalidPolicyDescriptor: unknown generator ${policy.generator}`);
+      throw new InvalidPolicyDescriptor(`unknown generator ${policy.generator}`);
   }
 }
 
 function entropyG1(policy) {
   const breakdown = [];
   const params = policy.parameters ?? {};
-  // Mirror resolveLibrary in index.js: when the policy ships an inline
-  // library array, the corpus size IS its length. Older policies that
-  // only set `corpusSize` (a number) keep working via the fallback.
-  const corpusSize = Array.isArray(params.library)
-    ? params.library.length
-    : numberOr(params.corpusSize, 5000);
+  // Size of the corpus the generator really draws from (distinct entries).
+  // A bare `corpusSize` number is no longer trusted: without the entries
+  // resolveLibrary throws LibraryNotFound (audit js-generation#1).
+  const corpusSize = resolveLibrary(policy).length;
   const sepCount = (params.separatorOptions ?? []).length || 10;
   const digitGroups = params.numericGroups ?? [
     { digitsCount: 3 },
@@ -81,11 +82,8 @@ function entropyG1(policy) {
 function entropyG2(policy) {
   const breakdown = [];
   const params = policy.parameters ?? {};
-  // Same lookup as G1: an inline library array overrides the legacy
-  // `dictionarySize` number so the preview matches the real draw size.
-  const dictSize = Array.isArray(params.library)
-    ? params.library.length
-    : numberOr(params.dictionarySize, 7776);
+  // Same lookup as G1: distinct entries of the dictionary actually used.
+  const dictSize = resolveLibrary(policy).length;
   const words = numberOr(params.numberOfWords, 6);
   const sepCount = (params.separatorOptions ?? []).length || 10;
   const digitGroups = params.numericGroups ?? [{ digitsCount: 4, position: "suffix" }];

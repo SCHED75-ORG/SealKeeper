@@ -10,22 +10,8 @@ import { generateG1 } from "./generators/g1.js";
 import { generateG2 } from "./generators/g2.js";
 import { generateG3 } from "./generators/g3.js";
 import { calculateEntropy, anssiLevel } from "./entropy.js";
-import { SAMPLE_DICTIONARY_FR } from "./data/sample-dictionary.js";
-import { SAMPLE_CORPUS_FR } from "./data/sample-corpus.js";
-
-class RegenerationLimitExceeded extends Error {
-  constructor() {
-    super("RegenerationLimitExceeded");
-    this.name = "RegenerationLimitExceeded";
-  }
-}
-
-class InvalidPolicyDescriptor extends Error {
-  constructor(msg) {
-    super(`InvalidPolicyDescriptor: ${msg}`);
-    this.name = "InvalidPolicyDescriptor";
-  }
-}
+import { resolveLibrary } from "./library.js";
+import { InvalidPolicyDescriptor, LibraryNotFound, RegenerationLimitExceeded } from "./errors.js";
 
 const regenCount = new WeakMap();
 
@@ -37,6 +23,8 @@ export async function generate(policy) {
   validatePolicy(policy);
   const proposals = [];
   const n = policy.proposalCount ?? 5;
+  // Same resolution as calculateEntropy: the badge describes the library
+  // actually drawn from, never an assumed size.
   const library = resolveLibrary(policy);
   const entropy = calculateEntropy(policy);
 
@@ -73,11 +61,14 @@ export { calculateEntropy } from "./entropy.js";
  *   - a resolved admin policy (`generator`, `proposalCount`, `parameters`):
  *     passed through untouched so proposals honour what the operator set;
  *   - the built-in default (`generators: [...]`, no admin policy yet):
- *     G2 over the sample dictionary.
+ *     G2 over the sample dictionary, flagged `builtinDefault: true`. That
+ *     flag is the only way to reach the bundled samples; it is never copied
+ *     from an admin policy, so an admin G1/G2 policy without an inline
+ *     library fails with LibraryNotFound instead of drawing from them.
  * An unknown generator is not replaced by a default — generate() rejects
  * it, so a broken policy fails visibly instead of yielding weaker output.
  * @param {object} policy
- * @returns {{generator:string, proposalCount:number, regenerateLimit?:number, parameters:object}}
+ * @returns {{generator:string, proposalCount:number, regenerateLimit?:number, parameters:object, builtinDefault?:true}}
  */
 export function descriptorFromPolicy(policy) {
   if (!policy || typeof policy !== "object") throw new InvalidPolicyDescriptor("not an object");
@@ -89,7 +80,7 @@ export function descriptorFromPolicy(policy) {
       parameters: policy.parameters ?? {},
     };
   }
-  return { generator: "G2", proposalCount: 5, parameters: {} };
+  return { generator: "G2", proposalCount: 5, parameters: {}, builtinDefault: true };
 }
 
 async function generateOne(policy, library) {
@@ -113,14 +104,6 @@ function validatePolicy(policy) {
   }
 }
 
-function resolveLibrary(policy) {
-  if (policy.generator === "G3") return null;
-  const params = policy.parameters ?? {};
-  if (Array.isArray(params.library)) return params.library;
-  // Fallback to sample library so the bundle is usable out of the box.
-  return policy.generator === "G1" ? SAMPLE_CORPUS_FR : SAMPLE_DICTIONARY_FR;
-}
-
 // -----------------------------------------------------------------------------
 // Attach the namespace on the global object when running in a browser.
 // `window` is undefined in Node, hence the typeof guard.
@@ -134,4 +117,4 @@ if (typeof window !== "undefined") {
 }
 
 export default Generation;
-export { InvalidPolicyDescriptor, RegenerationLimitExceeded };
+export { InvalidPolicyDescriptor, LibraryNotFound, RegenerationLimitExceeded };

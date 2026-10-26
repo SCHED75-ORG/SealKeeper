@@ -4,6 +4,7 @@ import Generation, {
   generate,
   regenerate,
   InvalidPolicyDescriptor,
+  LibraryNotFound,
   RegenerationLimitExceeded,
 } from "../src/index.js";
 
@@ -44,11 +45,18 @@ describe("namespace", () => {
     await expect(regenerate(policy)).rejects.toThrow(RegenerationLimitExceeded);
   });
 
-  it("falls back to the sample dictionary when none is provided to G2", async () => {
-    const proposals = await generate({ generator: "G2", proposalCount: 1 });
+  it("refuses G1/G2 without a library instead of using the sample", async () => {
+    await expect(generate({ generator: "G2", proposalCount: 1 })).rejects.toThrow(LibraryNotFound);
+    await expect(generate({ generator: "G1", proposalCount: 1 })).rejects.toThrow(LibraryNotFound);
+  });
+
+  it("uses the sample only for the flagged built-in default", async () => {
+    const proposals = await generate({ generator: "G2", proposalCount: 1, builtinDefault: true });
     expect(proposals).toHaveLength(1);
     expect(proposals[0].generator).toBe("G2");
     expect(proposals[0].entropyBits).toBeGreaterThan(0);
+    const [g1] = await generate({ generator: "G1", proposalCount: 1, builtinDefault: true });
+    expect(g1.password.length).toBeGreaterThan(0);
   });
 
   it("uses the policy-provided library when available", async () => {

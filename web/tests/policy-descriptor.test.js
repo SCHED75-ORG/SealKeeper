@@ -70,11 +70,12 @@ describe("descriptorFromPolicy", () => {
     });
   });
 
-  it("maps the built-in default descriptor to G2", () => {
+  it("maps the built-in default descriptor to G2 over the sample, flagged", () => {
     expect(descriptorFromPolicy({ version: 1, generators: ["G1", "G2", "G3"] })).toEqual({
       generator: "G2",
       proposalCount: 5,
       parameters: {},
+      builtinDefault: true,
     });
   });
 

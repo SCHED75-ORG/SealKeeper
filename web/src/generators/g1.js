@@ -10,6 +10,7 @@
 // =============================================================================
 
 import { cryptoRandomChoice, cryptoRandomInt } from "../crypto.js";
+import { uniqueLibrary } from "../library.js";
 import { applyTransforms } from "../transforms.js";
 
 const DEFAULT_SEPARATORS = ["-", "_", ".", "/", "+", ":", "|", ";", ",", "~"];
@@ -25,14 +26,13 @@ const DEFAULT_POSITIONS = [
  * @returns {Promise<string>}
  */
 export async function generateG1(policy, corpus) {
-  if (!Array.isArray(corpus) || corpus.length < 1) {
-    throw new Error("LibraryNotFound: G1 requires a non-empty corpus");
-  }
+  // Distinct entries only, so the draw matches the log2(size) entropy credit.
+  const citations = uniqueLibrary(corpus, "G1");
   const params = policy.parameters ?? {};
   const separator = cryptoRandomChoice(params.separatorOptions ?? DEFAULT_SEPARATORS);
   const groups = params.numericGroups ?? DEFAULT_POSITIONS;
 
-  const citation = cryptoRandomChoice(corpus);
+  const citation = cryptoRandomChoice(citations);
   const transformed = await applyTransforms(citation, params.transforms ?? []);
 
   // Place digit groups at the requested positions. We split the transformed
