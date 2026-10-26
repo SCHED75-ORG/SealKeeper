@@ -55,6 +55,12 @@ type Config struct {
 	DemoMode         bool `yaml:"demo_mode"`
 	MaintenanceMode  bool `yaml:"maintenance_mode"`
 
+	// IntegrationsAllowPrivate lets outbound SIEM sinks (webhook, Splunk,
+	// Sentinel, Elastic, syslog) dial RFC 1918 / ULA / CGNAT addresses.
+	// Loopback, link-local (cloud metadata), unspecified and multicast
+	// destinations stay refused regardless. Default false (SSRF guard).
+	IntegrationsAllowPrivate bool `yaml:"integrations_allow_private"`
+
 	// WebDir is the directory served at /static/*. The reveal page <script
 	// src="/static/sealkeeper-generation.umd.js"> lives in there. Defaults
 	// to the best-existing path among /app/web (in-image), ./web/dist
@@ -179,6 +185,7 @@ func applyEnv(cfg *Config) {
 	getBool(&cfg.SwaggerUIEnabled, "SK_SWAGGER_UI_ENABLED")
 	getBool(&cfg.DemoMode, "SK_DEMO_MODE")
 	getBool(&cfg.MaintenanceMode, "SK_MAINTENANCE_MODE")
+	getBool(&cfg.IntegrationsAllowPrivate, "SK_INTEGRATIONS_ALLOW_PRIVATE")
 	getString(&cfg.WebDir, "SK_WEB_DIR")
 	getString(&cfg.InstanceDomain, "SK_INSTANCE_DOMAIN")
 	getInt(&cfg.RateLimitEmailPerHour, "SK_RATE_LIMIT_EMAIL_PER_HOUR")

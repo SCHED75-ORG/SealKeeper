@@ -74,3 +74,17 @@ func TestValidate_MasterSecret(t *testing.T) {
 		})
 	}
 }
+
+// SK_INTEGRATIONS_ALLOW_PRIVATE defaults to false (SSRF guard on) and is
+// flipped only by an explicit env value.
+func TestIntegrationsAllowPrivateEnv(t *testing.T) {
+	cfg := Defaults()
+	if cfg.IntegrationsAllowPrivate {
+		t.Fatal("IntegrationsAllowPrivate defaults to true; want false")
+	}
+	t.Setenv("SK_INTEGRATIONS_ALLOW_PRIVATE", "true")
+	applyEnv(&cfg)
+	if !cfg.IntegrationsAllowPrivate {
+		t.Fatal("SK_INTEGRATIONS_ALLOW_PRIVATE=true not applied")
+	}
+}

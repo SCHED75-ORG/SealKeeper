@@ -190,6 +190,7 @@ Key env vars:
 | `SK_LOG_FORMAT` / `SK_LOG_LEVEL` | `json` / `info`        | slog                                                        |
 | `SK_DEMO_MODE`                   | `false`                | Independent toggle (orthogonal to SK_MODE)                  |
 | `SK_MAINTENANCE_MODE`            | `false`                | Reserved                                                    |
+| `SK_INTEGRATIONS_ALLOW_PRIVATE`  | `false`                | Let SIEM sinks dial RFC 1918 / ULA / CGNAT. Loopback, link-local (cloud metadata), unspecified and multicast stay refused; checked on the resolved IP at connect time |
 
 **Pinning `SK_MASTER_SECRET` is critical.** TOTP secrets and SMTP relay passwords are AES-256-GCM-wrapped with this key. A rebuild without the env var minted a fresh key in earlier sessions, which left the wrapped TOTP blob unopenable — observed bug, surfaced as the new `admin.ErrTOTPUnrecoverable` (login slug `totp_unrecoverable`).
 
