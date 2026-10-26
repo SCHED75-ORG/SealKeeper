@@ -19,52 +19,24 @@
 // =============================================================================
 
 import { expect, test } from "@playwright/test";
-import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { totp } from "./totp";
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const SCREENSHOTS_DIR = path.resolve(__dirname, "..", "..", "..", "design", "screenshots");
+const SCREENSHOTS_DIR = path.resolve(
+  __dirname,
+  "..",
+  "..",
+  "..",
+  "design",
+  "screenshots",
+);
 const ADMIN_EMAIL = "admin@localhost";
 const ADMIN_PASSWORD = process.env.SK_BOOTSTRAP_ADMIN_PASSWORD ?? "";
 const NEW_ADMIN_PASSWORD = "Demo-Admin-2026-Strong!";
-
-// ---- TOTP (RFC 6238, HMAC-SHA1, 6 digits, 30 s) -----------------------------
-
-function base32Decode(input: string): Buffer {
-  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
-  const clean = input.replace(/=+$/, "").toUpperCase();
-  let bits = 0;
-  let value = 0;
-  const out: number[] = [];
-  for (const ch of clean) {
-    const v = alphabet.indexOf(ch);
-    if (v === -1) continue;
-    value = (value << 5) | v;
-    bits += 5;
-    if (bits >= 8) {
-      bits -= 8;
-      out.push((value >>> bits) & 0xff);
-    }
-  }
-  return Buffer.from(out);
-}
-
-function totp(secretBase32: string, when = Date.now()): string {
-  const key = base32Decode(secretBase32);
-  const counter = Math.floor(when / 1000 / 30);
-  const buf = Buffer.alloc(8);
-  buf.writeBigUInt64BE(BigInt(counter), 0);
-  const hmac = crypto.createHmac("sha1", key).update(buf).digest();
-  const offset = hmac[hmac.length - 1] & 0x0f;
-  const code =
-    ((hmac[offset] & 0x7f) << 24) |
-    ((hmac[offset + 1] & 0xff) << 16) |
-    ((hmac[offset + 2] & 0xff) << 8) |
-    (hmac[offset + 3] & 0xff);
-  return String(code % 1_000_000).padStart(6, "0");
-}
 
 // ---- spec -------------------------------------------------------------------
 
@@ -117,7 +89,9 @@ test.describe("@screenshots design assets", () => {
     await snap(page, "reveal-ready.png");
 
     // Click the decode button (label is FR by default — match it loosely).
-    const decode = page.getByRole("button", { name: /d[eé]code|reveal|voir/i }).first();
+    const decode = page
+      .getByRole("button", { name: /d[eé]code|reveal|voir/i })
+      .first();
     if (await decode.count()) {
       await decode.click();
       // Give the JS bundle a beat to render proposals.
@@ -137,7 +111,9 @@ test.describe("@screenshots design assets", () => {
     await page.getByRole("button", { name: /sign in/i }).click();
 
     await page.waitForURL(/\/admin\/setup/);
-    const secret = await page.locator('[data-testid="totp-secret"]').textContent();
+    const secret = await page
+      .locator('[data-testid="totp-secret"]')
+      .textContent();
     expect(secret).toBeTruthy();
     await snap(page, "admin-setup.png");
 
@@ -159,7 +135,12 @@ test.describe("@screenshots design assets", () => {
       })) || "";
 
     await page.request.post("/admin/domains/add", {
-      form: { csrf_token: csrf, name: "example.com", description: "Demo domain", active: "on" },
+      form: {
+        csrf_token: csrf,
+        name: "example.com",
+        description: "Demo domain",
+        active: "on",
+      },
     });
 
     const adminPages: { path: string; file: string }[] = [

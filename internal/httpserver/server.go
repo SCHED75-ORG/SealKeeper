@@ -318,6 +318,7 @@ func (s *Server) Limiter() ratelimit.Composite { return s.limiter }
 func (s *Server) Router() http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
+	r.Use(s.securityHeaders)
 	// No middleware.RealIP: it trusts X-Forwarded-For / X-Real-IP from any
 	// peer (GO-2026-5774/5775/5777). Client IPs come from s.clientIP, which
 	// honours forwarding headers only from SK_TRUSTED_PROXY_CIDRS.
@@ -339,8 +340,8 @@ func (s *Server) Router() http.Handler {
 	r.Get("/reveal/{token}", s.handleRevealPage)
 
 	if s.cfg.WebDir != "" {
-		fs := http.FileServer(http.Dir(s.cfg.WebDir))
-		r.Handle("/static/*", http.StripPrefix("/static/", noListing(fs)))
+		fs := http.FileServer(staticFS{dir: http.Dir(s.cfg.WebDir)})
+		r.Handle("/static/*", http.StripPrefix("/static/", fs))
 	}
 
 	// /__captured_mail is the in-memory mail viewer used by both eval
@@ -377,6 +378,10 @@ func (s *Server) handleBrandingLogo(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", mime)
 	w.Header().Set("Cache-Control", "public, max-age=300")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+	// An SVG opened directly is a same-origin document: sandbox it so any
+	// script inside never runs (embedded via <img> it never does anyway).
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; img-src data:; sandbox")
+	w.Header().Set("Content-Disposition", `inline; filename="logo"`)
 	_, _ = w.Write(bytes)
 }
 
@@ -437,6 +442,7 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Frame-Options", "DENY")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	if err := s.landingTpl.Execute(w, map[string]any{
+		"CSPNonce":   scriptNonce(w),
 		"Branding":   b,
 		"Version":    version.Version,
 		"EvalBanner": s.cfg.IsEval(),
@@ -982,6 +988,7 @@ func (s *Server) handleRevealPage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Frame-Options", "DENY")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	_ = s.revealTpl.Execute(w, map[string]any{
+		"CSPNonce":   scriptNonce(w),
 		"Token":      token,
 		"State":      state,
 		"Version":    version.Version,
@@ -1024,16 +1031,6 @@ func writeJSONError(w http.ResponseWriter, code int, slug, detail string) {
 		"title":  slug,
 		"status": code,
 		"detail": detail,
-	})
-}
-
-func noListing(h http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "/") {
-			http.NotFound(w, r)
-			return
-		}
-		h.ServeHTTP(w, r)
 	})
 }
 
@@ -1139,7 +1136,7 @@ const revealHTML = `<!doctype html>
   <div id="proposals" data-testid="proposals" hidden></div>
   <p id="error" class="err" hidden></p>
   <script src="/static/sealkeeper-generation.umd.js"></script>
-  <script>
+  <script nonce="{{ $.CSPNonce }}">
     const token = {{ .Token }};
     const btn = document.getElementById('decode-btn');
     const out = document.getElementById('proposals');
@@ -1246,7 +1243,7 @@ const landingHTML = `<!doctype html>
     <h1>{{ .Branding.InstanceName }} <small style="font-weight:400;color:var(--stone);font-family:var(--font-body);font-size:0.95rem">{{ .Version }}</small></h1>
   </header>
   <p>Request a password by emailing yourself a one-shot reveal link.</p>
-  <form method="POST" action="/api/v1/request" onsubmit="return submitRequest(event)">
+  <form id="request-form" method="POST" action="/api/v1/request">
     <label for="email">Your professional email</label>
     <input id="email" type="email" name="email" required autocomplete="off">
     <button type="submit">Generate a password</button>
@@ -1265,7 +1262,7 @@ const landingHTML = `<!doctype html>
     {{ if .Branding.ContactURL }}<br><a href="{{ .Branding.ContactURL }}">{{ .Branding.ContactURL }}</a>{{ end }}
   </footer>
 </main>
-<script>
+<script nonce="{{ $.CSPNonce }}">
 async function submitRequest(ev){
   ev.preventDefault();
   const email = ev.target.email.value;
@@ -1273,5 +1270,6 @@ async function submitRequest(ev){
   document.getElementById('ack').textContent = 'If this address is authorised, an email is on its way. Check your inbox.';
   return false;
 }
+document.getElementById('request-form').addEventListener('submit', submitRequest);
 </script>
 </body></html>`

@@ -202,7 +202,7 @@ func (s *Server) handleAdminLoginGet(w http.ResponseWriter, r *http.Request) {
 		"EvalBanner": s.cfg.IsEval(),
 		"DemoBanner": s.cfg.IsDemo(),
 		"Label":      s.adminLabel,
-		"Error":      r.URL.Query().Get("err"),
+		"Error":      querySlug(r, "err"),
 	})
 }
 
@@ -387,7 +387,7 @@ func (s *Server) handleAdminLoginWebauthnGet(w http.ResponseWriter, r *http.Requ
 		"DemoBanner": s.cfg.IsDemo(),
 		"Label":      s.adminLabel,
 		"Email":      ad.Email,
-		"Error":      r.URL.Query().Get("err"),
+		"Error":      querySlug(r, "err"),
 	})
 }
 
@@ -744,8 +744,8 @@ func (s *Server) handleAdminDomains(w http.ResponseWriter, r *http.Request) {
 		"Label":         s.adminLabel,
 		"Items":         list,
 		"CSRF":          sess.CSRFToken,
-		"Error":         r.URL.Query().Get("err"),
-		"OK":            r.URL.Query().Get("ok"),
+		"Error":         querySlug(r, "err"),
+		"OK":            querySlug(r, "ok"),
 		"Details":       r.URL.Query().Get("details"),
 		"ImportCreated": r.URL.Query().Get("created"),
 		"ImportSkipped": r.URL.Query().Get("skipped"),
@@ -936,8 +936,8 @@ func (s *Server) handleAdminPolicies(w http.ResponseWriter, r *http.Request) {
 		"Items":      list,
 		"Domains":    doms,
 		"CSRF":       sess.CSRFToken,
-		"Error":      r.URL.Query().Get("err"),
-		"OK":         r.URL.Query().Get("ok"),
+		"Error":      querySlug(r, "err"),
+		"OK":         querySlug(r, "ok"),
 	})
 }
 
@@ -1012,8 +1012,8 @@ func (s *Server) handleAdminPolicyEdit(w http.ResponseWriter, r *http.Request) {
 		"Domains":    doms,
 		"Policy":     p,
 		"ParamsJSON": paramsJSON,
-		"OK":         r.URL.Query().Get("ok"),
-		"Error":      r.URL.Query().Get("err"),
+		"OK":         querySlug(r, "ok"),
+		"Error":      querySlug(r, "err"),
 		"Details":    r.URL.Query().Get("details"),
 	})
 }
@@ -1143,8 +1143,8 @@ func (s *Server) handleAdminElevations(w http.ResponseWriter, r *http.Request) {
 		"Items":         list,
 		"Domains":       doms,
 		"CSRF":          sess.CSRFToken,
-		"Error":         r.URL.Query().Get("err"),
-		"OK":            r.URL.Query().Get("ok"),
+		"Error":         querySlug(r, "err"),
+		"OK":            querySlug(r, "ok"),
 		"Details":       r.URL.Query().Get("details"),
 		"ImportCreated": r.URL.Query().Get("created"),
 		"ImportSkipped": r.URL.Query().Get("skipped"),
@@ -1298,8 +1298,8 @@ func (s *Server) handleAdminLibraries(w http.ResponseWriter, r *http.Request) {
 		"Label":      s.adminLabel,
 		"Items":      list,
 		"CSRF":       sess.CSRFToken,
-		"Error":      r.URL.Query().Get("err"),
-		"OK":         r.URL.Query().Get("ok"),
+		"Error":      querySlug(r, "err"),
+		"OK":         querySlug(r, "ok"),
 		"Details":    r.URL.Query().Get("details"),
 	})
 }
@@ -1484,8 +1484,8 @@ func (s *Server) handleAdminTemplates(w http.ResponseWriter, r *http.Request) {
 		"Label":      s.adminLabel,
 		"Items":      list,
 		"CSRF":       sess.CSRFToken,
-		"OK":         r.URL.Query().Get("ok"),
-		"Error":      r.URL.Query().Get("err"),
+		"OK":         querySlug(r, "ok"),
+		"Error":      querySlug(r, "err"),
 	})
 }
 
@@ -1511,8 +1511,9 @@ func (s *Server) handleAdminTemplateEdit(w http.ResponseWriter, r *http.Request)
 		"CSRF":       sess.CSRFToken,
 		"Template":   tpl,
 		"Vars":       templateVarsDocumentation(),
-		"OK":         r.URL.Query().Get("ok"),
-		"Error":      r.URL.Query().Get("err"),
+		"OK":         querySlug(r, "ok"),
+		"Error":      querySlug(r, "err"),
+		"Details":    r.URL.Query().Get("details"),
 		"Preview":    "",
 	})
 }
@@ -1531,8 +1532,8 @@ func (s *Server) handleAdminTemplateSave(w http.ResponseWriter, r *http.Request)
 
 	if err := s.mailTpls.Upsert(r.Context(), kind, lang, subject, text, html, &a.ID); err != nil {
 		if errors.Is(err, mailtemplates.ErrParse) {
-			http.Redirect(w, r, fmt.Sprintf("/admin/templates/edit?kind=%s&language=%s&err=%s",
-				kind, lang, url.QueryEscape(err.Error())), http.StatusSeeOther)
+			http.Redirect(w, r, fmt.Sprintf("/admin/templates/edit?kind=%s&language=%s&err=parse&details=%s",
+				url.QueryEscape(string(kind)), url.QueryEscape(lang), url.QueryEscape(err.Error())), http.StatusSeeOther)
 			return
 		}
 		s.logger.Error("mailtemplates.Upsert failed", "err", err)
@@ -1665,8 +1666,8 @@ func (s *Server) handleAdminIntegrations(w http.ResponseWriter, r *http.Request)
 		"Items":      list,
 		"CSRF":       sess.CSRFToken,
 		"Stats":      stats,
-		"OK":         r.URL.Query().Get("ok"),
-		"Error":      r.URL.Query().Get("err"),
+		"OK":         querySlug(r, "ok"),
+		"Error":      querySlug(r, "err"),
 		"Details":    r.URL.Query().Get("details"),
 	})
 }
@@ -1818,8 +1819,8 @@ func (s *Server) handleAdminBranding(w http.ResponseWriter, r *http.Request) {
 		"Label":      s.adminLabel,
 		"Branding":   row,
 		"CSRF":       sess.CSRFToken,
-		"OK":         r.URL.Query().Get("ok"),
-		"Error":      r.URL.Query().Get("err"),
+		"OK":         querySlug(r, "ok"),
+		"Error":      querySlug(r, "err"),
 		"Details":    r.URL.Query().Get("details"),
 	})
 }
@@ -2070,8 +2071,7 @@ func (s *Server) renderAdmin(w http.ResponseWriter, name string, data map[string
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("X-Frame-Options", "DENY")
-	w.Header().Set("Referrer-Policy", "no-referrer")
+	data["CSPNonce"] = scriptNonce(w)
 	if err := s.adminTpl.ExecuteTemplate(w, name+".html", data); err != nil {
 		s.logger.Error("admin template render failed", "name", name, "err", err)
 	}
@@ -2203,6 +2203,13 @@ const adminBaseTpl = `{{define "header"}}<!doctype html>
 {{end}}
 
 {{define "footer"}}
+<script nonce="{{ $.CSPNonce }}">
+// data-confirm replaces inline onclick/onsubmit handlers (blocked by CSP).
+document.addEventListener('submit', function (e) {
+  var msg = (e.submitter && e.submitter.dataset.confirm) || e.target.dataset.confirm;
+  if (msg && !window.confirm(msg)) e.preventDefault();
+});
+</script>
 </body></html>
 {{end}}
 `
@@ -2301,7 +2308,7 @@ const adminSetupTpl = `{{define "setup.html"}}{{template "header" .}}
 </form>
 
 {{ if .NeedsPasswordChange }}
-<script>
+<script nonce="{{ $.CSPNonce }}">
 (function () {
   // Live entropy gauge under the new-password field. Uses a quick
   // length × log2(detected-charset-size) estimate — the same kind of
@@ -2587,7 +2594,7 @@ const adminPoliciesTpl = `{{define "policies.html"}}{{template "header" .}}
 </form>
 
 <script src="/static/sealkeeper-generation.umd.js" defer></script>
-<script>
+<script nonce="{{ $.CSPNonce }}">
 (function () {
   var form = document.querySelector('[data-testid="add-policy-form"]');
   var preview = document.getElementById('entropy-preview');
@@ -2844,7 +2851,7 @@ const adminTemplateEditTpl = `{{define "template_edit.html"}}{{template "header"
 <main>
 <h2>Edit template — <code>{{ .Template.Kind }}</code> / <code>{{ .Template.Language }}</code>
 {{ if .Template.IsSystem }}<span style="color:#6b7280;font-size:1rem">(system default)</span>{{ end }}</h2>
-{{ if .Error }}<div class="err"><pre style="white-space:pre-wrap">{{ .Error }}</pre></div>{{ end }}
+{{ if .Error }}<div class="err">{{ .Error }}{{ if .Details }}<pre style="white-space:pre-wrap">{{ .Details }}</pre>{{ end }}</div>{{ end }}
 {{ if .OK }}<div style="background:#dcfce7;color:#166534;padding:0.5rem 1rem;border-radius:4px;margin-bottom:1rem">{{ .OK }}</div>{{ end }}
 
 <details style="margin-bottom:1.5rem"><summary>Variables available (FR-C.72)</summary>
@@ -2876,7 +2883,7 @@ const adminTemplateEditTpl = `{{define "template_edit.html"}}{{template "header"
   <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
   <input type="hidden" name="kind" value="{{ .Template.Kind }}">
   <input type="hidden" name="language" value="{{ .Template.Language }}">
-  <button type="submit" class="secondary" onclick="return confirm('Reset this template to the built-in default?')">Reset to system default</button>
+  <button type="submit" class="secondary" data-confirm="Reset this template to the built-in default?">Reset to system default</button>
 </form>
 
 <section id="preview-out" hidden style="margin-top:2rem;border-top:1px solid #d1d5db;padding-top:1rem">
@@ -2886,7 +2893,7 @@ const adminTemplateEditTpl = `{{define "template_edit.html"}}{{template "header"
   <details><summary>HTML (rendered)</summary><iframe id="prev-html" sandbox="" style="width:100%;height:24rem;border:1px solid #d1d5db"></iframe></details>
 </section>
 
-<script>
+<script nonce="{{ $.CSPNonce }}">
 document.getElementById('preview-btn').addEventListener('click', async () => {
   const fd = new FormData();
   fd.set('csrf_token', '{{ .CSRF }}');
@@ -3073,8 +3080,8 @@ func (s *Server) handleAdminAccount(w http.ResponseWriter, r *http.Request) {
 		"DemoBanner": s.cfg.IsDemo(),
 		"Label":      s.adminLabel,
 		"CSRF":       sess.CSRFToken,
-		"OK":         r.URL.Query().Get("ok"),
-		"Error":      r.URL.Query().Get("err"),
+		"OK":         querySlug(r, "ok"),
+		"Error":      querySlug(r, "err"),
 	})
 }
 
@@ -3150,8 +3157,8 @@ func (s *Server) handleAdminAdmins(w http.ResponseWriter, r *http.Request) {
 		"Label":             s.adminLabel,
 		"CSRF":              sess.CSRFToken,
 		"Items":             list,
-		"OK":                r.URL.Query().Get("ok"),
-		"Error":             r.URL.Query().Get("err"),
+		"OK":                querySlug(r, "ok"),
+		"Error":             querySlug(r, "err"),
 		"BootstrapEmail":    r.URL.Query().Get("bootstrap_email"),
 		"BootstrapPassword": r.URL.Query().Get("bootstrap_password"),
 	})
@@ -3303,8 +3310,8 @@ func (s *Server) handleAdminSecurity(w http.ResponseWriter, r *http.Request) {
 		"Label":       s.adminLabel,
 		"Credentials": creds,
 		"CSRF":        sess.CSRFToken,
-		"OK":          r.URL.Query().Get("ok"),
-		"Error":       r.URL.Query().Get("err"),
+		"OK":          querySlug(r, "ok"),
+		"Error":       querySlug(r, "err"),
 	})
 }
 
@@ -3510,7 +3517,7 @@ TOTP remains the active second factor at sign-in; key-based login will land in a
     <td><code>{{ .CreatedAt }}</code></td>
     <td>{{ if .LastUsedAt }}<code>{{ .LastUsedAt }}</code>{{ else }}—{{ end }}</td>
     <td>
-      <form method="POST" action="/admin/security/{{ .CredentialID }}/delete" onsubmit="return confirm('Delete this credential? This cannot be undone.')">
+      <form method="POST" action="/admin/security/{{ .CredentialID }}/delete" data-confirm="Delete this credential? This cannot be undone.">
         <input type="hidden" name="csrf_token" value="{{ $.CSRF }}">
         <input type="hidden" name="confirm" value="{{ .CredentialID }}">
         <button type="submit" class="secondary" style="color:#991b1b;border-color:#991b1b">Delete</button>
@@ -3531,7 +3538,7 @@ TOTP remains the active second factor at sign-in; key-based login will land in a
   <p id="webauthn-status" role="status" style="color:#4b5563;font-size:0.875rem"></p>
 </form>
 
-<script>
+<script nonce="{{ $.CSPNonce }}">
 (function () {
   var form = document.getElementById('webauthn-form');
   var status = document.getElementById('webauthn-status');
@@ -3641,7 +3648,7 @@ const adminLoginWebauthnTpl = `{{define "login_webauthn.html"}}{{template "heade
   <button type="submit" class="secondary">Cancel and use TOTP instead</button>
 </form>
 
-<script>
+<script nonce="{{ $.CSPNonce }}">
 (function () {
   var csrf = {{ .CSRF }};
   var status = document.getElementById('webauthn-status');
@@ -3855,8 +3862,8 @@ func (s *Server) handleAdminSMTP(w http.ResponseWriter, r *http.Request) {
 		"Configured":  configured,
 		"HasPassword": hasPassword,
 		"SenderName":  s.sender.Name(),
-		"OK":          r.URL.Query().Get("ok"),
-		"Error":       r.URL.Query().Get("err"),
+		"OK":          querySlug(r, "ok"),
+		"Error":       querySlug(r, "err"),
 		"Details":     r.URL.Query().Get("details"),
 	})
 }
@@ -4124,7 +4131,7 @@ const adminPolicyEditTpl = `{{define "policy_edit.html"}}{{template "header" .}}
 </form>
 
 <script src="/static/sealkeeper-generation.umd.js" defer></script>
-<script>
+<script nonce="{{ $.CSPNonce }}">
 (function () {
   var form = document.querySelector('[data-testid="edit-policy-form"]');
   var preview = document.getElementById('entropy-preview');
