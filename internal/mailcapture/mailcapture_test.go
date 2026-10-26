@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sched75/sealkeeper/internal/mailcapture"
 )
@@ -72,5 +73,27 @@ func TestResetDropsEverything(t *testing.T) {
 	}
 	if id := s.Capture("a@example.test", "s", "b"); id == "1" {
 		t.Fatal("ids restarted after Reset; a stale capture id could alias a new mail")
+	}
+}
+
+// FR-I.32: captured mail (addresses, reveal links) is kept for a bounded
+// time; the retention job drops what is older than the cutoff.
+func TestPruneBeforeDropsOldMail(t *testing.T) {
+	t.Parallel()
+	s := mailcapture.NewStore(10)
+	s.Capture("a@example.test", "s", "b")
+	s.Capture("b@example.test", "s", "b")
+	if n := s.PruneBefore(time.Now().Add(-time.Hour)); n != 0 {
+		t.Fatalf("pruned %d fresh mails", n)
+	}
+	if n := s.PruneBefore(time.Now().Add(time.Hour)); n != 2 {
+		t.Fatalf("pruned %d mails, want 2", n)
+	}
+	if n := len(s.Snapshot()); n != 0 {
+		t.Fatalf("%d mails left after prune", n)
+	}
+	s.Capture("c@example.test", "s", "b")
+	if n := len(s.Snapshot()); n != 1 {
+		t.Fatalf("store holds %d mails after a new capture, want 1", n)
 	}
 }

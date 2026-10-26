@@ -10,9 +10,14 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sched75/sealkeeper/internal/admin"
 	"github.com/sched75/sealkeeper/internal/audit"
+	"github.com/sched75/sealkeeper/internal/config"
+	"github.com/sched75/sealkeeper/internal/httpserver"
+	"github.com/sched75/sealkeeper/internal/retention"
+	"github.com/sched75/sealkeeper/internal/tokens"
 )
 
 // SK-26: when no active admin is left, `sealkeeper admin enable` is the
@@ -201,5 +206,56 @@ func TestBootstrapAdminIsAudited(t *testing.T) {
 	events := auditEvents(t, repo.DB(), secret)
 	if countEvents(events, "admin.bootstrapped|system|admin@localhost|") != 1 {
 		t.Fatalf("bootstrap admin not audited exactly once: %q", events)
+	}
+}
+
+// FR-I.37: serve's retention job honours SK_RETENTION_* and records its
+// run through the server's audit writer.
+func TestRetentionJobUsesConfiguredPeriods(t *testing.T) {
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		t.Fatal(err)
+	}
+	secret := base64.StdEncoding.EncodeToString(key)
+	t.Setenv("SK_MODE", "eval")
+	t.Setenv("SK_MASTER_SECRET", secret)
+	t.Setenv("SK_DATABASE_URL", "sqlite://"+filepath.ToSlash(filepath.Join(t.TempDir(), "sk.db")))
+	t.Setenv("SK_RETENTION_REQUEST_TOKENS_DAYS", "2")
+	ctx := context.Background()
+	repo, cleanup, err := openAdminRepo(ctx)
+	if err != nil {
+		t.Fatalf("openAdminRepo: %v", err)
+	}
+	defer cleanup()
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	db := repo.DB()
+	for _, age := range []time.Duration{3 * 24 * time.Hour, 24 * time.Hour} {
+		issued := time.Now().Add(-age)
+		if _, err := tokens.NewRepo(db).WithClock(func() time.Time { return issued }).
+			Issue(ctx, tokens.IssueOptions{Email: "u@example.test"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ak, err := audit.DeriveKey(secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	auditRepo := audit.NewRepo(db, ak)
+	srv := httpserver.New(cfg, logger)
+	srv.SetAudit(auditRepo)
+
+	res, err := newRetentionJob(cfg, db, auditRepo, srv, logger).RunOnce(ctx)
+	if err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if res.RequestTokens != 1 {
+		t.Fatalf("purged %d request tokens, want 1 (the 3-day-old one)", res.RequestTokens)
+	}
+	if n := countEvents(auditEvents(t, db, secret), retention.EventPurgeRun+"|system|retention|"); n != 1 {
+		t.Fatalf("%d %s events, want 1", n, retention.EventPurgeRun)
 	}
 }

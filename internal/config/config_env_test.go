@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -190,5 +191,41 @@ func TestLoad_YAMLUnknownKeyRejected(t *testing.T) {
 	t.Setenv("SK_CONFIG_FILE", empty)
 	if _, err := Load(); err != nil {
 		t.Fatalf("Load(empty file): %v", err)
+	}
+}
+
+// FR-I.29..34: the retention periods default to the PRD values, are
+// configurable, and refuse values that disable expiry or would purge
+// security traces before six months.
+func TestLoad_Retention(t *testing.T) {
+	evalEnv(t)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	got := []int{cfg.RetentionRequestTokensDays, cfg.RetentionSessionGraceHours, cfg.RetentionAuditDays,
+		cfg.RetentionCapturedMailDays, cfg.RetentionDisabledAdminDays}
+	if want := []int{30, 24, 365, 7, 90}; !slices.Equal(got, want) {
+		t.Fatalf("retention defaults = %v, want %v", got, want)
+	}
+	t.Setenv("SK_RETENTION_AUDIT_DAYS", "400")
+	if cfg, err = Load(); err != nil || cfg.RetentionAuditDays != 400 {
+		t.Fatalf("SK_RETENTION_AUDIT_DAYS=400: %d, %v", cfg.RetentionAuditDays, err)
+	}
+
+	for key, val := range map[string]string{
+		"SK_RETENTION_AUDIT_DAYS":          "30",
+		"SK_RETENTION_REQUEST_TOKENS_DAYS": "0",
+		"SK_RETENTION_SESSION_GRACE_HOURS": "-1",
+		"SK_RETENTION_CAPTURED_MAIL_DAYS":  "999999",
+		"SK_RETENTION_DISABLED_ADMIN_DAYS": "ninety",
+	} {
+		t.Run(key, func(t *testing.T) {
+			evalEnv(t)
+			t.Setenv(key, val)
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), key) {
+				t.Fatalf("Load() err = %v, want an error naming %s", err, key)
+			}
+		})
 	}
 }

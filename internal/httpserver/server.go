@@ -661,6 +661,13 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	acceptedResp(extra)
 }
 
+// AppendAudit records an event from a background job (e.g. the retention
+// purge) exactly like a handler does: into the audit log, then out to the
+// enabled SIEM integrations.
+func (s *Server) AppendAudit(ctx context.Context, event, actor, target string, details map[string]any) {
+	s.auditAppend(ctx, event, actor, target, details)
+}
+
 // auditAppend is a fire-and-forget audit helper. Errors are logged but never
 // propagated — the audit log is best-effort during the request critical path.
 func (s *Server) auditAppend(ctx context.Context, event, actor, target string, details map[string]any) {

@@ -98,6 +98,15 @@ type Config struct {
 	RateLimitEmailPerHour int `yaml:"rate_limit_email_per_hour"`
 	RateLimitIPPerHour    int `yaml:"rate_limit_ip_per_hour"`
 
+	// Retention periods (RGPD FR-I.29..37). The daily retention job started
+	// by serve deletes what is older. Whole days (hours for the session
+	// grace) so the YAML and env forms share one unit.
+	RetentionRequestTokensDays int `yaml:"retention_request_tokens_days"` // FR-I.29
+	RetentionSessionGraceHours int `yaml:"retention_session_grace_hours"` // FR-I.30
+	RetentionAuditDays         int `yaml:"retention_audit_days"`          // FR-I.31
+	RetentionCapturedMailDays  int `yaml:"retention_captured_mail_days"`  // FR-I.32
+	RetentionDisabledAdminDays int `yaml:"retention_disabled_admin_days"` // FR-I.34
+
 	// LibrariesDir is the on-disk directory backing /admin/libraries
 	// uploads. Defaults to ./data/libraries relative to the binary's cwd.
 	LibrariesDir string `yaml:"libraries_dir"`
@@ -133,6 +142,12 @@ func Defaults() Config {
 		RateLimitEmailPerHour:   3,  // FR-B.11
 		RateLimitIPPerHour:      10, // FR-B.12
 		MailLanguage:            "en",
+
+		RetentionRequestTokensDays: 30,
+		RetentionSessionGraceHours: 24,
+		RetentionAuditDays:         365,
+		RetentionCapturedMailDays:  7,
+		RetentionDisabledAdminDays: 90,
 	}
 }
 
@@ -247,6 +262,11 @@ func applyEnv(cfg *Config) error {
 	getString(&cfg.MailLanguage, "SK_MAIL_LANGUAGE")
 	getInt(&cfg.RateLimitEmailPerHour, "SK_RATE_LIMIT_EMAIL_PER_HOUR")
 	getInt(&cfg.RateLimitIPPerHour, "SK_RATE_LIMIT_IP_PER_HOUR")
+	getInt(&cfg.RetentionRequestTokensDays, "SK_RETENTION_REQUEST_TOKENS_DAYS")
+	getInt(&cfg.RetentionSessionGraceHours, "SK_RETENTION_SESSION_GRACE_HOURS")
+	getInt(&cfg.RetentionAuditDays, "SK_RETENTION_AUDIT_DAYS")
+	getInt(&cfg.RetentionCapturedMailDays, "SK_RETENTION_CAPTURED_MAIL_DAYS")
+	getInt(&cfg.RetentionDisabledAdminDays, "SK_RETENTION_DISABLED_ADMIN_DAYS")
 	getString(&cfg.LibrariesDir, "SK_LIBRARIES_DIR")
 	getString(&cfg.SMTPHost, "SK_SMTP_HOST")
 	getInt(&cfg.SMTPPort, "SK_SMTP_PORT")
@@ -373,6 +393,32 @@ func (c Config) validateLimits() error {
 	}
 	if c.SMTPTimeout < 0 {
 		return fmt.Errorf("SK_SMTP_TIMEOUT_SECONDS must not be negative, got %s", c.SMTPTimeout)
+	}
+	return c.validateRetention()
+}
+
+// MinAuditRetentionDays is the floor on SK_RETENTION_AUDIT_DAYS: the CNIL
+// recommends keeping security traces at least six months (FR-I.31).
+const MinAuditRetentionDays = 180
+
+// validateRetention bounds the retention periods. There is no "keep
+// forever" value: FR-I.10 requires every category to expire. The audit
+// log has a six-month floor so a typo cannot purge security traces early.
+func (c Config) validateRetention() error {
+	const maxDays = 36500 // keeps the durations far from overflowing
+	for _, k := range []struct {
+		key       string
+		v, lo, hi int
+	}{
+		{"SK_RETENTION_REQUEST_TOKENS_DAYS", c.RetentionRequestTokensDays, 1, maxDays},
+		{"SK_RETENTION_SESSION_GRACE_HOURS", c.RetentionSessionGraceHours, 1, maxDays * 24},
+		{"SK_RETENTION_AUDIT_DAYS", c.RetentionAuditDays, MinAuditRetentionDays, maxDays},
+		{"SK_RETENTION_CAPTURED_MAIL_DAYS", c.RetentionCapturedMailDays, 1, maxDays},
+		{"SK_RETENTION_DISABLED_ADMIN_DAYS", c.RetentionDisabledAdminDays, 1, maxDays},
+	} {
+		if k.v < k.lo || k.v > k.hi {
+			return fmt.Errorf("%s must be between %d and %d, got %d", k.key, k.lo, k.hi, k.v)
+		}
 	}
 	return nil
 }

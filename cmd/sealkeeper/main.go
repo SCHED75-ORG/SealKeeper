@@ -40,6 +40,7 @@ import (
 	"github.com/sched75/sealkeeper/internal/mailer"
 	"github.com/sched75/sealkeeper/internal/mailtemplates"
 	"github.com/sched75/sealkeeper/internal/policies"
+	"github.com/sched75/sealkeeper/internal/retention"
 	"github.com/sched75/sealkeeper/internal/smtpconfig"
 	"github.com/sched75/sealkeeper/internal/storage"
 	"github.com/sched75/sealkeeper/internal/tokens"
@@ -256,12 +257,32 @@ func runServe(args []string) int {
 		go resetter.Run(ctx)
 	}
 
+	// RGPD FR-I.37: purge data past its retention period now, then daily.
+	go newRetentionJob(cfg, store.DB(), auditRepo, srv, logger).Run(ctx, retention.Interval)
+
 	if err := srv.Run(ctx); err != nil {
 		logger.Error("http server exited with error", "err", err)
 		return 1
 	}
 	logger.Info("sealkeeper stopped cleanly")
 	return 0
+}
+
+// newRetentionJob builds the retention purge (FR-I.29..38) from the
+// SK_RETENTION_* knobs. The run summary goes through the server's audit
+// writer, so the SIEM integrations receive it like any other event.
+func newRetentionJob(cfg config.Config, db *sql.DB, auditRepo *audit.Repo, srv *httpserver.Server, logger *slog.Logger) *retention.Job {
+	const day = 24 * time.Hour
+	policy := retention.Policy{
+		RequestTokens:  time.Duration(cfg.RetentionRequestTokensDays) * day,
+		SessionGrace:   time.Duration(cfg.RetentionSessionGraceHours) * time.Hour,
+		AuditLog:       time.Duration(cfg.RetentionAuditDays) * day,
+		CapturedMail:   time.Duration(cfg.RetentionCapturedMailDays) * day,
+		DisabledAdmins: time.Duration(cfg.RetentionDisabledAdminDays) * day,
+	}
+	return retention.NewJob(db, auditRepo, policy, logger).
+		WithMailStore(srv.MailStore()).
+		WithRecorder(srv.AppendAudit)
 }
 
 func runMigrate(args []string) int {

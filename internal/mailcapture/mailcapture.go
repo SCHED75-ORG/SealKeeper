@@ -107,6 +107,23 @@ func (s *Store) Reset() {
 	s.items = s.items[:0]
 }
 
+// PruneBefore drops the mails captured before cutoff (retention of
+// captured mail, FR-I.32) and returns how many were dropped.
+func (s *Store) PruneBefore(cutoff time.Time) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	kept := s.items[:0]
+	for _, m := range s.items {
+		if !m.Timestamp.Before(cutoff) {
+			kept = append(kept, m)
+		}
+	}
+	n := len(s.items) - len(kept)
+	clear(s.items[len(kept):])
+	s.items = kept
+	return n
+}
+
 // Handler serves the whole captured queue as JSON (eval mode only).
 func (s *Store) Handler() http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
