@@ -3,6 +3,8 @@ package policies_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -38,8 +40,15 @@ func newRig(t *testing.T) rigs {
 	return rigs{dr, er, pr}
 }
 
-// g2Params is the smallest parameter set a G2 policy is saved with.
-const g2Params = `{"library":["alpha","bravo","charlie","delta"]}`
+// g2Params is a G2 parameter set clearing the B2 floor (and so B1):
+// 8 words over 256 entries + separator + 4 digits = 80.6 bits.
+var g2Params = func() string {
+	words := make([]string, 256)
+	for i := range words {
+		words[i] = fmt.Sprintf("%q", fmt.Sprintf("w%03d", i))
+	}
+	return `{"library":[` + strings.Join(words, ",") + `],"numberOfWords":8}`
+}()
 
 // ----- Create + validation --------------------------------------------------
 

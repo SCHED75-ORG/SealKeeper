@@ -30,6 +30,9 @@ var (
 	ErrAlreadyExists = errors.New("policies: already exists for this (domain, level)")
 	ErrInvalidShape  = errors.New("policies: invalid shape")
 	ErrNoPolicy      = errors.New("policies: no policy applies")
+	// ErrBelowFloor: the parameters cannot guarantee the entropy floor of
+	// the policy's ANSSI level (PRD A FR-A.G1.5 / G2.4 / G3.3).
+	ErrBelowFloor = errors.New("policies: entropy below the ANSSI level floor")
 )
 
 // Generator identifies the bundle generator.
@@ -99,9 +102,13 @@ type CreateInputs struct {
 }
 
 // Create inserts a new policy. Validates that params_json parses, that the
-// generator is known, and that the level is one of B1/B2/B3.
+// generator is known, that the level is one of B1/B2/B3 and that the
+// parameters guarantee that level's entropy floor (ErrBelowFloor).
 func (r *Repo) Create(ctx context.Context, in CreateInputs, adminID *int64) (Policy, error) {
 	if err := validateInputs(in); err != nil {
+		return Policy{}, err
+	}
+	if err := checkEntropyFloor(in.ANSSILevel, in.Generator, in.ParamsJSON); err != nil {
 		return Policy{}, err
 	}
 	now := r.now().UTC()
@@ -130,13 +137,22 @@ func (r *Repo) Create(ctx context.Context, in CreateInputs, adminID *int64) (Pol
 	return r.Get(ctx, id)
 }
 
-// Update overwrites every editable field of a row.
+// Update overwrites every editable field of a row. The ANSSI level is not
+// editable, so the entropy floor checked is the stored level's, not the
+// one the form carries.
 func (r *Repo) Update(ctx context.Context, id int64, in CreateInputs) error {
 	if err := validateInputs(in); err != nil {
 		return err
 	}
+	cur, err := r.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	if err := checkEntropyFloor(cur.ANSSILevel, in.Generator, in.ParamsJSON); err != nil {
+		return err
+	}
 	now := r.now().UTC()
-	_, err := r.db.ExecContext(ctx,
+	_, err = r.db.ExecContext(ctx,
 		rebind(r.db, `UPDATE policies
 			SET name = ?, generator = ?, params_json = ?,
 			    proposal_count = ?, regenerate_limit = ?, session_ttl_seconds = ?,
