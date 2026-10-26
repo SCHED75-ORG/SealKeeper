@@ -3,6 +3,7 @@ package httpserver
 import (
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -52,6 +53,42 @@ func TestAdminLoginRateLimitedPerIPv6Slash64(t *testing.T) {
 		t.Fatalf("3rd attempt from the same /64: Location = %q, want err=rate_limited", loc)
 	}
 	if loc := postLogin(s, "[2001:db8:7:8::1]:1", "nobody@example.test", "x").Header().Get("Location"); strings.Contains(loc, "rate_limited") {
+		t.Fatal("another /64 was rate limited")
+	}
+}
+
+// Regression: the reveal-token lookup limiter (GET /reveal/{token} and
+// POST /api/v1/policy, a token-state oracle) still keyed on the /128, so
+// rotating source addresses inside one /64 never hit the cap.
+func TestTokenLookupLimitCoversIPv6Slash64(t *testing.T) {
+	t.Parallel()
+	s, _, _ := newModeServer(t, config.ModeProduction, false)
+	h := s.Router()
+	lookup := func(viaPolicy bool, remote string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(http.MethodGet, "/reveal/probe", nil)
+		if viaPolicy {
+			r = httptest.NewRequest(http.MethodPost, "/api/v1/policy", strings.NewReader(`{"token":"probe"}`))
+			r.Header.Set("Content-Type", "application/json")
+		}
+		r.RemoteAddr = remote
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w
+	}
+	for i := 1; i <= tokenLookupPerIPWindow; i++ {
+		if w := lookup(i%2 == 1, fmt.Sprintf("[2001:db8:1:2::%x]:5555", i)); w.Code == http.StatusTooManyRequests {
+			t.Fatalf("lookup %d rate-limited before the cap", i)
+		}
+	}
+	for i, viaPolicy := range []bool{false, true} {
+		w := lookup(viaPolicy, fmt.Sprintf("[2001:db8:1:2:ffff::%x]:5555", i+1))
+		if w.Code != http.StatusTooManyRequests || w.Header().Get("Retry-After") == "" {
+			t.Fatalf("lookup past the cap from the same /64 (policy=%v): status=%d retry-after=%q, want 429 + Retry-After",
+				viaPolicy, w.Code, w.Header().Get("Retry-After"))
+		}
+	}
+	// Another /64 has its own budget.
+	if w := lookup(false, "[2001:db8:1:3::1]:5555"); w.Code == http.StatusTooManyRequests {
 		t.Fatal("another /64 was rate limited")
 	}
 }

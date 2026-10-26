@@ -1092,13 +1092,15 @@ func (s *Server) handleRevealPage(w http.ResponseWriter, r *http.Request) {
 }
 
 // allowTokenLookup charges one reveal-token lookup to ip and reports
-// whether it is under the cap; when it is not, Retry-After is set.
+// whether it is under the cap; when it is not, Retry-After is set. The
+// bucket is the rateLimitIPKey (IPv6 /64), not the raw address.
 func (s *Server) allowTokenLookup(w http.ResponseWriter, ip string) bool {
-	if s.tokenLimiter == nil || s.tokenLimiter.Allow(ip) {
+	key := rateLimitIPKey(ip)
+	if s.tokenLimiter == nil || s.tokenLimiter.Allow(key) {
 		return true
 	}
 	s.rateHits.WithLabelValues("token_lookup").Inc()
-	_, _, resetAt := s.tokenLimiter.Inspect(ip)
+	_, _, resetAt := s.tokenLimiter.Inspect(key)
 	w.Header().Set("Retry-After", strconv.Itoa(max(1, int(math.Ceil(time.Until(resetAt).Seconds())))))
 	return false
 }
