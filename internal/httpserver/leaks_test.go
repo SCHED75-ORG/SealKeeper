@@ -67,6 +67,9 @@ func TestAuditNeverStoresRawRevealToken(t *testing.T) {
 			t.Fatalf("raw reveal token in audit row: target=%q details=%q", target, details)
 		}
 	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
 	if n == 0 {
 		t.Fatal("no audit rows written")
 	}

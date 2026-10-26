@@ -744,9 +744,17 @@ func (s *Server) handleAdminAudit(w http.ResponseWriter, r *http.Request) {
 		e.Occurred = fmt.Sprintf("%v", occurred)
 		items = append(items, e)
 	}
+	if err := rows.Err(); err != nil {
+		s.logger.Error("audit rows failed", "err", err)
+	}
 
+	// A verification that could not run (missing key, DB error) is not a
+	// green badge.
 	chainOK := true
-	if bad, _ := s.audit.VerifyChain(r.Context()); bad != 0 {
+	if bad, err := s.audit.VerifyChain(r.Context()); err != nil || bad != 0 {
+		if err != nil {
+			s.logger.Error("audit.VerifyChain failed", "err", err)
+		}
 		chainOK = false
 	}
 

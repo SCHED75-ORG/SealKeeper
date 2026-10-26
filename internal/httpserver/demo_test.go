@@ -57,7 +57,7 @@ func newModeServer(t *testing.T, mode config.Mode, demo bool) (*Server, *admin.R
 	repo := admin.NewRepo(db, box)
 	s.SetAdmin(repo, "test")
 	s.SetTokens(tokens.NewRepo(db))
-	s.SetAudit(audit.NewRepo(db))
+	s.SetAudit(audit.NewRepo(db, make([]byte, audit.KeySize)))
 	s.SetBranding(branding.NewRepo(db))
 	s.SetDomains(domains.NewRepo(db))
 	return s, repo, db
