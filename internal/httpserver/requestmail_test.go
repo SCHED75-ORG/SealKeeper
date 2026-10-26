@@ -96,6 +96,7 @@ func TestBackgroundSendFailureIsAudited(t *testing.T) {
 	t.Parallel()
 	s, _, db := newModeServer(t, config.ModeProduction, false)
 	s.requestFloor = 0
+	allowDomain(t, db, "example.test")
 	s.SetSender(&relaySender{err: errors.New("relay refused"), sent: make(chan string, 1)})
 	if w := postRequest(s.Router(), "192.0.2.12:1000", "user@example.test"); w.Code != http.StatusAccepted {
 		t.Fatalf("status %d", w.Code)
@@ -113,6 +114,7 @@ func TestMailQueueFullDropsAndAudits(t *testing.T) {
 	s, _, db := newModeServer(t, config.ModeProduction, false)
 	s.requestFloor = 0
 	s.mailQueue = make(chan struct{}) // queue full
+	allowDomain(t, db, "example.test")
 	s.SetSender(&relaySender{sent: make(chan string, 1)})
 	if w := postRequest(s.Router(), "192.0.2.13:1000", "user@example.test"); w.Code != http.StatusAccepted {
 		t.Fatalf("status %d", w.Code)
@@ -129,6 +131,7 @@ func TestMailWaitsForAFreeWorker(t *testing.T) {
 	s, _, db := newModeServer(t, config.ModeProduction, false)
 	s.requestFloor = 0
 	s.mailSlots = make(chan struct{}, 1)
+	allowDomain(t, db, "example.test")
 	relaySend := &relaySender{delay: 50 * time.Millisecond, sent: make(chan string, 3)}
 	s.SetSender(relaySend)
 	h := s.Router()

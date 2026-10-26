@@ -166,9 +166,9 @@ Two run modes, picked **at startup** by `SK_MODE` (`eval` or `production`), plus
 
 | Setting      | What flips                                                              |
 |--------------|-------------------------------------------------------------------------|
-| `SK_MODE=eval` | Auto-generated master secret + SQLite DSN if missing; in-memory `CaptureSender`; `/__captured_mail` + `/admin/captured-mail` expose the whole queue; admin cookies without `Secure` (plain-http localhost); plain `http://` SIEM sinks accepted; bootstrap admin password printed once on stdout; `debug_reveal_url` in `/api/v1/request` replies |
-| `SK_DEMO_MODE=true` | Capture sender forced (env-wired and `/admin/smtp` SMTP ignored); `/__captured_mail` scoped to the caller's own mail; 1/h IP and 1/h email request limits; admin console read-only outside the demo story (domains, policies, elevations, templates stay editable); integration enable + library upload refused; `internal/demo.Resetter` empties the editable tables every 24 h and restores accounts, branding, SMTP override and kv from the boot snapshot |
-| `SK_MODE=production` (default) | `SK_MASTER_SECRET` required (placeholder/weak refused); NopSender unless SMTP wired; full rate limits and lockout; no `/__captured_mail`; HTTP SIEM sinks must be `https://`; no banner |
+| `SK_MODE=eval` | Auto-generated master secret + SQLite DSN if missing; in-memory `CaptureSender`; `/__captured_mail` + `/admin/captured-mail` expose the whole queue; admin cookies without `Secure` (plain-http localhost); plain `http://` SIEM sinks accepted; bootstrap admin password printed once on stdout; `debug_reveal_url` in `/api/v1/request` replies; an empty domain allowlist admits every domain |
+| `SK_DEMO_MODE=true` | Capture sender forced (env-wired and `/admin/smtp` SMTP ignored); `/__captured_mail` scoped to the caller's own mail; 1/h IP and 1/h email request limits; an empty domain allowlist admits every domain (mail is captured, never relayed); admin console read-only outside the demo story (domains, policies, elevations, templates stay editable); integration enable + library upload refused; `internal/demo.Resetter` empties the editable tables every 24 h and restores accounts, branding, SMTP override and kv from the boot snapshot |
+| `SK_MODE=production` (default) | `SK_MASTER_SECRET` required (placeholder/weak refused); NopSender unless SMTP wired; full rate limits and lockout; no `/__captured_mail`; HTTP SIEM sinks must be `https://`; an empty domain allowlist refuses every request (fail closed, dashboard alert); no banner |
 
 The dashboard mode panel shows `eval` when `SK_MODE=eval` (even with the demo toggle on), else `demo` when `SK_DEMO_MODE=true`, else `production`; both banners render independently.
 
@@ -258,7 +258,7 @@ Race tolerance: if INSERT fails with a UNIQUE conflict (another worker just inse
 
 ### Anti-enumeration on public surface
 
-`POST /api/v1/request` always returns `202 accepted` — never 4xx — even when the email is denied, the domain isn't allowlisted, or the rate limit fired. The audit log is the operator's source of truth (FR-B.13). Eval mode adds `debug_reveal_url` to the response so smoke tests can exercise the consume path.
+`POST /api/v1/request` always returns `202 accepted` — never 4xx — even when the email is denied, the domain isn't allowlisted (including a production instance whose allowlist is still empty), or the rate limit fired. The audit log is the operator's source of truth (FR-B.13): `request.domain_blocked` carries `reason` = `not_listed` or `allowlist_empty`. Eval mode adds `debug_reveal_url` to the response so smoke tests can exercise the consume path.
 
 ### HTML templates
 
@@ -418,6 +418,7 @@ A running list of things that have tripped Claude or a human in this codebase. *
 20. **The audit chain is keyed.** Writing `audit_log` rows with a zero or wrong key (e.g. a CLI path built without `audit.DeriveKey`) turns the `/admin/audit` badge red — see §3.
 21. **CRLF checkouts on Windows.** With `core.autocrlf=true`, `gofmt -l` and `yamllint` flag every file for line endings even when the committed (LF) content is clean. Check a file with `tr -d '\r' < f | gofmt -l`; edit tools that write LF into a CRLF file are fine, git normalises on commit.
 22. **Mail templates are a token-exfiltration surface.** `mailtemplates/safety.go` enforces, at save time *and* on every render: `{{ .RevealURL }}` only as a bare action, the whole `href` of an `<a>` in HTML, standalone in text, never in the subject; no variables / `{{ . }}` / sub-templates. The rendered HTML is checked against an **allowlist** of elements/attributes (tokenizer + scripting-disabled `html.Parse`), never a denylist: x/net/html tokenizes `noscript`/`xmp`/`noembed`/`noframes`/`plaintext` as raw text while mail clients parse their content as markup, so a denylist was bypassed. Only `<title>`/`<style>` raw text is allowed, with no `<` inside; no CSS `url()`/at-rules but `@media`/escapes; `<img src>` only bitmap `data:` or `cid:`. Errors wrap `ErrParse` + `ErrUnsafe`. Sender identity, Message-ID and SPF/DKIM/DMARC: `docs/security/mail-authentication.md`.
+23. **An empty domain allowlist fails closed outside eval/demo.** `domains.NewRepo` refuses every domain while the table is empty (`Allows` → `false, ErrEmptyAllowlist`); `Server.SetDomains` re-opens it only for `IsEval() || IsDemo()`, where reveal mail is captured. A production instance therefore issues nothing until a domain is listed (SK-37) — the dashboard says so. Production-mode tests that expect a token must list their domain first (`allowDomain` in `internal/httpserver/allowlist_test.go`).
 
 ---
 

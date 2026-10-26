@@ -239,9 +239,12 @@ docker run -d \
 
 <p>
   The public request form refuses to mint a link for any email whose
-  domain isn't in the allowlist. An empty allowlist means <em>any
-  domain</em> is accepted — that's the zero-config eval behaviour. As
-  soon as you add a single entry, the gate engages. Wildcard form
+  domain isn't in the allowlist. In production an empty allowlist
+  refuses <em>every</em> request — a fresh instance mails nothing until
+  you list the domains you serve, and the dashboard says so. Only the
+  eval and demo modes, whose mail is captured and never relayed, accept
+  any domain while the list is empty. As soon as you add a single entry,
+  the list is the gate in every mode. Wildcard form
   <code>*.example.com</code> matches any subdomain but not the bare
   apex; list both if you need both.
 </p>

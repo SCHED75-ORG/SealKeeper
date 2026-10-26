@@ -725,7 +725,20 @@ func (s *Server) handleAdminDashboard(w http.ResponseWriter, r *http.Request) {
 		"BaseURL":        s.cfg.BaseURL,
 		"InstanceDomain": s.cfg.InstanceDomain,
 		"SenderName":     s.currentSender().Name(),
+		"AllowlistEmpty": s.allowlistEmpty(r.Context()),
+		"AllowlistOpen":  s.domains != nil && s.domains.OpenWhenEmpty(),
 	})
+}
+
+// allowlistEmpty reports whether the domain allowlist has no row at all —
+// the dashboard warns because production then refuses every request
+// (SK-37). A lookup error reports false: the gate itself fails safe.
+func (s *Server) allowlistEmpty(ctx context.Context) bool {
+	if s.domains == nil {
+		return false
+	}
+	n, err := s.domains.Count(ctx)
+	return err == nil && n == 0
 }
 
 func (s *Server) handleAdminAudit(w http.ResponseWriter, r *http.Request) {
@@ -2556,6 +2569,18 @@ const adminDashboardTpl = `{{define "dashboard.html"}}{{template "header" .}}
     <div style="font-family:var(--font-mono); font-size:0.9rem; padding-top:0.4rem">{{ if .Admin.LastLoginAt }}{{ .Admin.LastLoginAt.Format "2006-01-02 15:04 UTC" }}{{ else }}—{{ end }}</div>
   </div>
 </section>
+
+{{ if .AllowlistEmpty }}{{ if .AllowlistOpen }}
+<section role="status" style="margin:0 0 1.5rem; background:#FBF7EE; border:1px solid var(--gold); border-radius:2px; padding:0.9rem 1.25rem">
+  <strong>The domain allowlist is empty — every domain is accepted.</strong>
+  This zero-config default holds only in eval and demo modes, where reveal mail is captured and never relayed. In production an empty allowlist refuses every request: add your domains under <a href="/admin/domains">Domains</a> before switching.
+</section>
+{{ else }}
+<section role="alert" style="margin:0 0 1.5rem; background:#FBF7EE; border:2px solid var(--cardinal); border-radius:2px; padding:0.9rem 1.25rem">
+  <strong style="color:var(--cardinal)">The domain allowlist is empty — every public request is refused.</strong>
+  Production fails closed so the instance never mails reveal links to arbitrary addresses. Visitors still see the usual confirmation; each refusal is audited as <code>request.domain_blocked</code> (reason <code>allowlist_empty</code>). Add the email domains you serve under <a href="/admin/domains">Domains</a>.
+</section>
+{{ end }}{{ end }}
 
 <p style="color:var(--stone); font-size:0.9rem">
   Base URL <code>{{ .BaseURL }}</code> · Instance domain <code>{{ .InstanceDomain }}</code> · Session expires <code>{{ .Session.ExpiresAt.Format "15:04 UTC" }}</code>.

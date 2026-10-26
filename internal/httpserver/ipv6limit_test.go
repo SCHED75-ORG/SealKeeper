@@ -18,6 +18,7 @@ func TestRequestIPLimitCoversIPv6Slash64(t *testing.T) {
 	t.Parallel()
 	s, _, db := newModeServer(t, config.ModeProduction, false)
 	s.requestFloor = 0
+	allowDomain(t, db, "example.org")
 	h := s.Router()
 	limit := s.cfg.RateLimitIPPerHour
 	for i := 1; i <= limit+20; i++ {

@@ -83,6 +83,8 @@ La console est accessible sous `/admin` de l'instance. Elle est destinée à un 
 | FR-C.25 | Recherche par texte libre sur les domaines | SHOULD |
 | FR-C.26 | Import CSV en lot pour création initiale (colonnes : domain, description, status) | SHOULD |
 
+> **Allowlist vide (SK-37).** En production, une allowlist vide refuse toute demande (fermeture par défaut) : une instance fraîchement déployée n'émet aucun lien tant qu'aucun domaine n'est déclaré, et le tableau de bord l'affiche. Seuls les modes eval et démo — où le courrier est capturé, jamais relayé — acceptent tout domaine tant que la liste est vide. La réponse publique reste le 202 générique (FR-B.13) ; le refus est journalisé `request.domain_blocked` avec `reason: allowlist_empty`.
+
 ### 3.4 Gestion des policies
 
 | ID | Exigence | Niveau |

@@ -287,9 +287,16 @@ func (s *Server) SetSender(sender mailer.Sender) {
 	s.storeSender(sender)
 }
 
-// SetDomains binds the allowlist repo. When nil, every domain is accepted —
-// matching the zero-config eval behaviour.
-func (s *Server) SetDomains(repo *domains.Repo) { s.domains = repo }
+// SetDomains binds the allowlist repo. When nil, every domain is accepted
+// (unit-test wiring only; main.go always binds one). The run mode decides
+// what an EMPTY allowlist means (SK-37): production fails closed, eval and
+// demo — whose reveal mail is captured, never relayed — stay zero-config.
+func (s *Server) SetDomains(repo *domains.Repo) {
+	if repo != nil {
+		repo = repo.WithOpenWhenEmpty(s.cfg.IsEval() || s.cfg.IsDemo())
+	}
+	s.domains = repo
+}
 
 // SetPolicies binds the policies + elevations repos used to resolve a
 // request to a concrete PolicyDescriptor. When both repos are nil the

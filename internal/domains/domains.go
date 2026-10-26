@@ -11,9 +11,11 @@
 //     ("paris.entreprise.com", "fr.paris.entreprise.com"), but NOT the bare
 //     "entreprise.com" (list both if you want both).
 //
-// When the table is empty (fresh install), Allows() returns true for every
-// input — that keeps the eval-mode 5-second pitch zero-config. The gate
-// activates as soon as the first row lands.
+// An empty table (fresh install) fails closed: Allows() refuses every input
+// with ErrEmptyAllowlist, so a production instance never mints reveal links
+// for arbitrary Internet addresses (SK-37). Zero-config modes whose mail
+// never leaves the box (eval, demo) opt back in with WithOpenWhenEmpty.
+// Either way the gate is the list itself as soon as the first row lands.
 package domains
 
 import (
@@ -35,6 +37,9 @@ var (
 	ErrNotFound      = errors.New("domains: not found")
 	ErrInvalidName   = errors.New("domains: invalid name")
 	ErrAlreadyExists = errors.New("domains: name already exists")
+	// ErrEmptyAllowlist accompanies a refusal caused by an empty table on a
+	// fail-closed repo, so the caller can tell the operator why.
+	ErrEmptyAllowlist = errors.New("domains: allowlist is empty")
 )
 
 // Domain is the row view.
@@ -50,8 +55,9 @@ type Domain struct {
 
 // Repo persists domains.
 type Repo struct {
-	db  *sql.DB
-	now func() time.Time
+	db            *sql.DB
+	now           func() time.Time
+	openWhenEmpty bool
 }
 
 // NewRepo binds a Repo to a *sql.DB.
@@ -63,6 +69,17 @@ func (r *Repo) WithClock(now func() time.Time) *Repo {
 	c.now = now
 	return &c
 }
+
+// WithOpenWhenEmpty returns a copy whose empty table admits every domain.
+// Only for modes where reveal mail is captured, never relayed (eval, demo).
+func (r *Repo) WithOpenWhenEmpty(open bool) *Repo {
+	c := *r
+	c.openWhenEmpty = open
+	return &c
+}
+
+// OpenWhenEmpty reports whether an empty table admits every domain.
+func (r *Repo) OpenWhenEmpty() bool { return r.openWhenEmpty }
 
 // Canonicalize lowercases and trims a domain name, returns ErrInvalidName on
 // an empty or syntactically wrong input. Wildcards must use the `*.` prefix
@@ -192,8 +209,8 @@ func (r *Repo) Delete(ctx context.Context, id int64) error {
 	return err
 }
 
-// Count returns the number of rows. Used by the request-handler gate to
-// keep the allowlist open in zero-config installs.
+// Count returns the number of rows. Allows uses it to apply the empty-table
+// rule; the admin dashboard uses it to warn about an empty allowlist.
 func (r *Repo) Count(ctx context.Context) (int64, error) {
 	var n int64
 	err := r.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM domains").Scan(&n)
@@ -232,8 +249,8 @@ func (r *Repo) FindMatching(ctx context.Context, emailDomain string) (Domain, er
 }
 
 // Allows reports whether `emailDomain` (e.g. "paris.entreprise.com") matches
-// any active allowlist row. Returns true unconditionally when the table is
-// empty, so an empty install accepts every domain.
+// any active allowlist row. An empty table refuses with ErrEmptyAllowlist
+// unless the repo was built WithOpenWhenEmpty(true), which admits all.
 func (r *Repo) Allows(ctx context.Context, emailDomain string) (bool, error) {
 	d := strings.ToLower(strings.TrimSpace(emailDomain))
 	if d == "" {
@@ -244,7 +261,10 @@ func (r *Repo) Allows(ctx context.Context, emailDomain string) (bool, error) {
 		return false, err
 	}
 	if n == 0 {
-		return true, nil // FR-B / eval friendliness — see package doc.
+		if r.openWhenEmpty {
+			return true, nil // eval / demo zero-config — see package doc.
+		}
+		return false, ErrEmptyAllowlist
 	}
 
 	// Build the list of candidate names: the exact value plus every

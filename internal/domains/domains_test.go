@@ -62,15 +62,37 @@ func TestCanonicalizeRejectsInvalid(t *testing.T) {
 
 // ----- CRUD + Allows --------------------------------------------------------
 
-func TestEmptyTableAllowsEverything(t *testing.T) {
+// Regression (SK-37): an empty table admitted every domain, production
+// included. The default repo now fails closed.
+func TestEmptyTableFailsClosedByDefault(t *testing.T) {
 	t.Parallel()
 	r, _ := newRepo(t)
-	ok, err := r.Allows(context.Background(), "anything.test")
-	if err != nil {
-		t.Fatalf("Allows: %v", err)
+	if r.OpenWhenEmpty() {
+		t.Fatal("NewRepo must default to fail-closed")
 	}
-	if !ok {
-		t.Fatal("empty table must allow everything")
+	ok, err := r.Allows(context.Background(), "anything.test")
+	if ok || !errors.Is(err, domains.ErrEmptyAllowlist) {
+		t.Fatalf("Allows on empty table = %v, %v; want false, ErrEmptyAllowlist", ok, err)
+	}
+}
+
+func TestEmptyTableOpenWhenOptedIn(t *testing.T) {
+	t.Parallel()
+	r, _ := newRepo(t)
+	open := r.WithOpenWhenEmpty(true)
+	ok, err := open.Allows(context.Background(), "anything.test")
+	if err != nil || !ok {
+		t.Fatalf("Allows on empty open table = %v, %v; want true, nil", ok, err)
+	}
+	if r.OpenWhenEmpty() {
+		t.Fatal("WithOpenWhenEmpty mutated the receiver")
+	}
+	// As soon as a row lands the list is the gate, open or not.
+	if _, err := open.Create(context.Background(), "corp.test", "", true, nil); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := open.Allows(context.Background(), "anything.test"); ok || err != nil {
+		t.Fatalf("Allows unlisted with populated table = %v, %v; want false, nil", ok, err)
 	}
 }
 

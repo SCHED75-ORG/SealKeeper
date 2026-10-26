@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/sched75/sealkeeper/internal/audit"
+	"github.com/sched75/sealkeeper/internal/domains"
 	"github.com/sched75/sealkeeper/internal/mail"
 	"github.com/sched75/sealkeeper/internal/mailer"
 	"github.com/sched75/sealkeeper/internal/mailtemplates"
@@ -126,27 +127,32 @@ func (s *Server) requestRateGate(ctx context.Context, pr publicRequest) bool {
 
 // requestDomainGate — FR-C.20..23: consult the domain allowlist when it is
 // wired. A denied domain is FR-B.9-silent; a lookup error denies
-// (fail-safe) so a database hiccup can't open the gate.
+// (fail-safe) so a database hiccup can't open the gate. An empty
+// allowlist in production denies too (SK-37), audited as allowlist_empty.
 func (s *Server) requestDomainGate(ctx context.Context, pr publicRequest) bool {
 	if s.domains == nil {
 		return true
 	}
 	ok, err := s.domains.Allows(ctx, pr.domain)
-	if err != nil {
+	reason := "not_listed"
+	switch {
+	case errors.Is(err, domains.ErrEmptyAllowlist):
+		reason = "allowlist_empty"
+	case err != nil:
 		s.logger.Error("domains.Allows failed", "err", err)
 		return false
+	case ok:
+		return true
 	}
-	if !ok {
-		s.auditAppend(ctx, "request.domain_blocked", pr.email, pr.domain, map[string]any{
-			"ip_hash": pr.ipHash,
-			"ua_hash": pr.uaHash,
-		})
-		s.logger.Info("domain not in allowlist — silent drop",
-			"email", pr.email, "domain", pr.domain,
-		)
-		return false
-	}
-	return true
+	s.auditAppend(ctx, "request.domain_blocked", pr.email, pr.domain, map[string]any{
+		"ip_hash": pr.ipHash,
+		"ua_hash": pr.uaHash,
+		"reason":  reason,
+	})
+	s.logger.Info("domain not in allowlist — silent drop",
+		"email", pr.email, "domain", pr.domain, "reason", reason,
+	)
+	return false
 }
 
 // requestPolicyGate — FR-C.27..28: resolve a policy NOW so we never mint a

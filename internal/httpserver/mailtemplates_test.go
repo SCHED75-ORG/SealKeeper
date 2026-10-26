@@ -63,6 +63,7 @@ func TestRevealMailLanguageIsTheInstanceDefault(t *testing.T) {
 	s, _, db := newModeServer(t, config.ModeProduction, false)
 	s.requestFloor = 0
 	s.SetMailTemplates(mailtemplates.NewRepo(db))
+	allowDomain(t, db, "example.test")
 	rec := &recordSender{}
 	s.SetSender(rec)
 
