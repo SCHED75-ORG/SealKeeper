@@ -85,3 +85,70 @@ func TestRateLimitKeyFoldsSubaddress(t *testing.T) {
 		}
 	}
 }
+
+func TestSameOriginPOST(t *testing.T) {
+	t.Parallel()
+	h := sameOriginPOST(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }))
+	cases := []struct {
+		name, method, site, origin string
+		want                       int
+	}{
+		{"same-origin fetch", http.MethodPost, "same-origin", "http://sk.test", http.StatusNoContent},
+		{"sibling subdomain", http.MethodPost, "same-site", "http://wiki.sk.test", http.StatusForbidden},
+		{"cross-site", http.MethodPost, "cross-site", "https://evil.test", http.StatusForbidden},
+		{"origin only, foreign", http.MethodPost, "", "https://evil.test", http.StatusForbidden},
+		{"no headers (curl)", http.MethodPost, "", "", http.StatusNoContent},
+		{"no-referrer form post", http.MethodPost, "same-origin", "null", http.StatusNoContent},
+		{"cross-site GET", http.MethodGet, "cross-site", "", http.StatusNoContent},
+	}
+	for _, c := range cases {
+		r := httptest.NewRequest(c.method, "http://sk.test/admin/domains/add", nil)
+		if c.site != "" {
+			r.Header.Set("Sec-Fetch-Site", c.site)
+		}
+		if c.origin != "" {
+			r.Header.Set("Origin", c.origin)
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		if w.Code != c.want {
+			t.Errorf("%s: status %d, want %d", c.name, w.Code, c.want)
+		}
+	}
+}
+
+// Regression: checkSessionCSRF compared the csrf cookie with the form
+// field, so a value planted in the cookie by a sibling subdomain (or an
+// absent cookie with an empty field) passed.
+func TestSessionCSRFBoundToSession(t *testing.T) {
+	t.Parallel()
+	s, repo := newAdminServer(t)
+	ctx := context.Background()
+	a, err := repo.Create(ctx, "ops@example.test", "supersecret-12chars")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess, err := repo.CreateSession(ctx, a.ID, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	try := func(cookie, field string) bool {
+		form := url.Values{"csrf_token": {field}}
+		r := httptest.NewRequest(http.MethodPost, "/admin/domains/add", strings.NewReader(form.Encode()))
+		r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		if cookie != "" {
+			r.AddCookie(&http.Cookie{Name: cookieAdminCSRF, Value: cookie})
+		}
+		r = r.WithContext(context.WithValue(context.WithValue(r.Context(), ctxKeyAdmin, a), ctxKeySession, sess))
+		return s.checkSessionCSRF(r)
+	}
+	if !try("", sess.CSRFToken) {
+		t.Error("the session's own token was refused")
+	}
+	if try("planted", "planted") {
+		t.Error("planted cookie/field pair accepted")
+	}
+	if try("", "") {
+		t.Error("empty token accepted")
+	}
+}

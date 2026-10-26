@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -372,5 +373,80 @@ func TestSetupBlobIsBoundAndTamperProof(t *testing.T) {
 	}
 	if _, _, err := r.OpenSetup(7, "sess-a", blob[:len(blob)-2]+"AA"); err == nil {
 		t.Error("tampered blob accepted")
+	}
+}
+
+// Regression: admin_sessions stored the bearer token verbatim, so a DB dump
+// or backup yielded working session cookies.
+func TestSessionTokenStoredHashed(t *testing.T) {
+	t.Parallel()
+	r, _, _ := enrolledAdmin(t, "ops@example.test", "supersecret-12chars")
+	ctx := context.Background()
+	a, _ := r.FindByEmail(ctx, "ops@example.test")
+	sess, err := r.CreateSession(ctx, a.ID, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stored, csrf string
+	if err := r.DB().QueryRowContext(ctx, "SELECT token, csrf_token FROM admin_sessions").Scan(&stored, &csrf); err != nil {
+		t.Fatal(err)
+	}
+	if stored == sess.Token || csrf == sess.CSRFToken || strings.Contains(stored, sess.Token) {
+		t.Fatalf("session secrets stored in clear: token=%q csrf=%q", stored, csrf)
+	}
+	got, _, err := r.LookupSession(ctx, sess.Token)
+	if err != nil || got.CSRFToken != sess.CSRFToken {
+		t.Fatalf("LookupSession = %+v, %v", got, err)
+	}
+	if _, _, err := r.LookupSession(ctx, stored); err == nil {
+		t.Fatal("the stored hash works as a session token")
+	}
+}
+
+func TestRevokeOtherSessionsAndDisable(t *testing.T) {
+	t.Parallel()
+	r, _, _ := enrolledAdmin(t, "ops@example.test", "supersecret-12chars")
+	ctx := context.Background()
+	if _, err := r.Create(ctx, "second@example.test", "supersecret-12chars"); err != nil {
+		t.Fatal(err)
+	}
+	a, _ := r.FindByEmail(ctx, "ops@example.test")
+	keep, _ := r.CreateSession(ctx, a.ID, "", "")
+	stolen, _ := r.CreateSession(ctx, a.ID, "", "")
+	if err := r.RevokeOtherSessions(ctx, a.ID, keep.Token); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := r.LookupSession(ctx, keep.Token); err != nil {
+		t.Fatalf("kept session revoked: %v", err)
+	}
+	if _, _, err := r.LookupSession(ctx, stolen.Token); err == nil {
+		t.Fatal("other session survived RevokeOtherSessions")
+	}
+	// Regression: disable only suspended sessions; re-enabling revived them.
+	if err := r.SetDisabled(ctx, a.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.SetDisabled(ctx, a.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := r.LookupSession(ctx, keep.Token); err == nil {
+		t.Fatal("session revived after disable + re-enable")
+	}
+}
+
+func TestVerifyPasswordCountsFailures(t *testing.T) {
+	t.Parallel()
+	r, _, _ := enrolledAdmin(t, "ops@example.test", "supersecret-12chars")
+	ctx := context.Background()
+	a, _ := r.FindByEmail(ctx, "ops@example.test")
+	if err := r.VerifyPassword(ctx, a.ID, "supersecret-12chars"); err != nil {
+		t.Fatalf("correct password: %v", err)
+	}
+	var last error
+	for i := 0; i <= admin.MaxFailedAttempts; i++ {
+		last = r.VerifyPassword(ctx, a.ID, "wrong")
+	}
+	if !errors.Is(last, admin.ErrAccountLocked) {
+		t.Fatalf("after repeated step-up failures: %v, want ErrAccountLocked", last)
 	}
 }

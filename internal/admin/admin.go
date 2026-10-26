@@ -5,6 +5,7 @@
 package admin
 
 import (
+	"crypto/hmac"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -230,6 +231,11 @@ func (r *Repo) SetDisabled(ctx context.Context, adminID int64, disabled bool) er
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return ErrNotFound
+	}
+	if disabled {
+		// Revoke, not just suspend: re-enabling the account must not revive
+		// sessions (possibly stolen ones) issued before it was disabled.
+		return r.RevokeOtherSessions(ctx, adminID, "")
 	}
 	return nil
 }
@@ -623,10 +629,7 @@ func (r *Repo) CreateSession(ctx context.Context, adminID int64, ipHash, uaHash 
 	if err != nil {
 		return Session{}, err
 	}
-	csrf, err := opaqueToken(24)
-	if err != nil {
-		return Session{}, err
-	}
+	csrf := sessionCSRF(tok)
 	now := r.now().UTC()
 	expires := now.Add(SessionTTL)
 	idle := now.Add(SessionIdleTTL)
@@ -635,7 +638,7 @@ func (r *Repo) CreateSession(ctx context.Context, adminID int64, ipHash, uaHash 
 		rebind(r.db, `INSERT INTO admin_sessions
 			(token, admin_id, issued_at, expires_at, idle_expires_at, csrf_token, ip_hash, ua_hash)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`),
-		tok, adminID, now, expires, idle, csrf, nullable(ipHash), nullable(uaHash),
+		hashToken(tok), adminID, now, expires, idle, hashToken(csrf), nullable(ipHash), nullable(uaHash),
 	)
 	if err != nil {
 		return Session{}, fmt.Errorf("admin.CreateSession: %w", err)
@@ -664,7 +667,7 @@ func (r *Repo) LookupSession(ctx context.Context, token string) (Session, Admin,
 		FROM admin_sessions s JOIN admins a ON a.id = s.admin_id
 		WHERE s.token = ?`
 
-	row := r.db.QueryRowContext(ctx, rebind(r.db, q), token)
+	row := r.db.QueryRowContext(ctx, rebind(r.db, q), hashToken(token))
 
 	var (
 		sessTok                              string
@@ -744,9 +747,9 @@ func (r *Repo) LookupSession(ctx context.Context, token string) (Session, Admin,
 	}
 
 	sess := Session{
-		Token:         sessTok,
+		Token:         token,
 		AdminID:       adminID,
-		CSRFToken:     csrfTok,
+		CSRFToken:     sessionCSRF(token), // csrf_token column holds only a hash
 		IdleExpiresAt: newIdle,
 		ExpiresAt:     exp,
 	}
@@ -761,9 +764,66 @@ func (r *Repo) RevokeSession(ctx context.Context, token string) error {
 	now := r.now().UTC()
 	_, err := r.db.ExecContext(ctx,
 		rebind(r.db, `UPDATE admin_sessions SET revoked_at = ? WHERE token = ? AND revoked_at IS NULL`),
-		now, token,
+		now, hashToken(token),
 	)
 	return err
+}
+
+// RevokeOtherSessions revokes every live session of adminID except keepToken
+// (pass "" to revoke them all). Called after a credential change so a stolen
+// cookie dies with the old password.
+func (r *Repo) RevokeOtherSessions(ctx context.Context, adminID int64, keepToken string) error {
+	now := r.now().UTC()
+	_, err := r.db.ExecContext(ctx,
+		rebind(r.db, `UPDATE admin_sessions SET revoked_at = ?
+			WHERE admin_id = ? AND token <> ? AND revoked_at IS NULL`),
+		now, adminID, hashToken(keepToken),
+	)
+	return err
+}
+
+// VerifyPassword re-checks an authenticated admin's current password before
+// a sensitive change (step-up). Failures consume a login attempt, so a
+// hijacked session cannot brute-force the password through this path.
+func (r *Repo) VerifyPassword(ctx context.Context, adminID int64, password string) error {
+	row, err := r.loadByID(ctx, adminID)
+	if err != nil {
+		return err
+	}
+	reserved, err := r.reserveAttempt(ctx, adminID)
+	if err != nil {
+		return err
+	}
+	if !reserved {
+		r.lockIfExhausted(ctx, adminID)
+		return ErrAccountLocked
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(row.PasswordHash), []byte(password)); err != nil {
+		r.lockIfExhausted(ctx, adminID)
+		return ErrInvalidCreds
+	}
+	// Give the reserved attempt back without touching last_login_at.
+	_, _ = r.db.ExecContext(ctx,
+		rebind(r.db, `UPDATE admins SET failed_attempts = 0 WHERE id = ? AND locked_until IS NULL`),
+		adminID,
+	)
+	return nil
+}
+
+// hashToken is what admin_sessions stores instead of the bearer token: a
+// database dump or backup no longer yields usable session cookies.
+func hashToken(tok string) string {
+	sum := sha256.Sum256([]byte(tok))
+	return hex.EncodeToString(sum[:])
+}
+
+// sessionCSRF derives the CSRF token from the session token. It is bound
+// to the session by construction (a value planted in the CSRF cookie by a
+// sibling subdomain cannot match) and needs no storage.
+func sessionCSRF(sessionToken string) string {
+	m := hmac.New(sha256.New, []byte(sessionToken))
+	_, _ = m.Write([]byte("sealkeeper-admin-csrf"))
+	return base64.RawURLEncoding.EncodeToString(m.Sum(nil))
 }
 
 // ----- internals ------------------------------------------------------------

@@ -98,6 +98,28 @@ test.describe("@csp", () => {
       await expect(page.locator("h2").first()).toBeVisible();
       await page.waitForTimeout(300);
     }
+
+    // A new admin's one-time password is shown on the POST response only,
+    // never carried in a redirect URL.
+    await page.goto("/admin/admins");
+    await page.locator("#add-email").fill(`second+${Date.now()}@example.test`);
+    await page.getByRole("button", { name: /create admin/i }).click();
+    await expect(
+      page.locator('[data-testid="bootstrap-password"]'),
+    ).toBeVisible();
+    expect(page.url()).not.toContain("bootstrap_password");
+
+    // Credential changes require the current password (step-up).
+    await page.goto("/admin/account");
+    await page.locator("#cp-password").fill("not-the-password");
+    await page.locator("#np").fill("Another-Csp-Admin-2026!");
+    await page.locator("#np2").fill("Another-Csp-Admin-2026!");
+    await page.getByRole("button", { name: /update password/i }).click();
+    await expect(page).toHaveURL(/err=current_password/);
+
+    // Logout carries the session CSRF token and works.
+    await page.getByRole("button", { name: /logout/i }).click();
+    await expect(page).toHaveURL(/\/admin\/login/);
     expect(problems).toEqual([]);
   });
 });

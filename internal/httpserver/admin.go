@@ -67,6 +67,7 @@ func (s *Server) SetAdmin(repo *admin.Repo, instanceLabel string) {
 
 func (s *Server) registerAdminRoutes(r chi.Router) {
 	r.Route("/admin", func(r chi.Router) {
+		r.Use(sameOriginPOST)
 		r.Get("/", s.handleAdminRoot)
 		r.Get("/login", s.handleAdminLoginGet)
 		r.Post("/login", s.handleAdminLoginPost)
@@ -295,6 +296,15 @@ func (s *Server) handleAdminLoginPost(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleAdminLogout(w http.ResponseWriter, r *http.Request) {
 	if c, err := r.Cookie(cookieAdminSession); err == nil {
+		// Require the session's CSRF token so a cross-site POST cannot log
+		// the operator out (e.g. in the middle of an incident).
+		if sess, _, err := s.adminRepo.LookupSession(r.Context(), c.Value); err == nil {
+			_ = r.ParseForm()
+			if !constantTimeEqualString(sess.CSRFToken, r.FormValue("csrf_token")) {
+				http.Error(w, "csrf", http.StatusForbidden)
+				return
+			}
+		}
 		_ = s.adminRepo.RevokeSession(r.Context(), c.Value)
 	}
 	s.clearAdminCookies(w)
@@ -618,6 +628,7 @@ func (s *Server) handleAdminSetupPost(w http.ResponseWriter, r *http.Request) {
 			s.adminSetupError(w, r, "password_invalid")
 			return
 		}
+		_ = s.adminRepo.RevokeOtherSessions(r.Context(), a.ID, sess.Token)
 		s.auditAppend(r.Context(), "admin.password_changed", a.Email, "", nil)
 	}
 
@@ -2037,16 +2048,73 @@ func (s *Server) checkLoginCSRF(r *http.Request) bool {
 	return constantTimeEqualString(c.Value, form)
 }
 
+// checkSessionCSRF compares the submitted token with the one derived from
+// the authenticated session (admin.Repo sessionCSRF). Comparing against the
+// sk_admin_csrf cookie instead let anyone able to plant that cookie (a
+// sibling subdomain) forge requests, and an absent cookie plus an empty
+// field compared equal.
 func (s *Server) checkSessionCSRF(r *http.Request) bool {
-	c, err := r.Cookie(cookieAdminCSRF)
-	if err != nil {
+	_, sess, ok := adminFromCtx(r)
+	if !ok || sess.CSRFToken == "" {
 		return false
 	}
 	form := r.FormValue("csrf_token")
 	if form == "" {
 		form = r.Header.Get("X-CSRF-Token")
 	}
-	return constantTimeEqualString(c.Value, form)
+	return constantTimeEqualString(sess.CSRFToken, form)
+}
+
+// sameOriginPOST refuses state-changing admin requests that a browser marks
+// as cross-origin, including same-site siblings (e.g. a compromised wiki on
+// another subdomain). Sec-Fetch-Site is authoritative when present; Origin
+// is the fallback for older clients. Non-browser clients send neither and
+// remain subject to the CSRF token.
+func sameOriginPOST(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			site := r.Header.Get("Sec-Fetch-Site")
+			origin := r.Header.Get("Origin")
+			switch {
+			case site != "":
+				if site != "same-origin" && site != "none" {
+					http.Error(w, "cross-site request refused", http.StatusForbidden)
+					return
+				}
+			// "null" is what Chrome sends on form posts under
+			// Referrer-Policy: no-referrer; the CSRF token still applies.
+			case origin != "" && origin != "null":
+				u, err := url.Parse(origin)
+				if err != nil || !strings.EqualFold(u.Host, r.Host) {
+					http.Error(w, "cross-origin request refused", http.StatusForbidden)
+					return
+				}
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// requireCurrentPassword is the step-up for credential changes: a stolen
+// session cookie alone must not let an attacker replace the password, the
+// e-mail or the security keys and lock the operator out. Returns the
+// error slug to show when the check fails.
+func (s *Server) requireCurrentPassword(r *http.Request) (string, bool) {
+	a, _, _ := adminFromCtx(r)
+	err := s.adminRepo.VerifyPassword(r.Context(), a.ID, r.FormValue("current_password"))
+	switch {
+	case err == nil:
+		return "", true
+	case errors.Is(err, admin.ErrAccountLocked):
+		s.auditAppend(r.Context(), "admin.step_up_failed", a.Email, "", map[string]any{"reason": "locked"})
+		return "locked", false
+	case errors.Is(err, admin.ErrInvalidCreds):
+		s.auditAppend(r.Context(), "admin.step_up_failed", a.Email, "", map[string]any{"reason": "credentials"})
+		return "current_password", false
+	default:
+		s.logger.Error("VerifyPassword failed", "err", err)
+		return "internal", false
+	}
 }
 
 func (s *Server) requireSessionCSRF(r *http.Request) string {
@@ -2102,6 +2170,12 @@ func (s *Server) renderAdmin(w http.ResponseWriter, name string, data map[string
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	data["CSPNonce"] = scriptNonce(w)
+	// The header's logout form needs the CSRF token on every page.
+	if _, ok := data["CSRF"]; !ok {
+		if sess, ok := data["Session"].(admin.Session); ok {
+			data["CSRF"] = sess.CSRFToken
+		}
+	}
 	if err := s.adminTpl.ExecuteTemplate(w, name+".html", data); err != nil {
 		s.logger.Error("admin template render failed", "name", name, "err", err)
 	}
@@ -2226,6 +2300,7 @@ const adminBaseTpl = `{{define "header"}}<!doctype html>
     <a href="/admin/audit">Audit log</a>
     {{ if or .EvalBanner .DemoBanner }}<a href="/admin/captured-mail">Captured mail</a>{{ end }}
     <form method="POST" action="/admin/logout" style="display:inline;margin-left:1rem">
+      <input type="hidden" name="csrf_token" value="{{ $.CSRF }}">
       <button type="submit" class="secondary">Logout {{ .Admin.Email }}</button>
     </form>
   </nav>{{ end }}
@@ -3117,9 +3192,13 @@ func (s *Server) handleAdminAccount(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAdminAccountEmailChange(w http.ResponseWriter, r *http.Request) {
-	a, _, _ := adminFromCtx(r)
+	a, sess, _ := adminFromCtx(r)
 	if err := r.ParseForm(); err != nil || !s.checkSessionCSRF(r) {
 		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if slug, ok := s.requireCurrentPassword(r); !ok {
+		http.Redirect(w, r, "/admin/account?err="+slug, http.StatusSeeOther)
 		return
 	}
 	oldEmail := a.Email
@@ -3137,6 +3216,7 @@ func (s *Server) handleAdminAccountEmailChange(w http.ResponseWriter, r *http.Re
 		http.Redirect(w, r, "/admin/account?err=internal", http.StatusSeeOther)
 		return
 	}
+	_ = s.adminRepo.RevokeOtherSessions(r.Context(), a.ID, sess.Token)
 	s.auditAppend(r.Context(), "admin.email_changed", oldEmail, newEmail, map[string]any{
 		"admin_id": a.ID,
 	})
@@ -3144,9 +3224,13 @@ func (s *Server) handleAdminAccountEmailChange(w http.ResponseWriter, r *http.Re
 }
 
 func (s *Server) handleAdminAccountPasswordChange(w http.ResponseWriter, r *http.Request) {
-	a, _, _ := adminFromCtx(r)
+	a, sess, _ := adminFromCtx(r)
 	if err := r.ParseForm(); err != nil || !s.checkSessionCSRF(r) {
 		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if slug, ok := s.requireCurrentPassword(r); !ok {
+		http.Redirect(w, r, "/admin/account?err="+slug, http.StatusSeeOther)
 		return
 	}
 	np := r.FormValue("new_password")
@@ -3166,6 +3250,8 @@ func (s *Server) handleAdminAccountPasswordChange(w http.ResponseWriter, r *http
 		http.Redirect(w, r, "/admin/account?err=internal", http.StatusSeeOther)
 		return
 	}
+	// Every other session dies with the old password.
+	_ = s.adminRepo.RevokeOtherSessions(r.Context(), a.ID, sess.Token)
 	s.auditAppend(r.Context(), "admin.password_changed", a.Email, "", map[string]any{
 		"admin_id": a.ID,
 	})
@@ -3173,6 +3259,14 @@ func (s *Server) handleAdminAccountPasswordChange(w http.ResponseWriter, r *http
 }
 
 func (s *Server) handleAdminAdmins(w http.ResponseWriter, r *http.Request) {
+	s.renderAdminsPage(w, r, querySlug(r, "ok"), "", "")
+}
+
+// renderAdminsPage renders /admin/admins. bootstrapEmail/Password are only
+// ever set by handleAdminAdminAdd on its own response: the one-time
+// password must not travel in a redirect URL (proxy access logs, browser
+// history, Referer).
+func (s *Server) renderAdminsPage(w http.ResponseWriter, r *http.Request, ok, bootstrapEmail, bootstrapPassword string) {
 	a, sess, _ := adminFromCtx(r)
 	list, err := s.adminRepo.List(r.Context())
 	if err != nil {
@@ -3188,10 +3282,10 @@ func (s *Server) handleAdminAdmins(w http.ResponseWriter, r *http.Request) {
 		"Label":             s.adminLabel,
 		"CSRF":              sess.CSRFToken,
 		"Items":             list,
-		"OK":                querySlug(r, "ok"),
+		"OK":                ok,
 		"Error":             querySlug(r, "err"),
-		"BootstrapEmail":    r.URL.Query().Get("bootstrap_email"),
-		"BootstrapPassword": r.URL.Query().Get("bootstrap_password"),
+		"BootstrapEmail":    bootstrapEmail,
+		"BootstrapPassword": bootstrapPassword,
 	})
 }
 
@@ -3228,14 +3322,10 @@ func (s *Server) handleAdminAdminAdd(w http.ResponseWriter, r *http.Request) {
 	s.auditAppend(r.Context(), "admin.created", a.Email, created.Email, map[string]any{
 		"admin_id": created.ID,
 	})
-	// Stash the freshly minted password in the audit log AND surface it
-	// once via a query string. The next page render shows it inside a
-	// banner so the operator can hand it to the new admin out-of-band.
-	q := url.Values{}
-	q.Set("ok", "created")
-	q.Set("bootstrap_email", created.Email)
-	q.Set("bootstrap_password", pwd)
-	http.Redirect(w, r, "/admin/admins?"+q.Encode(), http.StatusSeeOther)
+	// Show the freshly minted password once, in this response only (the
+	// page is Cache-Control: no-store). The operator hands it to the new
+	// admin out-of-band; the setup wizard forces a change at first login.
+	s.renderAdminsPage(w, r, "created", created.Email, pwd)
 }
 
 func (s *Server) handleAdminAdminToggle(w http.ResponseWriter, r *http.Request) {
@@ -3357,6 +3447,10 @@ func (s *Server) handleAdminWebauthnBegin(w http.ResponseWriter, r *http.Request
 	}
 	if err := r.ParseForm(); err != nil || !s.checkSessionCSRF(r) {
 		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if _, ok := s.requireCurrentPassword(r); !ok {
+		http.Error(w, "current password incorrect", http.StatusForbidden)
 		return
 	}
 	name := strings.TrimSpace(r.FormValue("friendly_name"))
@@ -3495,6 +3589,10 @@ func (s *Server) handleAdminWebauthnDelete(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
+	if slug, ok := s.requireCurrentPassword(r); !ok {
+		http.Redirect(w, r, "/admin/security?err="+slug, http.StatusSeeOther)
+		return
+	}
 	id := chi.URLParam(r, "id")
 	confirm := strings.TrimSpace(r.FormValue("confirm"))
 	if confirm != id {
@@ -3551,6 +3649,7 @@ TOTP remains the active second factor at sign-in; key-based login will land in a
       <form method="POST" action="/admin/security/{{ .CredentialID }}/delete" data-confirm="Delete this credential? This cannot be undone.">
         <input type="hidden" name="csrf_token" value="{{ $.CSRF }}">
         <input type="hidden" name="confirm" value="{{ .CredentialID }}">
+        <input name="current_password" type="password" required autocomplete="current-password" placeholder="Current password" aria-label="Current password">
         <button type="submit" class="secondary" style="color:#991b1b;border-color:#991b1b">Delete</button>
       </form>
     </td>
@@ -3563,6 +3662,8 @@ TOTP remains the active second factor at sign-in; key-based login will land in a
 <h3 style="margin-top:2rem">Add a new key</h3>
 <form id="webauthn-form" data-testid="webauthn-form">
   <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
+  <label for="cp-webauthn">Current password</label>
+  <input id="cp-webauthn" name="current_password" type="password" required autocomplete="current-password">
   <label for="friendly_name">Friendly name (e.g. "YubiKey 5 NFC")</label>
   <input id="friendly_name" name="friendly_name" required minlength="1" maxlength="64">
   <p style="margin-top:1rem"><button type="submit">Enrol authenticator</button></p>
@@ -3778,6 +3879,8 @@ const adminAccountTpl = `{{define "account.html"}}{{template "header" .}}
 <h3>Change my email</h3>
 <form method="POST" action="/admin/account/email">
   <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
+  <label for="cp-email">Current password</label>
+  <input id="cp-email" name="current_password" type="password" required autocomplete="current-password">
   <label for="email">New email</label>
   <input id="email" name="email" type="email" required autocomplete="off" value="{{ .Admin.Email }}">
   <p style="margin-top:1rem"><button type="submit">Update email</button></p>
@@ -3786,6 +3889,8 @@ const adminAccountTpl = `{{define "account.html"}}{{template "header" .}}
 <h3 style="margin-top:2rem">Change my password</h3>
 <form method="POST" action="/admin/account/password">
   <input type="hidden" name="csrf_token" value="{{ .CSRF }}">
+  <label for="cp-password">Current password</label>
+  <input id="cp-password" name="current_password" type="password" required autocomplete="current-password">
   <label for="np">New password (ANSSI B3 — ≥ 16 chars, mixing 3 of lower/upper/digit/symbol)</label>
   <input id="np" name="new_password" type="password" minlength="16" required autocomplete="new-password">
   <label for="np2">Confirm new password</label>
