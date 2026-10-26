@@ -13,6 +13,7 @@ import (
 	"github.com/sched75/sealkeeper/internal/domains"
 	"github.com/sched75/sealkeeper/internal/elevations"
 	"github.com/sched75/sealkeeper/internal/policies"
+	"github.com/sched75/sealkeeper/internal/storage"
 	"github.com/sched75/sealkeeper/internal/tokens"
 )
 
@@ -123,5 +124,64 @@ func TestAdminPolicyFormsRefuseEntropyBelowFloor(t *testing.T) {
 	w = adminPOST(h, sess, "/admin/policies/"+strconv.FormatInt(p.ID, 10)+"/save", form("B1", `{"length":10}`))
 	if loc := w.Header().Get("Location"); !strings.Contains(loc, "/edit?err=below_floor&details=") {
 		t.Fatalf("save weak: %d %q, want err=below_floor", w.Code, loc)
+	}
+}
+
+// A stored policy the reveal bundle refuses (here a G3 alphabetSize claim
+// the generator cannot honour, saved before the editor checked it) used to
+// be served with the token consumed, so the browser threw and the user lost
+// the link. It must fail closed before Consume instead.
+func TestHandlePolicyKeepsTokenWhenBundleWouldRefusePolicy(t *testing.T) {
+	t.Parallel()
+	s, repo := newAdminServer(t)
+	db := repo.DB()
+	dr := domains.NewRepo(db)
+	er := elevations.NewRepo(db)
+	pr := policies.NewRepo(db, dr, er)
+	tr := tokens.NewRepo(db)
+	s.SetTokens(tr)
+	s.SetDomains(dr)
+	s.SetPolicies(pr, er)
+	ctx := context.Background()
+
+	d, err := dr.Create(ctx, "example.test", "", true, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := pr.Create(ctx, policies.CreateInputs{
+		DomainID: d.ID, ANSSILevel: elevations.LevelB1, Name: "B1", Generator: policies.GeneratorG3, Active: true,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	setParams := func(params string) {
+		t.Helper()
+		if _, err := db.ExecContext(ctx, storage.Rebind(db, `UPDATE policies SET params_json = ? WHERE id = ?`),
+			params, p.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Legacy row: written past the save-time validation.
+	setParams(`{"length":20,"alphabetSize":94}`)
+	tok, err := tr.Issue(ctx, tokens.IssueOptions{Email: "user@example.test", Domain: "example.test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	w := httptest.NewRecorder()
+	s.handlePolicy(w, httptest.NewRequest(http.MethodGet, "/api/v1/policy?token="+tok.Token, nil))
+	if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "policy_unavailable") {
+		t.Fatalf("status=%d body=%s, want 503 policy_unavailable", w.Code, w.Body.String())
+	}
+	if got, err := tr.Get(ctx, tok.Token); err != nil || got.ConsumedAt != nil {
+		t.Fatalf("token consumed for a policy the bundle refuses: %+v, %v", got, err)
+	}
+
+	// Once the operator fixes the policy, the same link works.
+	setParams(`{"length":20,"alphabetSize":62}`)
+	w = httptest.NewRecorder()
+	s.handlePolicy(w, httptest.NewRequest(http.MethodGet, "/api/v1/policy?token="+tok.Token, nil))
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"alphabetSize":62`) {
+		t.Fatalf("status=%d body=%s, want 200 with the fixed policy", w.Code, w.Body.String())
 	}
 }

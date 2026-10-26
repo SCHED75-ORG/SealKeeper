@@ -1146,6 +1146,11 @@ func (s *Server) resolvedPolicy(ctx context.Context, email string) (map[string]a
 	if err != nil {
 		return nil, err
 	}
+	// A row the reveal bundle would refuse (saved before the editor checked
+	// it, or edited in the DB) must not cost the user their link.
+	if err := policies.ValidateForReveal(row); err != nil {
+		return nil, fmt.Errorf("policy %d: %w", row.ID, err)
+	}
 	out := map[string]any{
 		"id":              row.ID,
 		"domain":          row.DomainName,
