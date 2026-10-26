@@ -81,7 +81,8 @@ type Config struct {
 	// WebDir is the directory served at /static/*. The reveal page <script
 	// src="/static/sealkeeper-generation.umd.js"> lives in there. Defaults
 	// to the best-existing path among /app/web (in-image), ./web/dist
-	// (developer build) and ./web (Docker copy target).
+	// (developer build) and ./web (Docker copy target). When none exists
+	// the server serves the bundle embedded at build time (webbundle).
 	WebDir string `yaml:"web_dir"`
 
 	// InstanceDomain is the bare hostname used in the From: address and the

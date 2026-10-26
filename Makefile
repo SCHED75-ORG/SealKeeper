@@ -40,8 +40,14 @@ build: ## Build local binary into ./dist/sealkeeper
 	mkdir -p dist
 	$(GO) build -trimpath -buildvcs=true -ldflags "$(LDFLAGS)" -o dist/sealkeeper ./cmd/sealkeeper
 
+.PHONY: web-embed
+web-embed: ## Build the JS bundle and copy it into internal/webbundle for go:embed
+	cd web && npm ci --ignore-scripts --no-audit --no-fund && npm run build
+	test -s web/dist/sealkeeper-generation.umd.js
+	cp web/dist/sealkeeper-generation.umd.js internal/webbundle/dist/
+
 .PHONY: build-all
-build-all: ## Build linux+darwin × amd64+arm64 binaries
+build-all: web-embed ## Build linux+darwin × amd64+arm64 binaries (bundle embedded)
 	mkdir -p dist
 	for os in linux darwin; do \
 	  for arch in amd64 arm64; do \

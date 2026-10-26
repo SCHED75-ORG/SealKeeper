@@ -12,7 +12,7 @@
 //	POST /api/v1/policy           — single-use consumption, token in the
 //	                                JSON body, never the URL (FR-B.36)
 //	GET  /reveal/{token}          — reveal page HTML (loads UMD bundle)
-//	GET  /static/*                — JS bundle + assets (config.WebDir)
+//	GET  /static/*                — JS bundle + assets (config.WebDir, else embedded)
 //	GET  /__captured_mail         — eval mail queue; demo: caller's own mail
 package httpserver
 
@@ -26,6 +26,7 @@ import (
 	"errors"
 	"fmt"
 	htmltemplate "html/template"
+	"io/fs"
 	"log/slog"
 	"math"
 	"mime"
@@ -65,6 +66,7 @@ import (
 	"github.com/sched75/sealkeeper/internal/tokens"
 	"github.com/sched75/sealkeeper/internal/version"
 	"github.com/sched75/sealkeeper/internal/webauthn"
+	"github.com/sched75/sealkeeper/internal/webbundle"
 )
 
 // pseudonymKey derives the audit pseudonymisation key from the master
@@ -164,6 +166,11 @@ type Server struct {
 	sender     atomic.Pointer[senderRef]
 	bootSender atomic.Pointer[senderRef]
 	smtpMu     sync.Mutex
+
+	// embeddedWeb is the JS bundle compiled into the binary (nil when it
+	// was built without one). /static/* falls back to it when no WebDir
+	// is configured, so a standalone release binary serves the bundle.
+	embeddedWeb fs.FS
 }
 
 // New builds an HTTP server with the given configuration.
@@ -245,6 +252,7 @@ func New(cfg config.Config, logger *slog.Logger) *Server {
 		requestFloor:   requestLatencyFloor,
 		mailSlots:      make(chan struct{}, mailWorkers),
 		mailQueue:      make(chan struct{}, mailQueueDepth),
+		embeddedWeb:    webbundle.FS(),
 	}
 	s.storeSender(defaultSender)
 	s.bootSender.Store(&senderRef{defaultSender})
@@ -462,9 +470,8 @@ func (s *Server) Router() http.Handler {
 
 	r.Get("/reveal/{token}", s.handleRevealPage)
 
-	if s.cfg.WebDir != "" {
-		fs := http.FileServer(staticFS{dir: http.Dir(s.cfg.WebDir)})
-		r.Handle("/static/*", http.StripPrefix("/static/", fs))
+	if static := s.staticFiles(); static != nil {
+		r.Handle("/static/*", http.StripPrefix("/static/", http.FileServer(staticFS{dir: static})))
 	}
 
 	// /__captured_mail is the in-memory mail viewer (FR-H.17 / FR-H.79 —
@@ -487,6 +494,18 @@ func (s *Server) Router() http.Handler {
 	}
 
 	return r
+}
+
+// staticFiles is the /static/* tree: the configured WebDir (the Docker
+// image's /app/web), else the bundle embedded at build time, else nil.
+func (s *Server) staticFiles() http.FileSystem {
+	switch {
+	case s.cfg.WebDir != "":
+		return http.Dir(s.cfg.WebDir)
+	case s.embeddedWeb != nil:
+		return http.FS(s.embeddedWeb)
+	}
+	return nil
 }
 
 // handleBrandingLogo streams the current branding logo. 404 when no logo

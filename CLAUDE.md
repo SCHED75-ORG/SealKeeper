@@ -54,7 +54,8 @@ It is opinionated about three things: **single-binary distribution**, **AGPL v3 
 │   ├── tokens/                 # reveal tokens (issue + atomic consume)
 │   ├── totp/                   # RFC 6238 HMAC-SHA1, base32 secrets, recovery codes
 │   ├── version/                # ldflags-injected build metadata
-│   └── webauthn/               # FIDO2 registration + assertion ceremonies
+│   ├── webauthn/               # FIDO2 registration + assertion ceremonies
+│   └── webbundle/              # go:embed copy of the JS bundle (standalone binaries; `make web-embed`)
 ├── web/                        # JavaScript generation bundle (Vite + Vitest)
 │   ├── src/
 │   │   ├── entropy.js          # calculateEntropy() — shared by user UI + admin

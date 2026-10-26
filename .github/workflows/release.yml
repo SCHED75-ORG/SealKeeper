@@ -301,6 +301,23 @@ jobs:
           # Signed artefacts are built from a clean module cache.
           cache: false
 
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      # A standalone binary has no web directory next to it: the reveal
+      # page's JS bundle is embedded via internal/webbundle (go:embed).
+      # Same flags as the Dockerfile webbuild stage.
+      - name: Build and embed JS bundle
+        working-directory: web
+        run: |
+          set -euo pipefail
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run build
+          test -s dist/sealkeeper-generation.umd.js
+          cp dist/sealkeeper-generation.umd.js ../internal/webbundle/dist/
+
       - name: Build reproducibly
         env:
           CGO_ENABLED: "0"

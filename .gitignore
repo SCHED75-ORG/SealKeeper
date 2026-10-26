@@ -94,6 +94,9 @@ web/.pnpm-store/
 
 # Build output
 web/dist/
+# JS bundle copied in for go:embed (release build, make web-embed)
+internal/webbundle/dist/*
+!internal/webbundle/dist/.gitkeep
 web/.astro/
 web/.output/
 
