@@ -357,7 +357,10 @@ type AuthResult struct {
 //   - if the account is missing or password is wrong, ErrInvalidCreds (and
 //     the failure counter increments — see reserveAttempt);
 //   - if the account is locked, ErrAccountLocked is returned without
-//     verifying the password (constant time still — see handlers);
+//     verifying the password (constant time still — see handlers); the
+//     login handler shows it as bad_creds so it does not reveal the email;
+//   - if the account is disabled, ErrAccountDisabled is returned only after
+//     the password matched; a wrong password is ErrInvalidCreds;
 //   - if force_totp_enroll is true, TOTP is not checked yet; the caller
 //     must drive the user into the enrollment flow (NeedsTOTPEnrollment);
 //   - if TOTP is enrolled, the code is verified and a mismatch is also
@@ -373,9 +376,6 @@ func (r *Repo) Authenticate(ctx context.Context, email, password, totpCode strin
 	}
 	if err != nil {
 		return AuthResult{}, err
-	}
-	if row.DisabledAt != nil {
-		return AuthResult{}, ErrAccountDisabled
 	}
 	if row.LockedUntil != nil {
 		if r.now().Before(*row.LockedUntil) {
@@ -401,6 +401,11 @@ func (r *Repo) Authenticate(ctx context.Context, email, password, totpCode strin
 	if err := bcrypt.CompareHashAndPassword([]byte(row.PasswordHash), []byte(password)); err != nil {
 		r.lockIfExhausted(ctx, row.ID)
 		return AuthResult{}, ErrInvalidCreds
+	}
+	// Disabled is reported only once the password matched: answering it
+	// first told anyone that the email belongs to an admin.
+	if row.DisabledAt != nil {
+		return AuthResult{}, ErrAccountDisabled
 	}
 
 	// The failure counter is cleared only once every factor has passed
