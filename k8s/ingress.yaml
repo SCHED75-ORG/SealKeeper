@@ -41,3 +41,51 @@ spec:
                 name: sealkeeper
                 port:
                   number: 8443
+---
+# Reveal links carry a live, single-use token in the URL (/reveal/<token>):
+# a bearer credential that ingress-nginx's default access log (full request
+# line) — and any SIEM fed by it — would hold in clear. These paths get
+# their own Ingress so the access log is OFF for them alone. Keep the
+# annotations of the main Ingress above in sync.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: sealkeeper-reveal
+  namespace: sealkeeper
+  labels:
+    app.kubernetes.io/name: sealkeeper
+  annotations:
+    # cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/enable-access-log: "false"
+    nginx.ingress.kubernetes.io/proxy-body-size: "12m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      more_set_headers "Strict-Transport-Security: max-age=31536000; includeSubDomains; preload";
+      more_set_headers "X-Content-Type-Options: nosniff";
+      more_set_headers "X-Frame-Options: DENY";
+      more_set_headers "Referrer-Policy: no-referrer";
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - sealkeeper.example.com
+      secretName: sealkeeper-tls
+  rules:
+    - host: sealkeeper.example.com
+      http:
+        paths:
+          - path: /reveal/
+            pathType: Prefix
+            backend:
+              service:
+                name: sealkeeper
+                port:
+                  number: 8443
+          - path: /api/v1/policy
+            pathType: Exact
+            backend:
+              service:
+                name: sealkeeper
+                port:
+                  number: 8443

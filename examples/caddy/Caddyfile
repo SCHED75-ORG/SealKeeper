@@ -73,12 +73,23 @@
 	}
 
 	# Structured access log — JSON, one line per request.
+	#
+	# Token redaction: /reveal/<token> carries a live, single-use reveal
+	# token, a bearer credential — anyone reading this log (or a SIEM fed
+	# by it) could open the link before its owner. The `filter` rewrites
+	# the path segment and any token= query parameter before the line is
+	# written, and drops Referer (it may echo a reveal URL). Keep these
+	# filters if you change the log format or ship the log elsewhere.
 	log {
 		output file /var/log/caddy/sealkeeper-access.log {
 			roll_size     50mb
 			roll_keep     5
 			roll_keep_for 14d
 		}
-		format json
+		format filter {
+			request>uri regexp "(?i)(^/+reveal/)[^?#]*|([?&]token=)[^&#]*" "${1}${2}REDACTED"
+			request>headers>Referer delete
+			wrap json
+		}
 	}
 }

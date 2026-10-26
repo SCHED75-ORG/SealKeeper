@@ -99,6 +99,16 @@ ingress:
         - sealkeeper.example.com
   annotations:
     nginx.ingress.kubernetes.io/proxy-body-size: "12m"
+  # Reveal links (/reveal/<token>) and the token-consume endpoint get a
+  # second Ingress with the access log OFF: the URL carries a live,
+  # single-use token, and the controller's default log format writes the
+  # full request line — anyone reading those logs (or the SIEM they feed)
+  # could open the link first. The default annotation is for ingress-nginx;
+  # set the equivalent for another controller. Keep it enabled.
+  revealPaths:
+    enabled: true
+    annotations:
+      nginx.ingress.kubernetes.io/enable-access-log: "false"
   # Cert-manager — set issuer to enable.
   certManager:
     enabled: false

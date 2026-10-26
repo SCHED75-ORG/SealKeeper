@@ -22,7 +22,7 @@ x-logging: &json-logging
 
 services:
   traefik:
-    image: traefik:v3.2
+    image: traefik:v3.3  # >= v3.3: per-router observability (token-free access log)
     container_name: sealkeeper-traefik
     restart: unless-stopped
     command:
@@ -143,6 +143,20 @@ services:
       - "traefik.http.routers.sealkeeper-static.service=sealkeeper"
       - "traefik.http.middlewares.sealkeeper-static-cache.headers.customResponseHeaders.Cache-Control=no-cache"
       - "traefik.http.routers.sealkeeper-static.middlewares=sealkeeper-headers@docker,sealkeeper-static-cache@docker"
+      # Reveal links (tokenlogs): /reveal/<token> carries a live, single-use
+      # reveal token — a bearer credential. Traefik's access log writes the
+      # full RequestPath (query string included) and cannot redact part of
+      # it, so this router — reveal pages and the token-consume endpoint —
+      # is excluded from the access log altogether. SealKeeper still audits
+      # every issue/consume itself (token pseudonymised). Requires Traefik
+      # >= v3.3 (router `observability` options; v3.2 rejects them).
+      - "traefik.http.routers.sealkeeper-reveal.rule=Host(`${SK_DOMAIN:?SK_DOMAIN required}`) && (PathPrefix(`/reveal/`) || Path(`/api/v1/policy`))"
+      - "traefik.http.routers.sealkeeper-reveal.entrypoints=websecure"
+      - "traefik.http.routers.sealkeeper-reveal.tls=true"
+      - "traefik.http.routers.sealkeeper-reveal.tls.certresolver=le"
+      - "traefik.http.routers.sealkeeper-reveal.service=sealkeeper"
+      - "traefik.http.routers.sealkeeper-reveal.middlewares=sealkeeper-headers@docker"
+      - "traefik.http.routers.sealkeeper-reveal.observability.accessLogs=false"
 
 volumes:
   sealkeeper-data:
