@@ -16,6 +16,7 @@ import (
 	"github.com/sched75/sealkeeper/internal/ratelimit"
 	"github.com/sched75/sealkeeper/internal/storage"
 	"github.com/sched75/sealkeeper/internal/storage/storagetest"
+	"github.com/sched75/sealkeeper/internal/totp"
 )
 
 // newAdminServer wires a Server to a fresh database with one admin.
@@ -187,5 +188,40 @@ func TestAdminLoginSlugDoesNotEnumerateAdmins(t *testing.T) {
 				t.Fatalf("%s attempt %d: err=%q, want bad_creds", email, i+1, got)
 			}
 		}
+	}
+}
+
+// Regression: with the TOTP field left empty, a correct password answered
+// err=totp_required and a wrong one err=bad_creds, so the password of a
+// TOTP-only admin could be confirmed without the second factor. Both must
+// now get the same answer.
+func TestAdminLoginBlankTOTPDoesNotConfirmPassword(t *testing.T) {
+	t.Parallel()
+	s, repo := newAdminServer(t)
+	s.loginLimiter = ratelimit.New(1000, time.Hour)
+	ctx := context.Background()
+	const pw = "supersecret-12chars"
+	a, err := repo.Create(ctx, "ops@example.test", pw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret, err := totp.NewSecret()
+	if err != nil {
+		t.Fatal(err)
+	}
+	codes, err := totp.NewRecoveryCodes(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.EnrollTOTP(ctx, a.ID, secret, codes); err != nil {
+		t.Fatal(err)
+	}
+	wrong := postLogin(s, "203.0.113.9:1", a.Email, "not-the-password").Header().Get("Location")
+	right := postLogin(s, "203.0.113.9:1", a.Email, pw).Header().Get("Location")
+	if !strings.Contains(wrong, "err=bad_creds") {
+		t.Fatalf("wrong password Location = %q, want err=bad_creds", wrong)
+	}
+	if right != wrong {
+		t.Fatalf("correct password, blank TOTP: Location = %q, want the wrong-password answer %q", right, wrong)
 	}
 }

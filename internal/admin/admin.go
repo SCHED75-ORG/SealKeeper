@@ -364,7 +364,10 @@ type AuthResult struct {
 //   - if force_totp_enroll is true, TOTP is not checked yet; the caller
 //     must drive the user into the enrollment flow (NeedsTOTPEnrollment);
 //   - if TOTP is enrolled, the code is verified and a mismatch is also
-//     ErrInvalidCreds — we never tell the user which factor failed.
+//     ErrInvalidCreds — we never tell the user which factor failed;
+//   - if TOTP is enrolled but the code is blank, ErrTOTPRequired, so the
+//     caller can offer the WebAuthn step-up; without one, the login
+//     handler shows it as bad_creds so it does not confirm the password.
 func (r *Repo) Authenticate(ctx context.Context, email, password, totpCode string) (AuthResult, error) {
 	row, err := r.verifyPasswordFactor(ctx, email, password)
 	if err != nil {

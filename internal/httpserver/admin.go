@@ -294,12 +294,14 @@ func (s *Server) respondAdminLoginFailure(w http.ResponseWriter, r *http.Request
 	case errors.Is(err, admin.ErrTOTPRequired):
 		// Password OK, but the second factor still needs to be supplied.
 		// Branch to the WebAuthn step-up flow when the admin has at least
-		// one registered key — otherwise re-render the form asking for
-		// the TOTP code on top of the existing inputs.
+		// one registered key. Otherwise answer exactly like a wrong
+		// password: a distinct slug confirmed the password without the
+		// second factor. The audit log keeps the real reason.
 		if s.tryWebauthnStepUp(w, r, ad) {
 			return
 		}
-		s.adminLoginError(w, r, "totp_required")
+		s.auditAppend(r.Context(), "admin.login_failed", email, "", map[string]any{"reason": "totp_missing"})
+		s.adminLoginError(w, r, "bad_creds")
 	default:
 		s.logger.Error("admin.Authenticate failed", "err", err)
 		s.adminLoginError(w, r, "internal")
@@ -2396,8 +2398,6 @@ const adminLoginTpl = `{{define "login.html"}}{{template "header" .}}
     Too many sign-in attempts from your network. Try again in a few minutes.
   {{ else if eq .Error "disabled" }}
     This account has been disabled by another administrator.
-  {{ else if eq .Error "totp_required" }}
-    Password accepted — enter your authenticator code to finish signing in.
   {{ else }}
     {{ .Error }}
   {{ end }}
