@@ -114,4 +114,28 @@ describe("calculateEntropy", () => {
     });
     expect(r.breakdown.map((b) => b.component)).not.toContain("separator");
   });
+
+  // "\-" is an invalid escape under the u flag: a T08 symbol list holding
+  // "-" made calculateEntropy (and so generate) throw.
+  it("G1 accepts regex-special T08 symbols, '-' included", () => {
+    const symbols = ["-", "+", ".", "/", "\\", "|", "(", "[", "{", "^", "$", "*", "?"];
+    const r = calculateEntropy({
+      generator: "G1",
+      parameters: {
+        library: ACCENTED,
+        transforms: [{ code: "T08", active: true, mode: "random", parameters: { symbols } }],
+      },
+    });
+    expect(r.breakdown).toContainEqual({ component: "transform-T08", bits: 3.7 });
+    // Citations differing only by a dropped symbol still collapse together.
+    const merged = calculateEntropy({
+      generator: "G1",
+      parameters: {
+        library: ["a-b c", "ab c"],
+        numericGroups: [],
+        transforms: [{ code: "T08", active: true, parameters: { symbols: ["-"] } }],
+      },
+    });
+    expect(merged.breakdown.map((b) => b.component)).not.toContain("citation-selection");
+  });
 });

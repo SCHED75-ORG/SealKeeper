@@ -219,10 +219,11 @@ function entropyG1(p) {
     const folds = [(s) => s.replace(/\s+/gu, " ")];
     if (ts.some(joins)) {
       const symbols = ts.find(isCode("T08"))?.parameters.symbols ?? [];
+      // Syntax characters only: "\-" is an invalid escape under the u flag.
       const escaped = [
         "\\s",
         "_",
-        ...symbols.map((c) => c.replace(/[.*+?^${}()|[\]\\/-]/gu, "\\$&")),
+        ...symbols.map((c) => c.replace(/[.*+?^${}()|[\]\\/]/gu, "\\$&")),
       ];
       const dropped = new RegExp(`(?:${escaped.join("|")})+`, "gu");
       folds.push((s) => s.replace(dropped, ""));
