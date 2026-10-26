@@ -214,3 +214,6 @@ logs/
 
 sealkeeper-pgp/
 
+
+# CI artifact name; never commit a built bundle (it goes stale and ships old code)
+/web-bundle/

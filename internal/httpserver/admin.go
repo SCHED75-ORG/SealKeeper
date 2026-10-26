@@ -2730,14 +2730,14 @@ const adminPoliciesTpl = `{{define "policies.html"}}{{template "header" .}}
     if (gen === 'G1' && hasWords) {
       return 'numberOfWords is ignored by G1 (one citation only). Switch to G2 if you want N independent word picks.';
     }
-    if (gen === 'G2' && !hasWords && !hasLibrary) {
-      return 'G2 expects library + numberOfWords. Add them or switch generator.';
+    if ((gen === 'G1' || gen === 'G2') && !hasLibrary) {
+      return gen + ' needs an inline "library" array; without it the reveal page refuses to generate.';
     }
     if (gen === 'G3' && (hasWords || hasLibrary)) {
-      return 'G3 ignores library / numberOfWords (random alphanumeric draw); only length + alphabetSize matter.';
+      return 'G3 ignores library / numberOfWords (random alphanumeric draw); only length (and excludeAmbiguous) matter.';
     }
     if (gen === 'G3' && !hasLength) {
-      return 'G3 expects a "length" parameter (and optionally "alphabetSize").';
+      return 'G3 expects a "length" parameter.';
     }
     return '';
   }
@@ -2766,7 +2766,14 @@ const adminPoliciesTpl = `{{define "policies.html"}}{{template "header" .}}
     try {
       report = fn(policy);
     } catch (e) {
+      // Clear the previous figures: a stale B3 badge next to a policy the
+      // reveal page will refuse is exactly the misleading state to avoid.
       status.textContent = 'Cannot compute: ' + e.message;
+      els.min.textContent = els.expected.textContent = els.max.textContent = '—';
+      [els.B1, els.B2, els.B3].forEach(function (b) { b.className = 'ent-badge'; });
+      warn.style.display = 'none';
+      mismatch.style.display = 'none';
+      if (breakdownBody) breakdownBody.innerHTML = '';
       return;
     }
     status.textContent = 'Live preview · same calculator the user bundle uses.';
@@ -4295,9 +4302,9 @@ const adminPolicyEditTpl = `{{define "policy_edit.html"}}{{template "header" .}}
     var hasLibrary = Array.isArray(params.library) && params.library.length > 0;
     var hasLength = typeof params.length === 'number' && params.length > 0;
     if (gen === 'G1' && hasWords) return 'numberOfWords is ignored by G1 (one citation only). Switch to G2 if you want N independent word picks.';
-    if (gen === 'G2' && !hasWords && !hasLibrary) return 'G2 expects library + numberOfWords. Add them or switch generator.';
-    if (gen === 'G3' && (hasWords || hasLibrary)) return 'G3 ignores library / numberOfWords (random alphanumeric draw); only length + alphabetSize matter.';
-    if (gen === 'G3' && !hasLength) return 'G3 expects a "length" parameter (and optionally "alphabetSize").';
+    if ((gen === 'G1' || gen === 'G2') && !hasLibrary) return gen + ' needs an inline "library" array; without it the reveal page refuses to generate.';
+    if (gen === 'G3' && (hasWords || hasLibrary)) return 'G3 ignores library / numberOfWords (random alphanumeric draw); only length (and excludeAmbiguous) matter.';
+    if (gen === 'G3' && !hasLength) return 'G3 expects a "length" parameter.';
     return '';
   }
 
@@ -4319,7 +4326,15 @@ const adminPolicyEditTpl = `{{define "policy_edit.html"}}{{template "header" .}}
     var policy = { generator: generator, parameters: parsed };
     var report;
     try { report = fn(policy); }
-    catch (e) { status.textContent = 'Cannot compute: ' + e.message; return; }
+    catch (e) {
+      status.textContent = 'Cannot compute: ' + e.message;
+      els.min.textContent = els.expected.textContent = els.max.textContent = '—';
+      [els.B1, els.B2, els.B3].forEach(function (b) { b.className = 'ent-badge'; });
+      warn.style.display = 'none';
+      mismatch.style.display = 'none';
+      if (breakdownBody) breakdownBody.innerHTML = '';
+      return;
+    }
     status.textContent = 'Live preview · same calculator the user bundle uses.';
     els.min.textContent = report.minBits.toFixed(1);
     els.expected.textContent = report.expectedBits.toFixed(1);
