@@ -131,6 +131,9 @@ const (
 	EventTokenReuseAttempt   = "token.reuse_attempt"
 	EventTokenExpiredAttempt = "token.expired_attempt"
 	EventTokenUnknownAttempt = "token.unknown_attempt"
+	// EventRateLimitedSummary folds the request.rate_limited hits of one
+	// key over a window (see httpserver/ratelimitaudit.go).
+	EventRateLimitedSummary = "request.rate_limited.summary"
 )
 
 const (

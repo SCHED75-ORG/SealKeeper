@@ -113,12 +113,7 @@ func (s *Server) requestRateGate(ctx context.Context, pr publicRequest) bool {
 		return true
 	}
 	s.rateHits.WithLabelValues(decision.Reason).Inc()
-	s.auditAppend(ctx, audit.EventRateLimited, pr.email, decision.Reason, map[string]any{
-		"ip_hash":              pr.ipHash,
-		"ua_hash":              pr.uaHash,
-		"limit_email_per_hour": s.cfg.RateLimitEmailPerHour,
-		"limit_ip_per_hour":    s.cfg.RateLimitIPPerHour,
-	})
+	s.auditRateLimited(ctx, pr, decision.Reason)
 	s.logger.Info("rate-limited request silently dropped",
 		"email", pr.email, "dimension", decision.Reason,
 	)

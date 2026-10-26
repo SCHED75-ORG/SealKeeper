@@ -135,6 +135,9 @@ type Server struct {
 	// probeLimiter caps the token.unknown_attempt rows per client
 	// (see unknownAttemptAuditPerIPWindow).
 	probeLimiter *ratelimit.Limiter
+	// rateAudit folds the audit rows of throttled public requests (see
+	// ratelimitaudit.go).
+	rateAudit *rateAuditAgg
 
 	// pseudonymKey keys hashShort (derived from the master secret).
 	pseudonymKey []byte
@@ -224,6 +227,7 @@ func New(cfg config.Config, logger *slog.Logger) *Server {
 		loginLimiter:   ratelimit.New(adminLoginPerIPWindow, 15*time.Minute),
 		tokenLimiter:   ratelimit.New(tokenLookupPerIPWindow, 15*time.Minute),
 		probeLimiter:   ratelimit.New(unknownAttemptAuditPerIPWindow, 15*time.Minute),
+		rateAudit:      newRateAuditAgg(rateAuditMaxKeys, rateAuditMaxPeers),
 		cfg:            cfg,
 		logger:         logger,
 		readyz:         readiness.New(),
@@ -528,6 +532,7 @@ func (s *Server) Run(ctx context.Context) error {
 			go l.RunJanitor(stopJanitors, 5*time.Minute)
 		}
 	}
+	stopRateAudit := s.startRateAuditFlusher()
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -544,9 +549,11 @@ func (s *Server) Run(ctx context.Context) error {
 		defer cancel()
 		s.logger.Info("http server shutting down")
 		err := srv.Shutdown(shutdownCtx)
-		s.WaitMail(shutdownCtx) // let queued reveal mails reach the relay
+		s.WaitMail(shutdownCtx)    // let queued reveal mails reach the relay
+		stopRateAudit(shutdownCtx) // no throttled hit goes unaccounted
 		return err
 	case err := <-errCh:
+		stopRateAudit(context.Background())
 		return err
 	}
 }
