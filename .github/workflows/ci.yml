@@ -48,6 +48,8 @@ env:
   # 1.26.4..1.26.10 (GO-2026-5037..6809: net/http HTTP/2, html/template,
   # crypto/x509, crypto/tls, net/textproto — see govulncheck history).
   GO_VERSION_DEFAULT: "1.26.10"
+  # Scanner pinned (never @latest); keep in lockstep with security.yml.
+  GOVULNCHECK_VERSION: "v1.9.0"
   NODE_VERSION: "20"
 
 jobs:
@@ -332,7 +334,7 @@ jobs:
       - name: govulncheck (blocking on high/critical CVE)
         run: |
           set -euo pipefail
-          go install golang.org/x/vuln/cmd/govulncheck@latest
+          go install "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}"
           # FR-L.31: blocking on high/critical. govulncheck exits non-zero on any
           # known affecting vuln; we surface the report and fail the job.
           govulncheck ./...

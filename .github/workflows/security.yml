@@ -20,7 +20,13 @@ permissions:
   issues: write
 
 env:
-  GO_VERSION: "1.25"
+  # Same exact patch as ci.yml / release.yml / Dockerfile: govulncheck reports
+  # stdlib vulns against the toolchain it runs on, so a looser version here
+  # scans a Go that is not the one we ship.
+  GO_VERSION: "1.26.10"
+  # Pinned (never @latest): the scanner itself is supply-chain input. Keep in
+  # lockstep with ci.yml / nightly.yml.
+  GOVULNCHECK_VERSION: "v1.9.0"
   NODE_VERSION: "20"
   IMAGE_REF: ghcr.io/${{ github.repository_owner }}/sealkeeper:latest
   # Pinned release asset + SHA-256 (kept in lockstep with release.yml).
@@ -50,14 +56,16 @@ jobs:
         id: gov
         run: |
           set -euo pipefail
-          go install golang.org/x/vuln/cmd/govulncheck@latest
-          set +e
+          go install "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}"
+          # -json ALWAYS exits 0, even when vulns affect our code, so the exit
+          # code cannot be the signal. A finding whose first trace frame names
+          # a function is a symbol-level (reachable) hit — exactly what the
+          # text mode counts as "Your code is affected".
           govulncheck -json ./... > govulncheck.json
-          rc=$?
-          set -e
-          # rc != 0 means at least one affecting vuln; we keep the report and
-          # surface a flag for the issue-creation step.
-          if [ "$rc" -ne 0 ]; then
+          affected="$(jq -s '[.[] | .finding? | select(. != null)
+            | select(.trace[0].function != null) | .osv] | unique | length' govulncheck.json)"
+          echo "govulncheck: ${affected} affecting vulnerabilities"
+          if [ "$affected" -ne 0 ]; then
             echo "findings=true" >> "$GITHUB_OUTPUT"
           else
             echo "findings=false" >> "$GITHUB_OUTPUT"
