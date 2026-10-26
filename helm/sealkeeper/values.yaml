@@ -33,13 +33,10 @@ config:
   # protocol) on the ingress controller's Service so it sees real client IPs.
   trustedProxyCIDRs: ""
   maxLibrarySizeMB: 10
-  maxActiveSessions: 10000
-  sessionTTLSeconds: 900
   adminSessionTTLSeconds: 28800
   adminSessionIdleSeconds: 1800
   swaggerUiEnabled: false
   demoMode: false
-  maintenanceMode: false
 
 # Secrets — see secret.yaml. In production prefer ExternalSecrets / Sealed
 # Secrets and set `secret.create: false` + `secret.existingSecret: <name>`.
