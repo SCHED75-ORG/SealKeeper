@@ -119,6 +119,7 @@ type Server struct {
 	// Constant-latency POST /api/v1/request (FR-B.13, see requestmail.go).
 	requestFloor time.Duration
 	mailSlots    chan struct{}
+	mailQueue    chan struct{}
 	mailWG       sync.WaitGroup
 }
 
@@ -197,6 +198,7 @@ func New(cfg config.Config, logger *slog.Logger) *Server {
 		loginPending:   newLoginPendingStore(5 * time.Minute),
 		requestFloor:   requestLatencyFloor,
 		mailSlots:      make(chan struct{}, mailWorkers),
+		mailQueue:      make(chan struct{}, mailQueueDepth),
 	}
 }
 
