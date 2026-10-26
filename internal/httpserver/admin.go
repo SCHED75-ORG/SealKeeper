@@ -317,11 +317,10 @@ func (s *Server) handleAdminLogout(w http.ResponseWriter, r *http.Request) {
 // assertion exchange. SameSite=Strict and a 5-minute TTL.
 const cookieAdminLoginStep = "sk_admin_login_step"
 
-// cookieAdminLoginAssertion carries the (encrypted-on-disk-only because
-// it's just a JSON blob signed by the WebAuthn library's own challenge)
-// session data from /begin to /finish so the server can stay stateless
-// about the in-flight assertion. Mirrors how the registration path uses
-// cookieWebauthnSession.
+// cookieAdminLoginAssertion carries the WebAuthn session blob from /begin
+// to /finish. It only names the challenge: webauthn.Repo keeps the
+// authoritative SessionData server-side and spends it on the first
+// /finish, so editing or replaying the cookie gains nothing.
 const cookieAdminLoginAssertion = "sk_admin_login_assertion"
 
 // tryWebauthnStepUp checks whether the admin has registered any WebAuthn
