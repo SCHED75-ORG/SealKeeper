@@ -220,9 +220,16 @@ func runServe(args []string) int {
 	// each visitor sees a clean console. The resetter respects ctx so it
 	// shuts down with the rest of the binary; we don't wait on it
 	// explicitly — losing one in-flight reset on shutdown is fine.
+	// The boot snapshot (accounts, branding, SMTP, kv) is the known state
+	// every reset restores, so it is taken before any visitor gets in.
 	if cfg.IsDemo() {
 		logger.Info("demo mode active — data reset every 24h")
-		go demo.NewResetter(store.DB(), logger, 24*time.Hour).Run(ctx)
+		resetter := demo.NewResetter(store.DB(), logger, 24*time.Hour).WithMailStore(srv.MailStore())
+		if err := resetter.Snapshot(ctx); err != nil {
+			logger.Error("demo snapshot failed", "err", err)
+			return 1
+		}
+		go resetter.Run(ctx)
 	}
 
 	if err := srv.Run(ctx); err != nil {
