@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	htmltemplate "html/template"
+	"mime"
 	"net/mail"
 	"strings"
 	texttemplate "text/template"
@@ -35,7 +36,8 @@ func (m Message) String() string {
 	if m.ReplyTo != "" {
 		fmt.Fprintf(&b, "Reply-To: %s\r\n", m.ReplyTo)
 	}
-	fmt.Fprintf(&b, "Subject: %s\r\n", m.Subject)
+	// Q-encoding leaves ASCII untouched and makes accented subjects RFC 2047.
+	fmt.Fprintf(&b, "Subject: %s\r\n", mime.QEncoding.Encode("utf-8", m.Subject))
 	for _, k := range sortedKeys(m.Headers) {
 		fmt.Fprintf(&b, "%s: %s\r\n", k, m.Headers[k])
 	}
@@ -101,7 +103,7 @@ func Assemble(in AssembleInputs) (Message, error) {
 	body := assembleMultipart(boundary, in.Text, in.HTML)
 	msgID := fmt.Sprintf("<%s@%s>", hex.EncodeToString(boundaryBytes(boundary))[:16], in.InstanceDomain)
 
-	return Message{
+	m := Message{
 		From:    sender,
 		To:      in.To,
 		ReplyTo: in.ReplyTo,
@@ -114,7 +116,11 @@ func Assemble(in AssembleInputs) (Message, error) {
 			"X-Mailer":     "SealKeeper",
 		},
 		Body: body,
-	}, nil
+	}
+	if err := checkHeaders(m); err != nil {
+		return Message{}, err
+	}
+	return m, nil
 }
 
 // BuildReveal renders the multipart/alternative body announcing a reveal link.
@@ -161,7 +167,7 @@ func BuildReveal(in RevealInputs) (Message, error) {
 
 	msgID := fmt.Sprintf("<%s@%s>", hex.EncodeToString(boundaryBytes(boundary))[:16], in.InstanceDomain)
 
-	return Message{
+	m := Message{
 		From:    sender,
 		To:      in.To,
 		ReplyTo: in.ReplyTo,
@@ -174,15 +180,60 @@ func BuildReveal(in RevealInputs) (Message, error) {
 			"X-Mailer":     "SealKeeper",
 		},
 		Body: body,
-	}, nil
+	}
+	if err := checkHeaders(m); err != nil {
+		return Message{}, err
+	}
+	return m, nil
 }
 
 func validateRecipient(addr string) error {
 	if addr == "" {
 		return fmt.Errorf("mail: empty recipient")
 	}
-	if _, err := mail.ParseAddress(addr); err != nil {
+	if _, err := NormalizeAddress(addr); err != nil {
 		return fmt.Errorf("mail: invalid recipient %q: %w", addr, err)
+	}
+	return nil
+}
+
+// maxAddressLen is the RFC 5321 path limit.
+const maxAddressLen = 254
+
+// NormalizeAddress accepts only a bare addr-spec ("user@example.org") and
+// returns it lower-cased. Display names, comments and control characters
+// are rejected: net/mail.ParseAddress tolerates CR/LF inside a trailing
+// comment, which let a requester inject headers into outbound mail.
+func NormalizeAddress(raw string) (string, error) {
+	s := strings.ToLower(strings.TrimSpace(raw))
+	if s == "" || len(s) > maxAddressLen {
+		return "", fmt.Errorf("mail: address length out of range")
+	}
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f {
+			return "", fmt.Errorf("mail: control character in address")
+		}
+	}
+	a, err := mail.ParseAddress(s)
+	if err != nil {
+		return "", err
+	}
+	if a.Name != "" || a.Address != s {
+		return "", fmt.Errorf("mail: only a bare address is accepted")
+	}
+	return s, nil
+}
+
+// checkHeaders refuses header values that could break out of their line.
+func checkHeaders(m Message) error {
+	vals := []string{m.From, m.To, m.ReplyTo, m.Subject}
+	for k, v := range m.Headers {
+		vals = append(vals, k, v)
+	}
+	for _, v := range vals {
+		if strings.ContainsAny(v, "\r\n") {
+			return fmt.Errorf("mail: CR/LF in header value %q", v)
+		}
 	}
 	return nil
 }

@@ -446,6 +446,9 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// maxRequestBodyBytes bounds POST /api/v1/request bodies.
+const maxRequestBodyBytes = 4 << 10
+
 type requestPayload struct {
 	Email   string `json:"email"`
 	Domain  string `json:"domain"`
@@ -467,6 +470,9 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(body)
 	}
 
+	// The payload is three short strings; cap it so an attacker can't make
+	// us buffer, hash and audit-log megabytes per request.
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
 	var p requestPayload
 	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
 		// Malformed payload is the one case we DO surface — it cannot leak
@@ -478,12 +484,18 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"email_required"}`, http.StatusBadRequest)
 		return
 	}
+	// Bare addr-spec only: display names / comments are how CR/LF reached
+	// the To: header. A syntax error reveals nothing about the allowlist.
+	email, err := mail.NormalizeAddress(p.Email)
+	if err != nil {
+		http.Error(w, `{"error":"invalid_email"}`, http.StatusBadRequest)
+		return
+	}
 	if s.tokens == nil {
 		http.Error(w, `{"error":"storage_unavailable"}`, http.StatusServiceUnavailable)
 		return
 	}
 
-	email := strings.ToLower(strings.TrimSpace(p.Email))
 	ip := s.clientIP(r)
 	ipHash := hashShort(ip)
 	uaHash := hashShort(r.UserAgent())
