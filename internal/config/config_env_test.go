@@ -88,6 +88,29 @@ func TestLoad_DeprecatedKnobs(t *testing.T) {
 	}
 }
 
+// Regression: the handover doc listed `demo` as an SK_MODE value while
+// validate refuses it with a message that never mentions the real toggle.
+// Demo is SK_DEMO_MODE=true on top of SK_MODE=eval|production; the refusal
+// must say so.
+func TestLoad_DemoIsAToggleNotAMode(t *testing.T) {
+	evalEnv(t)
+	t.Setenv("SK_MODE", "demo")
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "SK_DEMO_MODE=true") {
+		t.Fatalf("Load(SK_MODE=demo) err = %v, want a refusal pointing at SK_DEMO_MODE=true", err)
+	}
+
+	t.Setenv("SK_MODE", "eval")
+	t.Setenv("SK_DEMO_MODE", "true")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load(SK_MODE=eval, SK_DEMO_MODE=true): %v", err)
+	}
+	if !cfg.IsDemo() || !cfg.IsEval() {
+		t.Errorf("IsDemo=%v IsEval=%v, want both", cfg.IsDemo(), cfg.IsEval())
+	}
+}
+
 func TestLoad_YAMLUnknownKeyRejected(t *testing.T) {
 	evalEnv(t)
 	dir := t.TempDir()

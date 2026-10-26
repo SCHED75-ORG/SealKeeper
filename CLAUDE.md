@@ -157,15 +157,15 @@ Login, setup wizard, dashboard, then management surfaces:
 
 ## 5. Run modes
 
-Three modes, decided **at startup** by `SK_MODE`. Switching requires a restart — there is no `/admin/mode` toggle. The dashboard surfaces the current mode and the env envelope required to switch.
+Two run modes, picked **at startup** by `SK_MODE` (`eval` or `production`), plus the public-demo toggle `SK_DEMO_MODE=true` layered on either. `SK_MODE=demo` is **not** a value: `config.validate` refuses it with a message pointing at `SK_DEMO_MODE`. Switching requires a restart — there is no `/admin/mode` toggle. The dashboard surfaces the current mode and the env envelope required to switch.
 
-| Mode         | What flips                                                              |
+| Setting      | What flips                                                              |
 |--------------|-------------------------------------------------------------------------|
-| `eval`       | Auto-generated master secret if missing; in-memory `CaptureSender`; `/admin/captured-mail` exposed; soft rate limits; bootstrap admin password printed once on stdout |
-| `demo`       | Capture sender forced (env-wired SMTP ignored); 1/h IP+email rate limit; integration enable + library upload refused; `internal/demo.Resetter` truncates admin-controlled tables every 24h |
-| `production` (default) | NopSender unless SMTP wired; full rate limits and lockout; no `/__captured_mail`; production banner gone |
+| `SK_MODE=eval` | Auto-generated master secret + SQLite DSN if missing; in-memory `CaptureSender`; `/__captured_mail` + `/admin/captured-mail` expose the whole queue; admin cookies without `Secure` (plain-http localhost); plain `http://` SIEM sinks accepted; bootstrap admin password printed once on stdout; `debug_reveal_url` in `/api/v1/request` replies |
+| `SK_DEMO_MODE=true` | Capture sender forced (env-wired and `/admin/smtp` SMTP ignored); `/__captured_mail` scoped to the caller's own mail; 1/h IP and 1/h email request limits; admin console read-only outside the demo story (domains, policies, elevations, templates stay editable); integration enable + library upload refused; `internal/demo.Resetter` empties the editable tables every 24 h and restores accounts, branding, SMTP override and kv from the boot snapshot |
+| `SK_MODE=production` (default) | `SK_MASTER_SECRET` required (placeholder/weak refused); NopSender unless SMTP wired; full rate limits and lockout; no `/__captured_mail`; HTTP SIEM sinks must be `https://`; no banner |
 
-Demo mode is orthogonal to eval — both can be on. The dashboard mode panel labels the strictest applicable mode (`demo` > `eval` > `production`).
+The dashboard mode panel shows `eval` when `SK_MODE=eval` (even with the demo toggle on), else `demo` when `SK_DEMO_MODE=true`, else `production`; both banners render independently.
 
 ---
 
@@ -177,7 +177,7 @@ Key env vars:
 
 | Variable                         | Default                | Notes                                                       |
 |----------------------------------|------------------------|-------------------------------------------------------------|
-| `SK_MODE`                        | `production`           | `eval` / `demo` / `production`                              |
+| `SK_MODE`                        | `production`           | `eval` / `production` (`demo` is refused — use `SK_DEMO_MODE`) |
 | `SK_BASE_URL`                    | `http://localhost:8443`| Drives reveal URLs + WebAuthn RPID derivation               |
 | `SK_HTTP_LISTEN`                 | `:8443`                | TCP address                                                 |
 | `SK_DATABASE_URL`                | sqlite in eval         | `postgres://…` or `sqlite://…`                              |
@@ -188,7 +188,7 @@ Key env vars:
 | `SK_SMTP_*`                      | unset                  | Env-wired sender; overridden at runtime by `/admin/smtp`    |
 | `SK_TRUSTED_PROXY_CIDRS`         | unset (Compose: `172.31.250.10/32`) | XFF honoured only from these peers, walked right-to-left; validated at startup |
 | `SK_LOG_FORMAT` / `SK_LOG_LEVEL` | `json` / `info`        | slog                                                        |
-| `SK_DEMO_MODE`                   | `false`                | Independent toggle (orthogonal to SK_MODE)                  |
+| `SK_DEMO_MODE`                   | `false`                | Public-demo toggle, orthogonal to `SK_MODE` (see §5)        |
 | `SK_ADMIN_SESSION_TTL_SECONDS`   | `28800` (8 h)          | Absolute admin session lifetime; ≥ 60                       |
 | `SK_ADMIN_SESSION_IDLE_SECONDS`  | `1800` (30 min)        | Admin idle timeout; 60 ≤ idle ≤ TTL                         |
 | `SK_MAX_LIBRARY_SIZE_MB`         | `10`                   | Max `/admin/libraries` upload; 1..1024                      |

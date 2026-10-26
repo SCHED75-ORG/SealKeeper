@@ -264,6 +264,10 @@ func mergeYAMLFile(cfg *Config, path string) error {
 func (c Config) validate() error {
 	switch c.Mode {
 	case ModeProduction, ModeEval:
+	case "demo":
+		// Demo is a toggle layered on a run mode, not a run mode itself.
+		return fmt.Errorf("invalid SK_MODE %q: demo is not a run mode; set SK_DEMO_MODE=true with SK_MODE=%q or %q",
+			c.Mode, ModeProduction, ModeEval)
 	default:
 		return fmt.Errorf("invalid SK_MODE %q (want %q or %q)", c.Mode, ModeProduction, ModeEval)
 	}

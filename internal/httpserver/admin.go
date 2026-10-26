@@ -2517,9 +2517,10 @@ const adminDashboardTpl = `{{define "dashboard.html"}}{{template "header" .}}
 {{ if ne .Mode "production" }}
 <section style="margin-top:1.5rem; background:#FBF7EE; border:1px solid var(--gold); border-radius:2px; padding:1rem 1.25rem">
   <h3 style="margin-top:0; color:var(--ink)">Switching to production mode</h3>
-  <p style="margin:0.4rem 0">The run mode is decided at startup by the <code>SK_MODE</code> environment variable. Switching requires a restart with the right env in place.</p>
+  <p style="margin:0.4rem 0">The run mode is decided at startup by the <code>SK_MODE</code> environment variable (<code>eval</code> or <code>production</code>); the public demo is the separate <code>SK_DEMO_MODE</code> toggle. Switching requires a restart with the right env in place.</p>
   <p style="margin:0.4rem 0"><strong>Minimum production envelope</strong> (set before <code>docker run</code>):</p>
   <pre style="margin:0.5rem 0">SK_MODE=production
+SK_DEMO_MODE=false
 SK_BASE_URL=https://seal.example.eu
 SK_MASTER_SECRET=$(openssl rand -base64 32)
 SK_DATABASE_URL=postgres://sk:secret@db:5432/sealkeeper?sslmode=require
