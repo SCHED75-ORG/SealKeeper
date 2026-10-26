@@ -4199,7 +4199,14 @@ func (s *Server) handleAdminSMTPClear(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/admin/smtp?err=internal", http.StatusSeeOther)
 		return
 	}
-	s.auditAppend(r.Context(), "smtp.cleared", a.Email, "", nil)
+	// The cleared relay must stop carrying mail now, not at next restart.
+	if err := s.RebuildSMTPSender(r.Context()); err != nil {
+		s.logger.Error("RebuildSMTPSender after clear failed; reinstating boot sender", "err", err)
+		s.resetSMTPSender()
+	}
+	s.auditAppend(r.Context(), "smtp.cleared", a.Email, "", map[string]any{
+		"transport": s.currentSender().Name(),
+	})
 	http.Redirect(w, r, "/admin/smtp?ok=cleared", http.StatusSeeOther)
 }
 

@@ -151,9 +151,12 @@ type Server struct {
 	// sender is never nil — capture in eval, noop otherwise. /admin/smtp
 	// swaps it while requests read it: go through currentSender /
 	// storeSender. smtpMu serialises RebuildSMTPSender so the last
-	// rebuild always installs the latest saved relay.
-	sender atomic.Pointer[senderRef]
-	smtpMu sync.Mutex
+	// rebuild always installs the latest saved relay. bootSender is the
+	// transport to fall back to when the /admin/smtp override is cleared:
+	// the env-wired relay from SetSender, else capture / noop per mode.
+	sender     atomic.Pointer[senderRef]
+	bootSender atomic.Pointer[senderRef]
+	smtpMu     sync.Mutex
 }
 
 // New builds an HTTP server with the given configuration.
@@ -235,6 +238,7 @@ func New(cfg config.Config, logger *slog.Logger) *Server {
 		mailQueue:      make(chan struct{}, mailQueueDepth),
 	}
 	s.storeSender(defaultSender)
+	s.bootSender.Store(&senderRef{defaultSender})
 	return s
 }
 
@@ -277,6 +281,9 @@ func (s *Server) SetSender(sender mailer.Sender) {
 			return
 		}
 	}
+	s.smtpMu.Lock()
+	defer s.smtpMu.Unlock()
+	s.bootSender.Store(&senderRef{sender})
 	s.storeSender(sender)
 }
 
@@ -332,9 +339,10 @@ func (s *Server) SetWebauthn(repo *webauthn.Repo) { s.webauthn = repo }
 func (s *Server) SetSMTPConfig(repo *smtpconfig.Repo) { s.smtpConfig = repo }
 
 // RebuildSMTPSender refreshes the active mail sender from the DB
-// override. When the override row is empty (no host saved) the
-// existing env-wired sender stays put. Demo mode short-circuits to
-// keep the capture sender pinned regardless of what's saved.
+// override. When the override row is empty (no host saved, or just
+// cleared) the boot sender is reinstated so a previously saved relay
+// stops carrying mail at once. Demo mode short-circuits to keep the
+// capture sender pinned regardless of what's saved.
 func (s *Server) RebuildSMTPSender(ctx context.Context) error {
 	if s.smtpConfig == nil {
 		return nil
@@ -346,6 +354,7 @@ func (s *Server) RebuildSMTPSender(ctx context.Context) error {
 	defer s.smtpMu.Unlock()
 	cfg, err := s.smtpConfig.Get(ctx)
 	if errors.Is(err, smtpconfig.ErrNotConfigured) {
+		s.storeSender(s.bootSender.Load().Sender)
 		return nil
 	}
 	if err != nil {
@@ -371,6 +380,15 @@ func (s *Server) RebuildSMTPSender(ctx context.Context) error {
 	// demo so direct assignment is fine.
 	s.storeSender(sender)
 	return nil
+}
+
+// resetSMTPSender drops any admin-saved relay and reinstates the boot
+// sender without reading the DB — the fail-closed path for a clear whose
+// rebuild errored.
+func (s *Server) resetSMTPSender() {
+	s.smtpMu.Lock()
+	defer s.smtpMu.Unlock()
+	s.storeSender(s.bootSender.Load().Sender)
 }
 
 // resolveBranding returns the current branding row. Used by every
