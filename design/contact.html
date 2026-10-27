@@ -86,9 +86,12 @@
     <span class="eyebrow">Community</span>
     <h1>Contact</h1>
     <p class="lead">
-      Three dedicated channels exist for different needs. Choose the one that
-      matches your message. All addresses are routed via Cloudflare Email
-      Routing to the project maintainer.
+      Four channels exist for different needs: three dedicated email addresses
+      (security, conduct, conduct escalation) and GitHub Discussions for
+      everything else. Choose the one that matches your message. The security
+      and conduct addresses are routed via Cloudflare Email Routing to the
+      project maintainer; the escalation address reaches a trusted third party
+      instead.
     </p>
   </div>
 </section>
@@ -100,8 +103,8 @@
     <p>
       For any security vulnerability, suspected exploit, cryptographic weakness, or other
       issue that could compromise the confidentiality or integrity of SealKeeper deployments,
-      please use the following address. PGP-encrypted reports are preferred and will be
-      acknowledged within 72 hours.
+      please use one of the two private channels below. PGP encryption is preferred. Every
+      report is acknowledged within 72 hours. Never open a public issue for a vulnerability.
     </p>
     <div class="callout callout--night">
       <p style="margin: 0;">
@@ -112,7 +115,12 @@
         <a href="/security.html">Security policy</a> for the responsible disclosure timeline,
         and verify the key against
         <a href="https://keys.openpgp.org/search?q=security@sealkeeper.eu" rel="external">keys.openpgp.org</a>
-        or <code>/.well-known/pgp-key.asc</code> before encrypting sensitive content.
+        or <a href="/.well-known/pgp-key.asc"><code>/.well-known/pgp-key.asc</code></a> before encrypting sensitive content.
+      </p>
+      <p style="margin: 0.5rem 0 0;">
+        <strong>GitHub private advisory.</strong> Alternatively, use the
+        <a href="https://github.com/SCHED75-ORG/SealKeeper/security/advisories/new" rel="external">private vulnerability report form</a>
+        on the repository. The report stays visible only to you and the maintainer until the advisory is published.
       </p>
     </div>
 
@@ -137,8 +145,8 @@
     <p>
       If your concern involves the project maintainer themselves, or if you feel that a
       Code of Conduct report has not been handled appropriately, please use the escalation
-      address. This channel is monitored by a trusted third party (to be confirmed before
-      the v0.1.0 release) and bypasses the regular maintainer.
+      address. This channel is monitored by an external trusted third party who can
+      intervene as a neutral mediator, and bypasses the regular maintainer.
     </p>
     <div class="callout callout--gold">
       <p style="margin: 0;">
@@ -198,12 +206,12 @@
           <span>SealKeeper</span>
         </a>
         <p style="margin-top: 1rem;">
-          Ephemeral, zero-knowledge password delivery. The server can't read
-          what it transmits.
+          Ephemeral, single-use password proposals. Passwords are generated
+          in your browser; the server never sees them.
         </p>
         <p style="font-size: 0.78rem; color: var(--fg-muted); margin-top: 1rem;">
-          Licensed under the <a href="https://www.gnu.org/licenses/agpl-3.0.txt" rel="license">GNU Affero General Public License v3</a>.
-          Copyright © 2026 Pascal-Louis Tessier.
+          Licensed under the <a href="https://www.gnu.org/licenses/agpl-3.0.txt" rel="license">GNU Affero General Public License v3 or later</a>.
+          Copyright © 2026 Pascal-Louis Darmon.
         </p>
       </div>
       <div class="footer__col">
@@ -212,7 +220,7 @@
           <li><a href="https://github.com/SCHED75-ORG/SealKeeper">GitHub repository</a></li>
           <li><a href="https://github.com/SCHED75-ORG/SealKeeper">Source code</a></li>
           <li><a href="https://github.com/SCHED75-ORG/SealKeeper/releases">Releases</a></li>
-          <li><a href="https://github.com/SCHED75-ORG/SealKeeper/projects">Roadmap</a></li>
+          <li><a href="https://github.com/SCHED75-ORG/SealKeeper/blob/main/docs/prd/00-work-plan.md">Roadmap</a></li>
         </ul>
       </div>
       <div class="footer__col">

@@ -3,7 +3,7 @@
 **Statut** : validé
 **Version** : 1.0
 **Dernière mise à jour** : 2026-05-16
-**Auteur** : Pascal-Louis Tessier (assisté par Daneel / Claude)
+**Auteur** : Pascal-Louis Darmon (assisté par Daneel / Claude)
 **Dépendances** : module A (générateur), module C (policy descriptor), module D (backend), module G (API)
 
 ---
@@ -342,7 +342,7 @@ Les décisions suivantes sont prises et liantes pour cette version :
 
 ## 9. Open questions
 
-**Toutes les questions ouvertes ont été tranchées le 16 mai 2026** par Pascal-Louis Tessier après recommandation de Daneel. Les 7 décisions correspondantes sont consignées en §8 sous les références D-B.11 à D-B.17. Le PRD B est intégralement validé en v1.0.
+**Toutes les questions ouvertes ont été tranchées le 16 mai 2026** par Pascal-Louis Darmon après recommandation de Daneel. Les 7 décisions correspondantes sont consignées en §8 sous les références D-B.11 à D-B.17. Le PRD B est intégralement validé en v1.0.
 
 Une question (l'ancienne 9.6, *mode démo en production*) a été renvoyée au module H (déploiement) plutôt que tranchée ici.
 
@@ -367,8 +367,8 @@ Une question (l'ancienne 9.6, *mode démo en production*) a été renvoyée au m
 
 | Version | Date | Auteur | Changements |
 |---|---|---|---|
-| 1.0 | 2026-05-16 | P.-L. Tessier (Daneel) | **Version validée** — 7 décisions tranchées (D-B.11 à D-B.17) : 5 propositions par défaut, 3 re-générations, niveau ANSSI explicite, notification B2/B3 par défaut, compte à rebours en minutes, pas de mode démo en prod, pas de confirmation re-gen. Question 9.6 renvoyée au module H |
-| 0.1 | 2026-05-16 | P.-L. Tessier (Daneel) | Création initiale, workflow complet, 41 FR, 10 décisions tranchées, 7 questions ouvertes |
+| 1.0 | 2026-05-16 | P.-L. Darmon (Daneel) | **Version validée** — 7 décisions tranchées (D-B.11 à D-B.17) : 5 propositions par défaut, 3 re-générations, niveau ANSSI explicite, notification B2/B3 par défaut, compte à rebours en minutes, pas de mode démo en prod, pas de confirmation re-gen. Question 9.6 renvoyée au module H |
+| 0.1 | 2026-05-16 | P.-L. Darmon (Daneel) | Création initiale, workflow complet, 41 FR, 10 décisions tranchées, 7 questions ouvertes |
 
 ---
 

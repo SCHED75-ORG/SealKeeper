@@ -6,9 +6,8 @@ SealKeeper handles cryptographic operations and credential transmission. We take
 
 | Version | Supported |
 |---|---|
-| Latest minor release | ✅ Active support |
-| Previous minor release | ✅ Security fixes only |
-| Older versions | ❌ Please upgrade |
+| 0.1.x | ✅ Supported |
+| < 0.1.0 | ❌ Please upgrade |
 
 Until we reach v1.0.0, only the latest tagged release receives security updates.
 
@@ -33,8 +32,6 @@ Full key:    https://sealkeeper.eu/.well-known/pgp-key.asc
 Keyserver:   https://keys.openpgp.org/search?q=security@sealkeeper.eu
 ```
 
-The key will be published before the first tagged release. Until then, send reports unencrypted to the email address above; we will follow up by encrypted channel if needed.
-
 ### Release signing key
 
 Release tags and the `SHA256SUMS` file attached to every release are signed
@@ -49,7 +46,7 @@ User ID:     Pascal-Louis DARMON
 Full key:    docs/security/release-signing-key.asc (this repository)
 ```
 
-`docs/security/verification.md` explains how to check a release with it.
+[`docs/security/verification.md`](docs/security/verification.md) explains how to check a release with it.
 
 ## What to Include
 
@@ -65,7 +62,7 @@ We will respond within **72 hours** with an acknowledgement and an initial asses
 
 ## Hall of thanks
 
-Researchers who report a valid vulnerability are credited in the published advisory and listed in the [hall of thanks](design/hall-of-thanks.html) (also on the project website), and receive a signed, numbered certificate of thanks — unless they ask to remain anonymous.
+Researchers who report a valid vulnerability are credited in the published advisory and listed in the [hall of thanks](https://sealkeeper.eu/hall-of-thanks.html) on the project website, and receive a signed, numbered certificate of thanks — unless they ask to remain anonymous.
 
 | Researcher | Advisories |
 |------------|------------|
@@ -76,9 +73,9 @@ Researchers who report a valid vulnerability are credited in the published advis
 The following are considered in scope:
 
 - The Go service in `cmd/sealkeeper` and packages under `internal/`
-- The client-side decryption JavaScript published with the project
+- The client-side generation JavaScript (`web/`)
 - The default Docker image and Docker Compose configuration
-- The Astro-based website source under `web/`
+- The static website under `design/`
 
 The following are out of scope:
 
@@ -119,7 +116,16 @@ SealKeeper is a community-funded open source project and does not currently offe
 
 ## Past Advisories
 
-No advisories published yet — the project is in pre-release. Once tagged releases begin, this section will list all past advisories with their CVE identifiers (if applicable).
+75 advisories have been published, all affecting versions before 0.1.0 and all fixed in [v0.1.0](https://github.com/SCHED75-ORG/SealKeeper/releases/tag/v0.1.0):
+
+| Severity | Advisories |
+|---|---|
+| Critical | 1 |
+| High | 8 |
+| Medium | 28 |
+| Low | 38 |
+
+The full list, with CVE identifiers where assigned, is on the [repository's security advisories page](https://github.com/SCHED75-ORG/SealKeeper/security/advisories).
 
 ---
 

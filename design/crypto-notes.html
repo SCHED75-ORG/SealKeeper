@@ -101,31 +101,34 @@
 
 <table>
   <thead>
-    <tr><th>Purpose</th><th>Algorithm</th><th>Parameters</th><th>Source</th></tr>
+    <tr><th>Purpose</th><th>Algorithm</th><th>Parameters</th><th>Where</th></tr>
   </thead>
   <tbody>
-    <tr><td>Password generation</td><td><code>crypto/rand</code></td><td>OS-level CSPRNG</td><td>Go stdlib</td></tr>
-    <tr><td>Key generation</td><td><code>crypto/rand</code></td><td>256 bits, uniform</td><td>Go stdlib</td></tr>
-    <tr><td>Nonce generation</td><td><code>crypto/rand</code></td><td>96 bits, unique per encryption</td><td>Go stdlib</td></tr>
-    <tr><td>Encryption</td><td>AES-256-GCM</td><td>256-bit key, 96-bit nonce, 128-bit tag</td><td><code>crypto/aes</code> + <code>crypto/cipher</code></td></tr>
-    <tr><td>Admin password storage</td><td>Argon2id</td><td>memory=64 MiB, iterations=3, parallelism=4</td><td><code>golang.org/x/crypto/argon2</code></td></tr>
-    <tr><td>Audit log signing</td><td>HMAC-SHA-256</td><td>Chained per-entry</td><td><code>crypto/hmac</code></td></tr>
-    <tr><td>API token format</td><td>Base64URL-encoded random</td><td>256 bits of entropy</td><td><code>crypto/rand</code></td></tr>
-    <tr><td>TLS termination</td><td>TLS 1.2 / 1.3</td><td>Modern ciphersuites only</td><td>Reverse proxy or Cloudflare</td></tr>
+    <tr><td>Password generation</td><td><code>crypto.getRandomValues()</code> + rejection sampling</td><td>Unbiased integer in <code>[0, max)</code>; never <code>Math.random()</code></td><td>Recipient's browser (WebCrypto)</td></tr>
+    <tr><td>Reveal token</td><td><code>crypto/rand</code></td><td>32 bytes (256 bits), base64url without padding</td><td>Server, Go stdlib</td></tr>
+    <tr><td>Reveal token storage</td><td>SHA-256</td><td>Over <code>"sealkeeper-reveal-token:" + token</code>; only the digest is stored</td><td>Server, <code>crypto/sha256</code></td></tr>
+    <tr><td>Operator secrets at rest</td><td>AES-256-GCM</td><td>256-bit key, 96-bit random nonce per seal, 128-bit tag, per-field AAD</td><td>Server, <code>crypto/aes</code> + <code>crypto/cipher</code></td></tr>
+    <tr><td>Operator passwords</td><td>bcrypt</td><td><code>bcrypt.DefaultCost</code>; 72-byte input limit</td><td>Server, <code>golang.org/x/crypto/bcrypt</code></td></tr>
+    <tr><td>Operator second factor</td><td>TOTP (RFC 6238, HMAC-SHA-1) or WebAuthn / FIDO2</td><td>160-bit secret, 6 digits, 30 s step, ±1 step drift, each step accepted once</td><td>Server, <code>internal/totp</code>, <code>go-webauthn</code></td></tr>
+    <tr><td>Audit log chain</td><td>HMAC-SHA-256</td><td>Key = HKDF-SHA-256(master secret, no salt, info <code>sealkeeper-audit-v1</code>), 32 bytes</td><td>Server, <code>crypto/hkdf</code> + <code>crypto/hmac</code></td></tr>
+    <tr><td>IP / User-Agent pseudonyms</td><td>HMAC-SHA-256, truncated to 64 bits</td><td>Key = SHA-256(<code>"sealkeeper-pseudonym:"</code> + master secret)</td><td>Server, <code>crypto/hmac</code></td></tr>
+    <tr><td>Release integrity</td><td>cosign keyless, SLSA provenance, OpenPGP</td><td>Image signature in Rekor; GPG detached signature over <code>SHA256SUMS</code></td><td>GitHub Actions release workflow</td></tr>
+    <tr><td>TLS termination</td><td>TLS</td><td>The binary listens on plain HTTP</td><td>Reverse proxy (Caddy in the shipped Compose stack)</td></tr>
   </tbody>
 </table>
 
 <div class="callout callout--night">
   <strong>No custom cryptography.</strong> SealKeeper composes well-understood
-  primitives from the Go standard library. There is no custom encryption
-  scheme, no rolled-our-own MAC, no novel KDF. The novelty is in the operational
-  envelope around these primitives, not in the primitives themselves.
+  primitives from the Go standard library, <code>golang.org/x/crypto</code> and
+  the browser's WebCrypto API. There is no custom cipher, no hand-rolled MAC,
+  no novel KDF. The design work is in what the server is <em>not</em> given:
+  it never sees a generated password.
 </div>
 
-<h2 id="lifecycle">2 · Key lifecycle</h2>
+<h2 id="reveal-flow">2 · The reveal flow</h2>
 
-<figure aria-labelledby="lifecycle-caption">
-  <svg viewBox="0 0 720 280" role="img" aria-hidden="true">
+<figure aria-labelledby="flow-caption">
+  <svg viewBox="0 0 720 300" role="img" aria-hidden="true">
     <defs>
       <marker id="arr2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
         <path d="M0 0 L10 5 L0 10 z" fill="#7A1F2B"/>
@@ -133,181 +136,275 @@
     </defs>
 
     <g font-family="Inter, system-ui, sans-serif" font-size="11" fill="currentColor" opacity="0.6" letter-spacing="2">
-      <text x="80" y="22" text-anchor="middle">SERVER MEMORY</text>
-      <text x="360" y="22" text-anchor="middle">URL FRAGMENT</text>
+      <text x="80" y="22" text-anchor="middle">SERVER</text>
+      <text x="360" y="22" text-anchor="middle">EMAIL</text>
       <text x="640" y="22" text-anchor="middle">RECIPIENT BROWSER</text>
     </g>
 
     <g fill="none" stroke="currentColor" stroke-width="0.8">
-      <rect x="20"  y="40" width="120" height="200" opacity="0.4"/>
-      <rect x="300" y="40" width="120" height="200" opacity="0.4"/>
-      <rect x="580" y="40" width="120" height="200" opacity="0.4"/>
+      <rect x="20"  y="40" width="120" height="190" opacity="0.4"/>
+      <rect x="300" y="40" width="120" height="190" opacity="0.4"/>
+      <rect x="580" y="40" width="120" height="190" opacity="0.4"/>
     </g>
 
     <g transform="translate(30 70)">
       <rect width="100" height="36" fill="#7A1F2B"/>
       <text x="50" y="15" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="9" fill="#F4EFE6">crypto/rand</text>
-      <text x="50" y="28" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="9" fill="#F4EFE6">256 bits</text>
+      <text x="50" y="28" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="9" fill="#F4EFE6">256-bit token</text>
     </g>
     <g transform="translate(30 130)">
-      <text x="50" y="14" text-anchor="middle" font-family="Inter, sans-serif" font-size="9" fill="currentColor" opacity="0.6">used to encrypt</text>
-      <text x="50" y="28" text-anchor="middle" font-family="Inter, sans-serif" font-size="9" fill="currentColor" opacity="0.6">composed in URL</text>
-      <text x="50" y="42" text-anchor="middle" font-family="Inter, sans-serif" font-size="9" fill="currentColor" opacity="0.6">discarded from RAM</text>
-      <text x="50" y="56" text-anchor="middle" font-family="Inter, sans-serif" font-size="9" fill="currentColor" opacity="0.6">no swap, no log</text>
+      <text x="50" y="14" text-anchor="middle" font-family="Inter, sans-serif" font-size="9" fill="currentColor" opacity="0.6">stores SHA-256</text>
+      <text x="50" y="28" text-anchor="middle" font-family="Inter, sans-serif" font-size="9" fill="currentColor" opacity="0.6">of the token only</text>
+      <text x="50" y="42" text-anchor="middle" font-family="Inter, sans-serif" font-size="9" fill="currentColor" opacity="0.6">expires in 15 min</text>
+      <text x="50" y="56" text-anchor="middle" font-family="Inter, sans-serif" font-size="9" fill="currentColor" opacity="0.6">no password, ever</text>
     </g>
 
     <g transform="translate(310 80)">
       <rect width="100" height="36" fill="#C9A961"/>
-      <text x="50" y="15" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="9" fill="#1A1814">URL #K</text>
+      <text x="50" y="15" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="9" fill="#1A1814">/reveal/&lt;token&gt;</text>
       <text x="50" y="28" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="9" fill="#1A1814">in email body</text>
     </g>
     <g transform="translate(310 140)">
-      <text x="50" y="14" text-anchor="middle" font-family="Inter, sans-serif" font-size="9" fill="currentColor" opacity="0.6">fragment never</text>
-      <text x="50" y="28" text-anchor="middle" font-family="Inter, sans-serif" font-size="9" fill="currentColor" opacity="0.6">transmitted on</text>
-      <text x="50" y="42" text-anchor="middle" font-family="Inter, sans-serif" font-size="9" fill="currentColor" opacity="0.6">subsequent HTTP</text>
-      <text x="50" y="56" text-anchor="middle" font-family="Inter, sans-serif" font-size="9" fill="currentColor" opacity="0.6">requests (RFC 3986)</text>
+      <text x="50" y="14" text-anchor="middle" font-family="Inter, sans-serif" font-size="9" fill="currentColor" opacity="0.6">token is a path</text>
+      <text x="50" y="28" text-anchor="middle" font-family="Inter, sans-serif" font-size="9" fill="currentColor" opacity="0.6">segment; the link</text>
+      <text x="50" y="42" text-anchor="middle" font-family="Inter, sans-serif" font-size="9" fill="currentColor" opacity="0.6">carries no password</text>
+      <text x="50" y="56" text-anchor="middle" font-family="Inter, sans-serif" font-size="9" fill="currentColor" opacity="0.6">and no key</text>
     </g>
 
     <g transform="translate(590 80)">
       <rect width="100" height="36" fill="#1E2D45"/>
-      <text x="50" y="15" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="9" fill="#F4EFE6">K parsed from</text>
-      <text x="50" y="28" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="9" fill="#F4EFE6">window.location</text>
+      <text x="50" y="15" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="9" fill="#F4EFE6">getRandomValues()</text>
+      <text x="50" y="28" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="9" fill="#F4EFE6">over the policy</text>
     </g>
     <g transform="translate(590 140)">
-      <text x="50" y="14" text-anchor="middle" font-family="Inter, sans-serif" font-size="9" fill="currentColor" opacity="0.6">used to decrypt</text>
-      <text x="50" y="28" text-anchor="middle" font-family="Inter, sans-serif" font-size="9" fill="currentColor" opacity="0.6">displayed once</text>
-      <text x="50" y="42" text-anchor="middle" font-family="Inter, sans-serif" font-size="9" fill="currentColor" opacity="0.6">javascript variable</text>
-      <text x="50" y="56" text-anchor="middle" font-family="Inter, sans-serif" font-size="9" fill="currentColor" opacity="0.6">scope-bounded</text>
+      <text x="50" y="14" text-anchor="middle" font-family="Inter, sans-serif" font-size="9" fill="currentColor" opacity="0.6">proposals built</text>
+      <text x="50" y="28" text-anchor="middle" font-family="Inter, sans-serif" font-size="9" fill="currentColor" opacity="0.6">in the page</text>
+      <text x="50" y="42" text-anchor="middle" font-family="Inter, sans-serif" font-size="9" fill="currentColor" opacity="0.6">never sent back</text>
+      <text x="50" y="56" text-anchor="middle" font-family="Inter, sans-serif" font-size="9" fill="currentColor" opacity="0.6">to the server</text>
     </g>
 
     <g font-family="JetBrains Mono, monospace" font-size="9">
       <path d="M145 95 L 295 95" fill="none" stroke="#7A1F2B" stroke-width="1.2" marker-end="url(#arr2)"/>
-      <text x="220" y="88" text-anchor="middle" fill="currentColor" opacity="0.7">embed in URL</text>
+      <text x="220" y="88" text-anchor="middle" fill="currentColor" opacity="0.7">send link</text>
 
       <path d="M420 95 L 580 95" fill="none" stroke="#7A1F2B" stroke-width="1.2" marker-end="url(#arr2)"/>
       <text x="500" y="88" text-anchor="middle" fill="currentColor" opacity="0.7">user clicks link</text>
+
+      <path d="M640 230 L 640 262 L 80 262 L 80 235" fill="none" stroke="#7A1F2B" stroke-width="1.2" marker-end="url(#arr2)"/>
+      <text x="360" y="255" text-anchor="middle" fill="currentColor" opacity="0.7">POST /api/v1/policy {"token":…} — consumed once</text>
+      <text x="360" y="285" text-anchor="middle" fill="currentColor" opacity="0.7">← policy descriptor (JSON) · second use → 410 Gone</text>
     </g>
   </svg>
-  <figcaption id="lifecycle-caption">
-    The 256-bit key K is generated server-side, used to encrypt, embedded in the URL, sent via
-    email, and immediately discarded from server memory. It exists in the URL fragment
-    until the recipient's browser parses it. After display, the JavaScript scope exits and
-    K is eligible for garbage collection.
+  <figcaption id="flow-caption">
+    The server mints a 256-bit token, stores only its SHA-256 digest and mails a
+    <code>/reveal/&lt;token&gt;</code> link. Opening the link does not consume it;
+    pressing the reveal button sends the token in a JSON body to
+    <code>POST /api/v1/policy</code>, which consumes it atomically and returns the
+    policy descriptor. The browser then generates the proposals locally.
   </figcaption>
 </figure>
 
-<h2 id="password-generation">3 · Password generation specifics</h2>
-
 <p>
-  The server reads bytes from <code>crypto/rand.Reader</code> (which wraps
-  <code>getrandom(2)</code> on Linux, <code>BCryptGenRandom</code> on Windows,
-  <code>arc4random_buf(3)</code> on macOS) and maps them to the configured
-  character set using rejection sampling to avoid modulo bias.
+  Three consequences follow. The database holds no password, no ciphertext of a
+  password and no key that could produce one. The link in the email is a
+  single-use <em>capability</em> to fetch a policy, not a secret envelope.
+  And SealKeeper is <strong>not zero-knowledge</strong>: the server serves both the
+  policy and the JavaScript bundle that performs the generation, so whoever
+  controls the server controls what the browser runs (see
+  <a href="#known-limitations">known limitations</a>).
 </p>
 
-<pre><code>// Pseudocode: bias-free character selection
-charset := []byte("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789")
-threshold := 256 - (256 % len(charset))
-for len(password) &lt; targetLength {
-  b := make([]byte, 1)
-  _, _ = crypto/rand.Read(b)
-  if b[0] &lt; byte(threshold) {
-    password = append(password, charset[b[0] % byte(len(charset))])
-  }
+<h2 id="password-generation">3 · Password generation in the browser</h2>
+
+<p>
+  The generation bundle (<code>sealkeeper-generation.umd.js</code>) has a single
+  module that touches randomness. Every draw goes through
+  <code>crypto.getRandomValues()</code>; a uniform index in <code>[0, max)</code>
+  is obtained by masking a 32-bit draw to the next power of two and rejecting
+  values that land at or above <code>max</code>, which removes modulo bias.
+</p>
+
+<pre><code>// web/src/crypto.js — cryptoRandomInt(max), abridged
+let mask = max - 1;
+mask |= mask &gt;&gt;&gt; 1;  mask |= mask &gt;&gt;&gt; 2;  mask |= mask &gt;&gt;&gt; 4;
+mask |= mask &gt;&gt;&gt; 8;  mask |= mask &gt;&gt;&gt; 16; mask &gt;&gt;&gt;= 0;
+const buf = new Uint32Array(1);
+for (;;) {
+  crypto.getRandomValues(buf);
+  const candidate = (buf[0] &amp; mask) &gt;&gt;&gt; 0;
+  if (candidate &lt; max) return candidate;   // acceptance ≥ 50 %
 }</code></pre>
 
-<p>
-  The entropy of a generated password is <code>length × log2(charsetSize)</code>
-  bits. For the default <code>alphanumeric</code> policy with 20 characters,
-  that yields ≈ 119 bits — well above the 90 bits considered safe against
-  generic offline cryptanalysis through 2050.
-</p>
-
-<h2 id="url-fragment">4 · URL fragment design</h2>
-
-<p>
-  The decryption key <code>K</code> is encoded as URL-safe base64 (RFC 4648
-  §5, no padding) and appended to the link after a <code>#</code> separator.
-  The link sent by email therefore looks like:
-</p>
-
-<pre><code>https://seal.example.eu/r/01HXR7P9Q3Z8F4N2K6V1J5W2YB#YlpHaG9zYXNzaXNwOXAxbjJzaDM</code></pre>
-
-<p>The choice of URL fragment rather than query string or path is deliberate and rests on RFC 3986 §3.5:</p>
-
-<div class="callout">
-  <strong>RFC 3986 §3.5.</strong> "The fragment identifier component of a URI
-  allows indirect identification of a secondary resource [...] Although the
-  fragment identifier is not used in the scheme-specific processing of a URI,
-  it is appended to the URI for use by the agent. [...] As such, the fragment
-  identifier is not sent to the server."
-</div>
-
-<p>
-  All major browsers (Chromium, Firefox, Safari, Edge) comply with this
-  specification. When the recipient clicks the link, their browser issues a
-  GET request to <code>https://seal.example.eu/r/01HXR7P9Q3Z8F4N2K6V1J5W2YB</code>
-  without the fragment. The JavaScript on the response page parses
-  <code>window.location.hash</code> locally to obtain <code>K</code>.
-</p>
-
-<h2 id="storage">5 · Ciphertext storage</h2>
-
-<p>
-  Ciphertexts are stored in Redis (or any Redis-protocol-compatible store like
-  KeyDB or Dragonfly) with a TTL set to the policy's configured lifetime.
-  Each entry consists of:
-</p>
+<p>Three generators consume these draws, selected by the policy the operator assigned:</p>
 
 <table>
   <thead>
-    <tr><th>Field</th><th>Format</th><th>Purpose</th></tr>
+    <tr><th>Generator</th><th>What it draws</th><th>Target level</th></tr>
   </thead>
   <tbody>
-    <tr><td><code>id</code></td><td>26-char ULID</td><td>Public identifier in the URL path</td></tr>
-    <tr><td><code>ciphertext</code></td><td>raw bytes</td><td>AES-256-GCM-sealed password</td></tr>
-    <tr><td><code>nonce</code></td><td>12 bytes</td><td>Unique nonce used during encryption</td></tr>
-    <tr><td><code>created_at</code></td><td>RFC 3339 timestamp</td><td>Used for TTL and audit</td></tr>
-    <tr><td><code>audit_id</code></td><td>ULID</td><td>Reference to audit log entry</td></tr>
+    <tr><td>G1 · quotations</td><td>One citation from the operator's corpus, admin-chosen transforms, groups of random digits, one separator</td><td>B1 (≥ 50 bits)</td></tr>
+    <tr><td>G2 · words</td><td>Independent draws from the operator's dictionary, one separator, one group of random digits</td><td>B2 (≥ 80 bits)</td></tr>
+    <tr><td>G3 · characters</td><td>Random characters from <code>a–z A–Z 0–9</code> (62), or 57 with ambiguous characters excluded, grouped in blocks</td><td>B3 (≥ 100 bits)</td></tr>
   </tbody>
 </table>
 
 <p>
-  No password plaintext, no decryption key, no fragment is ever stored.
-  On first successful read, the entry is deleted using <code>DEL</code> in
-  the same Redis transaction as the read, preventing a second visitor from
-  retrieving it even in race conditions.
+  Entropy is computed under Kerckhoffs' assumption — the attacker knows the
+  policy, the corpus and the dictionary, everything except the draw — and
+  credits only what is actually drawn: distinct library entries, the separator
+  really emitted, the alphabet really used. Deterministic transforms earn
+  nothing; for G1 the figure is a conservative lower bound. The generators and
+  the calculator share one validated reading of the policy parameters, so a
+  size claim that does not match the real draw is rejected rather than
+  credited. The same <code>calculateEntropy</code> function drives the badge on
+  the reveal page and the live preview in the admin policy editor, and the
+  server mirrors its rules before it will serve a policy.
 </p>
-
-<h2 id="audit">6 · Audit log integrity</h2>
 
 <p>
-  Each audit log entry is signed using HMAC-SHA-256 with a server-side secret
-  loaded at startup from <code>SK_AUDIT_HMAC_KEY</code>. The HMAC is computed
-  over the entry's payload concatenated with the HMAC of the previous entry,
-  forming a hash chain. This makes silent deletion or alteration of past
-  entries detectable on verification.
+  The ANSSI levels are fixed thresholds: B1 ≥ 50 bits, B2 ≥ 80 bits,
+  B3 ≥ 100 bits. As a worked example, the default G3 draw of 20 characters
+  from the 62-character alphabet yields 20 × log<sub>2</sub> 62 ≈ 119 bits
+  (≈ 116.7 bits with the 57-character alphabet), which clears B3.
 </p>
 
-<pre><code>entry_N.hmac = HMAC-SHA-256(
-  audit_secret,
-  entry_N.payload || entry_{N-1}.hmac
-)</code></pre>
+<h2 id="reveal-tokens">4 · Reveal tokens</h2>
 
 <p>
-  The admin console offers a <em>Verify audit chain</em> button that walks
-  the chain from the earliest entry and reports any break. This is useful
-  for DPO audits and incident response.
+  A token is 32 bytes from <code>crypto/rand</code>, encoded as base64url without
+  padding. The emailed link carries it as a path segment:
 </p>
 
-<h2 id="known-limitations">7 · Known limitations</h2>
+<pre><code>https://&lt;instance&gt;/reveal/&lt;43-character token&gt;</code></pre>
+
+<table>
+  <thead>
+    <tr><th>Property</th><th>Implementation</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>At rest</td><td>Only <code>token_hash = hex(SHA-256("sealkeeper-reveal-token:" + token))</code> is stored in <code>request_tokens</code> (SQLite or PostgreSQL). A database dump or backup yields no usable link. No key is involved: 256 bits of CSPRNG output cannot be recovered from a digest, and keeping the master secret out of the lookup means rotating it cannot orphan pending links.</td></tr>
+    <tr><td>Lifetime</td><td>15 minutes from issue for an unconsumed link.</td></tr>
+    <tr><td>Opening the link</td><td><code>GET /reveal/&lt;token&gt;</code> only previews the token's state; it does not consume it. The page is sent with <code>Cache-Control: no-store</code> and <code>Referrer-Policy: no-referrer</code>.</td></tr>
+    <tr><td>Consumption</td><td><code>POST /api/v1/policy</code> with <code>{"token":"…"}</code> in a JSON body, same-origin only. In one transaction: <code>UPDATE request_tokens SET consumed_at = ? … WHERE token_hash = ? AND consumed_at IS NULL</code>; zero rows affected means another request won the race.</td></tr>
+    <tr><td>Second use</td><td><code>410 Gone</code> (<code>token_consumed</code>); an expired link is also <code>410</code> (<code>token_expired</code>).</td></tr>
+    <tr><td>Token in a query string</td><td><code>GET /api/v1/policy?token=…</code> is refused with <code>400 token_in_query</code> and never consumed, because URLs end up in proxy and SIEM access logs.</td></tr>
+    <tr><td>Policy first</td><td>The policy is resolved and validated before the token is burned; if it cannot be served the answer is <code>503 policy_unavailable</code> and the link still works.</td></tr>
+    <tr><td>Guessing</td><td>Token lookups (the reveal page and the consuming POST) share a cap of 60 per client IP per 15 minutes, answered with <code>429</code>.</td></tr>
+    <tr><td>Audit</td><td>The audit log and SIEM feeds carry a <code>tok:</code> reference (a truncated, domain-separated SHA-256 of the token), never the token itself.</td></tr>
+  </tbody>
+</table>
+
+<h2 id="keys">5 · Keys and where they come from</h2>
+
+<p>
+  Every long-lived key is derived from one operator-supplied value,
+  <code>SK_MASTER_SECRET</code>: 32 random bytes, base64-encoded
+  (<code>openssl rand -base64 32</code>). In production mode it is mandatory and
+  placeholder or short values are refused at startup; in eval mode one is
+  generated if missing.
+</p>
+
+<table>
+  <thead>
+    <tr><th>Key</th><th>Derivation</th><th>Protects</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>cryptobox key</td><td>The 32 decoded bytes of the master secret, used directly as the AES-256 key (a legacy 32+ character passphrase is hashed with SHA-256 instead)</td><td>Operator secrets at rest</td></tr>
+    <tr><td>Audit chain key</td><td>HKDF-SHA-256, no salt, info <code>sealkeeper-audit-v1</code>, 32 bytes</td><td>Audit log integrity</td></tr>
+    <tr><td>Pseudonym key</td><td>SHA-256(<code>"sealkeeper-pseudonym:"</code> + master secret)</td><td>IP and User-Agent pseudonyms</td></tr>
+  </tbody>
+</table>
+
+<h3 id="secrets-at-rest">Operator secrets at rest</h3>
+
+<p>
+  <code>internal/cryptobox</code> wraps a small set of operator secrets with
+  AES-256-GCM. Each seal draws a fresh 96-bit nonce and stores
+  <code>nonce ‖ ciphertext ‖ tag</code>. Each field binds its own associated data,
+  so a ciphertext copied into another column or another row refuses to decrypt:
+</p>
+
+<table>
+  <thead>
+    <tr><th>Field</th><th>AAD</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Admin TOTP secret and recovery codes</td><td><code>SHA-256("sealkeeper-admin:&lt;id&gt;")</code></td></tr>
+    <tr><td>Setup-wizard draft (secret and codes)</td><td><code>SHA-256("sealkeeper-admin-setup:&lt;id&gt;:&lt;session&gt;")</code></td></tr>
+    <tr><td>SMTP relay password</td><td><code>SHA-256("sealkeeper-smtp")</code></td></tr>
+    <tr><td>Integration (SIEM sink) credentials</td><td><code>SHA-256("sealkeeper-integration:&lt;id&gt;")</code></td></tr>
+  </tbody>
+</table>
+
+<p>Nothing the public flow produces passes through cryptobox: there is no generated password to encrypt.</p>
+
+<h2 id="operator-auth">6 · Operator authentication</h2>
 
 <ul>
-  <li><strong>Key in server memory during email composition.</strong> See the <a href="/threat-model.html#not-defended">threat model</a> for context. This is the principal architectural compromise.</li>
-  <li><strong>No deterministic build reproducibility yet.</strong> The released binaries are built on GitHub Actions with reproducibility flags but not yet attested. Planned for v0.3.0.</li>
-  <li><strong>No post-quantum hybrid encryption.</strong> AES-256-GCM is currently sufficient against known quantum attacks; we have no hybrid KEM in place yet. The TTL nature of stored ciphertexts substantially limits exposure, but long-term retrospective decryption by a future cryptanalytic break cannot be ruled out for any seal that lived even briefly in our store.</li>
-  <li><strong>No formal verification.</strong> The crypto code has not been mechanically verified with a tool like Cryptol or F*. We rely on the audited primitives of the Go standard library and external code review.</li>
-  <li><strong>No independent third-party audit yet.</strong> The codebase is open for audit but has not undergone a paid commissioned review. This is a known item on the roadmap.</li>
+  <li><strong>Passwords.</strong> Hashed with bcrypt at <code>bcrypt.DefaultCost</code>. bcrypt reads only the first 72 bytes of its input; the strength estimate credits nothing beyond them.</li>
+  <li><strong>Strength.</strong> An operator password needs at least 16 characters, three of the four character classes and at least 100 bits of <em>estimated guessing</em> entropy (the B3 floor). The estimator charges dictionary words (with case and leetspeak variants), product, instance and email words, years, sequences, keyboard walks and repetitions at what they cost an attacker who knows the pattern.</li>
+  <li><strong>TOTP.</strong> RFC 6238 with HMAC-SHA-1, 6 digits, 30-second step, a 160-bit secret and one step of tolerated clock drift either way. The last accepted step is recorded per admin, so a code cannot be replayed within its window. Eight recovery codes of 50 bits each are issued at setup.</li>
+  <li><strong>WebAuthn / FIDO2.</strong> Operators may enrol security keys and complete login with an assertion instead of the TOTP code. A signature-counter regression is treated as a cloned authenticator and refused.</li>
+</ul>
+
+<h2 id="audit">7 · Audit log integrity</h2>
+
+<p>
+  Each row of <code>audit_log</code> is chained to the previous one under the
+  audit chain key:
+</p>
+
+<pre><code>entry_hash   = hex(HMAC-SHA-256(audit_chain_key, prev_hash || canonical_v2))
+canonical_v2 = JSON ["sealkeeper-audit-entry-v2", sequence_no, occurred_at,
+                     event_type, actor, target, details_json]</code></pre>
+
+<ul>
+  <li><strong>Head anchor.</strong> A per-row chain cannot show that its newest rows were removed. The single-row table <code>audit_head</code> pins the newest sequence number and hash under its own MAC (a distinct domain tag), advanced in the same transaction as each append, so tail truncation is detected.</li>
+  <li><strong>Retention.</strong> The daily purge deletes whole rows from the old end only (365 days by default, never below 180). The last deleted row is recorded as <code>base_seq</code> / <code>base_hash</code>, bound by the anchor MAC, so the oldest survivor still chains. Rows are never rewritten in place, and the purge refuses to run on a chain that does not verify.</li>
+  <li><strong>Legacy rows.</strong> Rows written before the keyed chain existed (at or below <code>audit_head.legacy_until</code>) verify as plain SHA-256 v1; every later row must verify as v2.</li>
+  <li><strong>Verification.</strong> <code>/admin/audit</code> re-verifies the chain on every page load and shows a <em>chain integrity break</em> warning when it fails — or when verification cannot run at all.</li>
+</ul>
+
+<div class="callout">
+  <strong>Residual risk.</strong> The scheme is symmetric. An attacker with write
+  access to the database who saved an earlier, still MAC-valid copy of
+  <code>audit_head</code> can cut the tail and write the copy back; the server
+  catches this only while a process that saw the newer head is still running.
+  Forwarding events to a SIEM gives an independent record of the real sequence.
+</div>
+
+<h2 id="pseudonymisation">8 · Pseudonymisation</h2>
+
+<p>
+  Client IP addresses and User-Agent strings never enter the audit log in clear.
+  They are replaced by the first 64 bits of an HMAC-SHA-256 keyed with the
+  pseudonym key. An unkeyed hash would not do: the whole IPv4 space can be
+  hashed in minutes, so a plain digest of an address is still personal data.
+</p>
+
+<h2 id="release-integrity">9 · Release integrity</h2>
+
+<ul>
+  <li><strong>Container image</strong> <code>ghcr.io/sched75-org/sealkeeper</code>: signed with cosign keyless (Sigstore, Rekor transparency log), with an SLSA build-provenance attestation and a CycloneDX 1.5 SBOM attested to it.</li>
+  <li><strong>Standalone binaries</strong>: CycloneDX 1.5 SBOMs and a <code>SHA256SUMS</code> file with a detached GPG signature by the maintainer key <code>BB1F EC0B 3D83 B6F0 3CCF 2869 FA3F BAF2 05E4 48DA</code>.</li>
+  <li><strong>The JavaScript bundle</strong> is built from source inside the image build and copied into the image, and embedded into the standalone binaries; it is therefore covered by the image signature and the checksums. It has no separate signature and the reveal page does not use Subresource Integrity.</li>
+</ul>
+
+<p>
+  Verification steps are in
+  <a href="https://github.com/SCHED75-ORG/SealKeeper/blob/main/docs/security/verification.md">docs/security/verification.md</a>.
+</p>
+
+<h2 id="known-limitations">10 · Known limitations</h2>
+
+<ul>
+  <li><strong>A compromised server can weaken generation.</strong> The server serves both the policy and the bundle. Whoever controls it, or the path between it and the browser, can serve a weaker policy or a modified bundle that produces predictable output. There is no SRI and no out-of-band check of the bundle a browser actually ran. See the <a href="/threat-model.html#not-defended">threat model</a>.</li>
+  <li><strong>The link travels by email.</strong> Anyone who reads the message before the recipient — a compromised mailbox, a relay, a link-scanning gateway that executes pages — can consume the token first. Opening the link does not consume it, the link expires after 15 minutes, and a consumed link answers <code>410</code>, so a theft shows up as a failed reveal for the legitimate user.</li>
+  <li><strong>Rotating <code>SK_MASTER_SECRET</code> is destructive.</strong> Wrapped TOTP secrets, recovery codes, the SMTP password and integration credentials become unreadable, and the existing audit chain no longer verifies under the new key. Pin the value across rebuilds and back it up with the database.</li>
+  <li><strong>bcrypt's 72-byte limit.</strong> Anything past 72 bytes of an operator password is ignored; strength scoring accounts for it, but the truncation is silent.</li>
+  <li><strong>No independent rebuild check.</strong> Builds use <code>-trimpath</code> and pinned linker flags, and provenance is attested, but no independent reproduce-and-compare result is published.</li>
+  <li><strong>No formal verification.</strong> The code has not been mechanically verified. We rely on standard-library primitives, the test suites and external review.</li>
+  <li><strong>No independent third-party audit yet.</strong> The code is open for audit but has not undergone a commissioned review.</li>
 </ul>
 
 <hr>
@@ -328,12 +425,12 @@ for len(password) &lt; targetLength {
           <span>SealKeeper</span>
         </a>
         <p style="margin-top: 1rem;">
-          Ephemeral, zero-knowledge password delivery. The server can't read
-          what it transmits.
+          Ephemeral, single-use password proposals. Passwords are generated
+          in your browser; the server never sees them.
         </p>
         <p style="font-size: 0.78rem; color: var(--fg-muted); margin-top: 1rem;">
-          Licensed under the <a href="https://www.gnu.org/licenses/agpl-3.0.txt" rel="license">GNU Affero General Public License v3</a>.
-          Copyright © 2026 Pascal-Louis Tessier.
+          Licensed under the <a href="https://www.gnu.org/licenses/agpl-3.0.txt" rel="license">GNU Affero General Public License v3 or later</a>.
+          Copyright © 2026 Pascal-Louis Darmon.
         </p>
       </div>
       <div class="footer__col">
@@ -342,7 +439,7 @@ for len(password) &lt; targetLength {
           <li><a href="https://github.com/SCHED75-ORG/SealKeeper">GitHub repository</a></li>
           <li><a href="https://github.com/SCHED75-ORG/SealKeeper">Source code</a></li>
           <li><a href="https://github.com/SCHED75-ORG/SealKeeper/releases">Releases</a></li>
-          <li><a href="https://github.com/SCHED75-ORG/SealKeeper/projects">Roadmap</a></li>
+          <li><a href="https://github.com/SCHED75-ORG/SealKeeper/blob/main/docs/prd/00-work-plan.md">Roadmap</a></li>
         </ul>
       </div>
       <div class="footer__col">

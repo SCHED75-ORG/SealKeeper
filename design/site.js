@@ -160,6 +160,33 @@
       }
     }
 
+    // Rewrite repository-relative links so they resolve on the website:
+    // governance documents map to their site page, design/<page>.html to
+    // /<page>.html, anything else to its file on GitHub. Absolute URLs
+    // (any scheme, protocol-relative) and in-page #anchors are left as is.
+    var REPO_BLOB = 'https://github.com/SCHED75-ORG/SealKeeper/blob/main/';
+    var SITE_PAGES = {
+      'SECURITY.md': '/security.html',
+      'CODE_OF_CONDUCT.md': '/code-of-conduct.html',
+      'CONTRIBUTING.md': '/contributing.html'
+    };
+    contentEl.querySelectorAll('a[href]').forEach(function (a) {
+      var href = a.getAttribute('href');
+      if (!href || /^(?:[a-z][a-z0-9+.-]*:|\/\/|#)/i.test(href)) return;
+      var hash = '';
+      var cut = href.indexOf('#');
+      if (cut >= 0) { hash = href.slice(cut); href = href.slice(0, cut); }
+      var path = href.replace(/^(?:\.\/)+/, '').replace(/^\/+/, '');
+      var page = /^design\/([A-Za-z0-9._-]+\.html)$/.exec(path);
+      if (Object.prototype.hasOwnProperty.call(SITE_PAGES, path)) {
+        a.setAttribute('href', SITE_PAGES[path] + hash);
+      } else if (page) {
+        a.setAttribute('href', '/' + page[1] + hash);
+      } else {
+        a.setAttribute('href', REPO_BLOB + path + hash);
+      }
+    });
+
     // Make external links open in a new tab
     contentEl.querySelectorAll('a[href^="http"]').forEach(function (a) {
       a.setAttribute('rel', 'external noopener');

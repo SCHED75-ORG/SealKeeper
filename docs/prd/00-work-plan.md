@@ -1,7 +1,7 @@
 # SealKeeper — Plan de travail de spécification
 
 **Version** : 1.0 — 16 mai 2026
-**Auteur** : Pascal-Louis Tessier (assisté par Daneel / Claude)
+**Auteur** : Pascal-Louis Darmon (assisté par Daneel / Claude)
 **Statut** : à valider
 
 ---
@@ -498,9 +498,9 @@ Lecture : C est central et débloque A, B, D. G fédère D et B vers F, E, H, L.
 
 | Décision | Qui décide | Comment |
 |---|---|---|
-| Validation d'un PRD module | Pascal-Louis Tessier | Merge de la PR |
-| Décision structurante (change d'architecture) | Pascal-Louis Tessier | ADR formel dans `docs/prd/adr/` |
-| Calibrage technique fin | Pascal-Louis Tessier assisté de Daneel | Discussion en session, formalisation en PRD |
+| Validation d'un PRD module | Pascal-Louis Darmon | Merge de la PR |
+| Décision structurante (change d'architecture) | Pascal-Louis Darmon | ADR formel dans `docs/prd/adr/` |
+| Calibrage technique fin | Pascal-Louis Darmon assisté de Daneel | Discussion en session, formalisation en PRD |
 | Revue de cohérence inter-modules | Daneel | À la fin de chaque phase |
 
 ---
@@ -543,7 +543,7 @@ Disponible dans `docs/prd/_template.md` (à créer en début de Phase 1).
 
 | Version | Date | Auteur | Changements |
 |---|---|---|---|
-| 1.0 | 2026-05-16 | P.-L. Tessier (Daneel) | Création initiale |
+| 1.0 | 2026-05-16 | P.-L. Darmon (Daneel) | Création initiale |
 
 ---
 

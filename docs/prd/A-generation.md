@@ -3,7 +3,7 @@
 **Statut** : validé
 **Version** : 1.0
 **Dernière mise à jour** : 2026-05-16
-**Auteur** : Pascal-Louis Tessier (assisté par Daneel / Claude)
+**Auteur** : Pascal-Louis Darmon (assisté par Daneel / Claude)
 **Dépendances** : aucune (module fondateur)
 
 ---
@@ -191,7 +191,7 @@ Format JSON, émis par le serveur (module D) à la demande du JS via `GET /api/v
 ```
 # SealKeeper dictionary
 # language: fr
-# source: EFF Diceware French adaptation + curation Pascal-Louis Tessier
+# source: EFF Diceware French adaptation + curation Pascal-Louis Darmon
 # entries: 7776
 # generated: 2026-05-15
 # license: CC0 / public domain
@@ -354,7 +354,7 @@ sequenceDiagram
 
 ## 8. Closed decisions
 
-Toutes les questions ouvertes ont été tranchées le 16 mai 2026 par Pascal-Louis Tessier après recommandation de Daneel. Les décisions sont liantes pour cette version du PRD.
+Toutes les questions ouvertes ont été tranchées le 16 mai 2026 par Pascal-Louis Darmon après recommandation de Daneel. Les décisions sont liantes pour cette version du PRD.
 
 | # | Question | Décision | Justification |
 |---|---|---|---|
@@ -385,8 +385,8 @@ Toutes les questions ouvertes ont été tranchées le 16 mai 2026 par Pascal-Lou
 
 | Version | Date | Auteur | Changements |
 |---|---|---|---|
-| 1.0 | 2026-05-16 | P.-L. Tessier (Daneel) | **Version validée** — 8 décisions tranchées (D-A.1 à D-A.8) : API namespace global, G4 reporté 0.2.0, pas de limite transformations, EFF Diceware + corpus éditorial DP français, T10 reportée 0.2.0, paramètres via policy, position chiffres fixée, force = jauge + badge |
-| 0.1 | 2026-05-16 | P.-L. Tessier (Daneel) | Création initiale, structure complète des 3 générateurs et catalogue 10 transformations |
+| 1.0 | 2026-05-16 | P.-L. Darmon (Daneel) | **Version validée** — 8 décisions tranchées (D-A.1 à D-A.8) : API namespace global, G4 reporté 0.2.0, pas de limite transformations, EFF Diceware + corpus éditorial DP français, T10 reportée 0.2.0, paramètres via policy, position chiffres fixée, force = jauge + badge |
+| 0.1 | 2026-05-16 | P.-L. Darmon (Daneel) | Création initiale, structure complète des 3 générateurs et catalogue 10 transformations |
 
 ---
 
