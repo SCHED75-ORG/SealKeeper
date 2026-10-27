@@ -105,7 +105,8 @@
   following. A user submits their email to
   <code>POST&nbsp;/api/v1/request</code>. The server checks the
   domain allowlist, mints a 256-bit opaque single-use token, persists
-  the token row (email + IP-hash + 15-minute TTL), sends an email
+  a row holding only a SHA-256 digest of that token (plus email,
+  IP hash and a 15-minute expiry), sends an email
   carrying <code>https://&lt;instance&gt;/reveal/&lt;token&gt;</code>, and
   answers the requester with a constant
   <code>HTTP&nbsp;202&nbsp;accepted</code>. The recipient clicks the
@@ -138,8 +139,8 @@
   <tbody>
     <tr>
       <td><strong>Reveal token</strong></td>
-      <td>Server row (table <code>request_tokens</code>), set HttpOnly. Becomes a path segment of the reveal URL once emailed.</td>
-      <td>High — anyone holding an unconsumed token can fetch the policy and generate the same proposal set.</td>
+      <td>The email link only, as the path segment of <code>/reveal/&lt;token&gt;</code>; the reveal page posts it once to <code>POST&nbsp;/api/v1/policy</code>. The server keeps only <code>sha256("sealkeeper-reveal-token:"&nbsp;+&nbsp;token)</code> in <code>request_tokens.token_hash</code>, so a database dump yields no usable link. Never set as a cookie.</td>
+      <td>High — whoever presents an unconsumed token first consumes it. They get their own, different random proposals (the browser draws them; nothing is reproducible from the token), and the legitimate recipient is left with <code>HTTP 410 Gone</code>.</td>
     </tr>
     <tr>
       <td><strong>Generated password proposals</strong></td>
@@ -153,7 +154,7 @@
     </tr>
     <tr>
       <td><strong>Audit log</strong></td>
-      <td>SQLite / Postgres table <code>audit_log</code>, SHA-256 hash-chained.</td>
+      <td>SQLite / Postgres table <code>audit_log</code>, chained with HMAC-SHA256 under a key derived from <code>SK_MASTER_SECRET</code>; the newest row is pinned by the MAC-sealed <code>audit_head</code> anchor.</td>
       <td>RGPD personal data (emails, IP hashes, timestamps).</td>
     </tr>
     <tr>
@@ -163,8 +164,8 @@
     </tr>
     <tr>
       <td><strong>JavaScript bundle</strong></td>
-      <td>Served at <code>/static/sealkeeper-generation.umd.js</code> from the binary's filesystem.</td>
-      <td>Maximum — a tampered bundle replaces the local RNG with one the attacker can predict. Integrity is enforced by Subresource Integrity (production builds) and signed releases.</td>
+      <td>Served same-origin at <code>/static/sealkeeper-generation.umd.js</code>, from the image's web directory or the copy embedded in the binary.</td>
+      <td>Maximum — a tampered bundle replaces the local RNG with one the attacker can predict. The reveal page loads it under a CSP whose <code>script-src</code> admits only <code>'self'</code> (plus a per-response nonce for the page's own inline script), and it ships inside the cosign-signed image or the GPG-checksummed binaries. There is no Subresource Integrity attribute today: a server that serves a rewritten bundle is trusted.</td>
     </tr>
   </tbody>
 </table>
@@ -197,7 +198,7 @@
     <!-- ADMIN ZONE -->
     <g transform="translate(30 70)">
       <rect width="100" height="28" fill="#1E2D45"/>
-      <text x="50" y="18" text-anchor="middle" font-family="Inter, sans-serif" font-size="10" fill="#F4EFE6">admin (TOTP)</text>
+      <text x="50" y="18" text-anchor="middle" font-family="Inter, sans-serif" font-size="10" fill="#F4EFE6">admin (2FA)</text>
     </g>
     <g transform="translate(30 110)">
       <text x="50" y="14" text-anchor="middle" font-family="Inter, sans-serif" font-size="9" fill="currentColor" opacity="0.65">domains, policies</text>
@@ -250,7 +251,7 @@
     <g font-family="JetBrains Mono, monospace" font-size="9">
       <!-- admin → server -->
       <path d="M145 90 L 315 90" fill="none" stroke="#1E2D45" stroke-width="1.2" marker-end="url(#arr2)"/>
-      <text x="230" y="82" text-anchor="middle" fill="currentColor" opacity="0.7">password + TOTP + CSRF</text>
+      <text x="230" y="82" text-anchor="middle" fill="currentColor" opacity="0.7">password + TOTP|key + CSRF</text>
 
       <!-- requester → server (POST /api/v1/request) -->
       <path d="M620 90 L 445 90" fill="none" stroke="#7A1F2B" stroke-width="1.2" marker-end="url(#arr1)"/>
@@ -275,7 +276,7 @@
   </svg>
   <figcaption id="boundaries-caption">
     Three trust zones. The admin zone is the most trusted and gated by
-    password + TOTP. The recipient's browser is treated as hostile —
+    password + TOTP, or password + a WebAuthn key. The recipient's browser is treated as hostile —
     SealKeeper assumes it might be observed, but the password
     generated there is also the only secret of the whole system, and
     it never leaves that browser.
@@ -312,7 +313,7 @@
     <tr>
       <td>Malicious admin</td>
       <td>Legitimate admin login.</td>
-      <td>Mint tokens for arbitrary recipients, weaken a policy, disable integrations.</td>
+      <td>Point <code>/admin/smtp</code> at a relay they control to lift reveal links, weaken a policy, edit mail templates, disable integrations.</td>
     </tr>
     <tr>
       <td>Hostile browser context</td>
@@ -333,12 +334,12 @@
   <li><strong>Passwords in plain-text email.</strong> The outgoing mail carries a one-time URL only. The password itself never enters the mail relay, the SMTP transcript, or any inbox.</li>
   <li><strong>Server-side password storage.</strong> The server has no row, no column, no log line, no metric and no temp-file that ever contains a generated password. The browser is the sole holder.</li>
   <li><strong>Replay of consumed tokens.</strong> Consumption is a single SQL transaction (atomic <code>UPDATE … WHERE consumed_at IS NULL</code>). A second visit returns <code>HTTP 410 Gone</code>, which the reveal page renders as <em>"already used"</em>.</li>
-  <li><strong>Token enumeration.</strong> Tokens are 256 bits of <code>crypto/rand</code> entropy, URL-safe base64-encoded. Guessing one before it expires (15 min default) requires more entropy than the public internet can shove through the request pipeline.</li>
+  <li><strong>Token enumeration.</strong> Tokens are 256 bits of <code>crypto/rand</code> entropy, URL-safe base64-encoded. Guessing one before it expires (15 minutes) takes vastly more guesses than the request pipeline allows: token lookups (<code>GET /reveal/&lt;token&gt;</code> and <code>POST /api/v1/policy</code>) share a cap of 60 per 15 minutes per IP, answered with <code>429</code> beyond it.</li>
   <li><strong>Anti-enumeration on the request side.</strong> The public flow answers an identical <code>HTTP 202 accepted</code> regardless of whether the email's domain is on the allowlist (FR-B.13). An attacker cannot use the request form as a directory.</li>
-  <li><strong>Brute-force admin login.</strong> bcrypt for the password hash, a constant-time response window of ~300 ms, account lockout after five failures, optional WebAuthn second factor on top of TOTP.</li>
-  <li><strong>Tampering with the audit log.</strong> Each row stores <code>entry_hash = SHA-256(prev_hash || canonical(event))</code>. A single deletion or alteration breaks the chain; the integrity banner on <code>/admin/audit</code> turns red on the next page load.</li>
-  <li><strong>Rate abuse of the public flow.</strong> A sliding-window limiter (configurable per-email and per-IP, 1/hour each in demo mode) caps how often a given identifier can mint a token.</li>
-  <li><strong>Cross-site request forgery on admin actions.</strong> Every state-changing admin endpoint requires a double-submit CSRF token (cookie + form field). The cookies are <code>HttpOnly</code> + <code>SameSite=Strict</code> + <code>Secure</code> outside eval/demo mode.</li>
+  <li><strong>Brute-force admin login.</strong> bcrypt for the password hash, a constant-time response window of ~300 ms, account lockout for 15 minutes after five failures, and a mandatory second factor: a TOTP code or, as an alternative, a WebAuthn / FIDO2 key assertion.</li>
+  <li><strong>Tampering with the audit log.</strong> Each row stores <code>entry_hash = HMAC-SHA256(audit_chain_key, prev_hash || canonical_v2)</code>, where <code>audit_chain_key</code> is derived from <code>SK_MASTER_SECRET</code> by HKDF-SHA256 and <code>canonical_v2</code> binds the sequence number, timestamp, type, actor, target and details. The <code>audit_head</code> anchor pins the newest row under its own MAC. Without the key, editing or deleting a row in the middle, or truncating the tail, is detected; the integrity badge on <code>/admin/audit</code> turns red on the next page load. Retention legitimately deletes rows from the old end only, recording the last deleted row as a MAC-bound base so the survivors still verify. Residual risk: an older, still MAC-valid anchor written back over a cut tail is caught only by the server's in-memory high-water mark, not across a restart.</li>
+  <li><strong>Rate abuse of the public flow.</strong> A sliding-window limiter, per email and per IP (3/hour and 10/hour by default, configurable; 1/hour each in demo mode), caps how often a given identifier can mint a token.</li>
+  <li><strong>Cross-site request forgery on admin actions.</strong> Every state-changing admin endpoint requires a double-submit CSRF token (cookie + form field). Both admin cookies are <code>SameSite=Strict</code> and <code>Secure</code> in every mode except eval (plain-http localhost). The session cookie is <code>HttpOnly</code>; the <code>sk_admin_csrf</code> cookie is deliberately not (it is kept script-readable for a future header-based double-submit) and grants nothing without the session cookie.</li>
   <li><strong>Demo-mode misuse.</strong> A public demo is forced into capture-only SMTP, integration creation is refused, and the admin-controlled tables are wiped every 24 h (FR-H.79).</li>
 </ul>
 
@@ -353,22 +354,22 @@
 <ul>
   <li><strong>Compromised SMTP relay.</strong> The relay sees the reveal URL. A hostile or compromised relay can race the legitimate recipient to consume the token. Use a relay you operate, or one with technical operator-level guarantees.</li>
   <li><strong>Compromised recipient inbox.</strong> If an attacker reads the inbox, they hold a one-time URL that's about to be used legitimately. SealKeeper has no way to distinguish the legitimate human from the attacker. Mitigate at the inbox level (strong mailbox 2FA, alert on auto-forwarding rules).</li>
-  <li><strong>Tampering with the JS bundle.</strong> A server-side attacker that can rewrite <code>/static/sealkeeper-generation.umd.js</code> can replace <code>crypto.getRandomValues()</code> with a function whose output is known to them. The release bundle is published with SHA-256 sums and an in-toto attestation, but enforcement of those is a deployment concern (Subresource Integrity on a CDN, signed Docker image at start, etc.). Operators should pin to a known-good build.</li>
+  <li><strong>Tampering with the JS bundle.</strong> A server-side attacker that can rewrite <code>/static/sealkeeper-generation.umd.js</code> can replace <code>crypto.getRandomValues()</code> with a function whose output is known to them. The reveal page loads it same-origin under CSP <code>script-src 'self'</code>, which keeps third-party scripts out but cannot vouch for what the origin itself serves; there is no Subresource Integrity attribute today. The bundle ships inside the cosign-signed image (with SLSA provenance) and the binaries covered by the GPG-signed <code>SHA256SUMS</code>, so the integrity check happens at deploy time. Operators should pin to a verified build and keep the image read-only.</li>
   <li><strong>Browser-side leakage on the recipient device.</strong> Browser history records the URL, a password manager extension may try to capture the displayed credential, a screen recorder is invisible to the page. The reveal page sets <code>Cache-Control: no-store</code> and clears the proposals from the DOM when the tab closes, but these are advisory — not a hard guarantee.</li>
-  <li><strong>Malicious admin.</strong> An authenticated admin can lower a policy, disable an integration, mint a token for any address on the allowlist. Defence is purely after-the-fact: the audit log records every mutation, the hash chain detects retroactive edits.</li>
-  <li><strong>Compelled disclosure / lawful intercept.</strong> A jurisdiction that compels the operator to hand over the server's running memory or the database has access to active tokens and to all audit entries. SealKeeper offers no cryptographic counter-measure here; operate the instance in a jurisdiction whose legal regime aligns with your threat model.</li>
+  <li><strong>Malicious admin.</strong> An authenticated admin can point <code>/admin/smtp</code> at a relay they control and lift every new reveal link, lower a policy, edit mail templates, or disable an integration. No admin route issues reveal tokens, and templates are constrained (<code>{{ .RevealURL }}</code> only as a bare link, allowlisted HTML) — but an admin who controls the relay does not need either. Defence is purely after-the-fact: the audit log records every mutation, the keyed chain detects retroactive edits.</li>
+  <li><strong>Compelled disclosure / lawful intercept.</strong> The database holds only token digests, so a seized dump yields no usable reveal link; live tokens exist only in mail and in transit. But an operator compelled to intercept can capture new links on their way out (server memory, the SMTP path) and hands over all audit entries. SealKeeper offers no cryptographic counter-measure here; operate the instance in a jurisdiction whose legal regime aligns with your threat model.</li>
   <li><strong>Side-channel attacks on shared hardware.</strong> Spectre / Meltdown / cross-tenant cache timing on a shared-host deployment are outside SealKeeper's scope. Use bare metal or single-tenant VMs for high-sensitivity instances.</li>
-  <li><strong>Quantum cryptanalysis of the admin password hash.</strong> Even if a future attacker eventually broke bcrypt, they would still not recover any user password (none are stored) — only the admin's. The mitigation is the ANSSI B3 floor on admin passwords (FR-M.4): 16 chars × ≥ 3 character classes, ≥ 100 bits.</li>
-  <li><strong>Long-lived token theft.</strong> The default 15-minute TTL is tight but not zero. If an attacker captures the reveal URL within that window and reaches the server first, they win. Reducing the TTL or restricting reveal access by IP range is operator policy, not a built-in lock.</li>
+  <li><strong>Offline cracking of the admin password hash.</strong> An attacker who steals the <code>admins</code> table can grind the bcrypt hash offline, with no lockout or rate limit to slow them. Even if they succeed, they recover no user password (none are stored) — only the admin's, and the second factor still stands between them and a login. The mitigation is the ANSSI B3 floor on admin passwords (FR-M.4): 16 chars × ≥ 3 character classes, ≥ 100 bits.</li>
+  <li><strong>Long-lived token theft.</strong> The 15-minute TTL is tight but not zero, and it is fixed in v0.1 (not configurable). If an attacker captures the reveal URL within that window and reaches the server first, they win. Restricting reveal access by IP range is a reverse-proxy matter, not a built-in lock.</li>
 </ul>
 
 <h2 id="mitigations">7 · Recommended deployment mitigations</h2>
 
 <ul>
   <li>Operate the SMTP relay on the same trust zone as SealKeeper, or rely on a relay that provides operator-level transparency (Posteo, ProtonMail Business, in-house Postfix).</li>
-  <li>Pin the reveal-page bundle to a known SHA-256; verify the published <code>sealkeeper-generation.umd.js.sig</code> at deploy time.</li>
-  <li>Keep the default token TTL short (15 min). The reveal page is a one-shot interaction — there is no UX cost to a tight window.</li>
-  <li>Enrol TOTP on every admin account and, where possible, add a WebAuthn / FIDO2 second factor on top.</li>
+  <li>Verify what you deploy: the OCI image with <code>cosign verify</code> and its SLSA provenance, the binaries with <code>SHA256SUMS.asc</code> (<a href="https://github.com/SCHED75-ORG/SealKeeper/blob/main/docs/security/verification.md">verification guide</a>). The reveal-page bundle ships inside both.</li>
+  <li>Ask recipients to open the reveal link promptly: the token lives 15 minutes and the reveal page is a one-shot interaction.</li>
+  <li>Enrol a WebAuthn / FIDO2 key on admin accounts where possible: it can replace the TOTP code at login and resists phishing.</li>
   <li>Restrict network access to <code>/admin</code> by IP range (reverse proxy, VPN, mTLS).</li>
   <li>Run the SealKeeper container with a read-only root filesystem and no extraneous Linux capabilities; mount the data volume <code>rw</code> only.</li>
   <li>Send every audit event to an external SIEM via the built-in integrations (<a href="/docs.html#admin-setup">Integrations</a>). A break in the hash chain is a high-severity alert.</li>
