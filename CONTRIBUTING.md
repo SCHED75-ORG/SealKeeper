@@ -60,6 +60,7 @@ sequenceDiagram
 - [ ] New code is covered by tests (Go and/or Vitest) where applicable
 - [ ] Any change touching SQL ships both migration dialects and passes `go test` on SQLite **and** on Postgres (`TEST_PG_DSN`, see below)
 - [ ] `make lint` and `make test` pass locally (plus `make test-js` if `web/` changed)
+- [ ] The [verification loop](#verification-loop) came back clean, and the PR description gives its before/after figures (mandatory for AI-assisted changes)
 - [ ] If the change affects user-facing behaviour, documentation is updated
 - [ ] If the change affects security properties, a note is added in the PR description
 - [ ] The PR description explains the motivation and links the related issue
@@ -170,6 +171,48 @@ make fmt    # gofmt + goimports + prettier
 ```
 
 CI uses **golangci-lint v2.12.2** with `.golangci.yml`, plus gosec, semgrep and govulncheck (blocking on affecting CVEs). After a dependency bump, run `govulncheck ./...` locally. Surgical lint exemptions take the form `// #nosec Gnnn -- rationale`.
+
+### Verification loop
+
+Every code change goes through the same loop, repeated until a full pass finds nothing. Green tests alone are not enough: a pass that fixes something starts the loop again, because fixes have introduced regressions before.
+
+```mermaid
+flowchart LR
+    Code["Code the change"] --> Q["1. Quality chain<br/>maintainability, unit, functional"]
+    Q --> CVE["2. CVE analysis"]
+    CVE --> AS["3. Attack surfaces<br/>analyse, reproduce"]
+    AS -->|anomaly found| Fix["Code the fixes"]
+    Fix --> Q
+    AS -->|clean pass| PR["Open the PR"]
+```
+
+1. **Quality chain**, looped until green:
+   - *Maintainability score*, compared with `main`: no new function above the thresholds, and the figures go in the PR description.
+
+     ```bash
+     go run github.com/fzipp/gocyclo/cmd/gocyclo@v0.6.0 -avg ./cmd ./internal      # average cyclomatic complexity
+     go run github.com/fzipp/gocyclo/cmd/gocyclo@v0.6.0 -over 15 ./cmd ./internal
+     go run github.com/uudashr/gocognit/cmd/gocognit@v1.2.0 -over 20 ./cmd ./internal
+     ```
+
+     Plus `golangci-lint` at 0 issues and test coverage (`go test -coverprofile`, `cd web && npm run coverage`).
+   - *Unit tests*: `go test ./...` on SQLite **and** on Postgres (`TEST_PG_DSN`), Vitest with coverage.
+   - *Functional tests*: Playwright end-to-end, on SQLite and on Postgres.
+2. **CVE analysis**: `govulncheck ./...`, `npm audit` in `web/` and `tests/e2e/`, open Dependabot alerts, then gosec and semgrep with the flags `ci.yml` uses. Fix what affects the code, then back to 1.
+3. **Attack-surface analysis**: list the surfaces the change touches (public endpoints, admin handlers, parsers, outbound calls, stored secrets, mail rendering), try to exploit each one, and keep only findings you can **reproduce** with a test or a request. Fix them, add the reproduction as a regression test, then back to 1.
+
+The loop stops when steps 1 to 3 come back clean in the same pass. The fix commits are reviewed like any other change.
+
+#### AI-assisted contributions
+
+Contributions written with an AI coding assistant are welcome, whatever the model, tool or agent, under the same rules plus these:
+
+- The verification loop above is **mandatory**, run in full after every change, including changes made by sub-agents or parallel workers. Running only the tests, or only on the last batch, does not count.
+- Findings from an AI review must be reproduced before they are fixed, and verified adversarially (another pass trying to refute them). A plausible but unreproduced finding is dropped, not fixed.
+- The human contributor reviews and owns every line: commits are GPG-signed and signed off by the contributor, never by the agent, and signing or hooks are never bypassed.
+- Agents read [`CLAUDE.md`](https://github.com/SCHED75-ORG/SealKeeper/blob/main/CLAUDE.md) first: despite its name it is the implementation handover for any AI assistant, and it lists the pitfalls already met.
+- The PR description says that the change is AI-assisted and gives the before/after figures of each loop step.
+- Never paste secrets, reporter identities or unpublished vulnerability details into an external AI service.
 
 ### Project layout
 

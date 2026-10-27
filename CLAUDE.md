@@ -333,6 +333,16 @@ Playwright launches the SealKeeper binary itself via `webServer:` in `playwright
 
 Use `// #nosec Gnnn -- rationale` for surgical exemptions (e.g. the fire-and-forget post-consultation goroutine). golangci-lint's `//nolint:` directive works inside Go, but standalone gosec reads `// #nosec`.
 
+### Mandatory verification loop (every change)
+
+After every code or feature change — yours, a sub-agent's, or an integration branch's — run this loop and repeat it until a whole pass comes back clean. Do not stop at green tests, and do not skip a step for "small" batches.
+
+1. **Quality chain**, looped until green: maintainability score compared with `main` (`gocyclo@v0.6.0 -avg` and `-over 15`, `gocognit@v1.2.0 -over 20` on `./cmd ./internal`; golangci-lint 0 issues; Go + Vitest coverage) → unit tests (`go test ./...` on SQLite **and** `TEST_PG_DSN`; `cd web && npm run coverage`) → functional tests (Playwright, SQLite and Postgres) → fixes.
+2. **CVE analysis**: `govulncheck ./...`, `npm audit` (`web/`, `tests/e2e/`), Dependabot alerts (`gh api repos/SCHED75-ORG/SealKeeper/dependabot/alerts`), gosec + semgrep with the `ci.yml` flags → fixes → back to 1.
+3. **Attack-surface analysis**: one finder per surface the change touches; a finding counts only once **reproduced** (test or request), then verified adversarially; fix it, keep the reproduction as a regression test → back to 1.
+
+Re-review the fix commits themselves: in round 1 of the 2026-10 hardening, fixes introduced regressions. Report the before/after figures of each step in the PR description. The contributor-facing version of this loop is in `CONTRIBUTING.md` ("Verification loop").
+
 ---
 
 ## 9. CI/CD
