@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>SealKeeper — Ephemeral, zero-knowledge password delivery</title>
+<title>SealKeeper — Ephemeral, server-blind password delivery</title>
 <meta name="description" content="Heralds your passwords — one link, one read, never stored. Open source, self-hosted, AGPL v3.">
 
 <!--
@@ -591,7 +591,7 @@
       <a href="#quickstart">Quickstart</a>
       <a href="#security">Security</a>
       <a href="/user-guide.html">User guide</a>
-      <a href="#docs">Docs</a>
+      <a href="/docs.html">Docs</a>
     </nav>
     <div class="topbar__cta">
       <button type="button" class="theme-toggle" aria-label="Toggle color theme" id="theme-toggle">
@@ -629,14 +629,14 @@
         SealKeeper is a self-hosted password distributor for enterprises. It helps your employees
         choose passwords that are <em>at once</em> compliant with ANSSI recommendations (B1/B2/B3)
         and easy to remember. The generator runs entirely in the user's browser via the WebCrypto
-        API — the server never sees the secret, never stores it, has nothing to leak.
+        API — the server never sees the generated password and never stores it.
       </p>
       <div class="hero__actions">
         <a class="btn btn--primary" href="https://github.com/SCHED75-ORG/SealKeeper">
           <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.58.1.79-.25.79-.55v-1.93c-3.2.7-3.87-1.54-3.87-1.54-.52-1.33-1.28-1.69-1.28-1.69-1.05-.72.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.55-.29-5.24-1.28-5.24-5.69 0-1.26.45-2.28 1.19-3.09-.12-.29-.52-1.47.11-3.06 0 0 .97-.31 3.18 1.18a11.05 11.05 0 0 1 5.79 0c2.21-1.49 3.18-1.18 3.18-1.18.63 1.59.23 2.77.11 3.06.74.81 1.18 1.83 1.18 3.09 0 4.42-2.69 5.39-5.25 5.68.41.35.78 1.05.78 2.12v3.14c0 .31.21.66.79.55A11.5 11.5 0 0 0 23.5 12C23.5 5.65 18.35.5 12 .5Z"/></svg>
           View on GitHub
         </a>
-        <a class="btn btn--secondary" href="#docs" style="border-color: var(--link); color: var(--link);">
+        <a class="btn btn--secondary" href="/docs.html" style="border-color: var(--link); color: var(--link);">
           Read the docs →
         </a>
       </div>
@@ -750,7 +750,7 @@
     <h2 id="why-title">Strong passwords your team will actually remember.</h2>
     <p class="lead">
       Every IT department faces the same dilemma. Either employees pick passwords
-      they can remember, which usually fail an ANSSI audit. Or they pick something
+      they can remember, which usually fail an ANSSI audit, or they pick something
       strong, write it on a sticky note, and effectively negate the strength.
       SealKeeper closes this gap.
     </p>
@@ -830,9 +830,9 @@
         <span class="step__num">Step 03</span>
         <h3>Email link</h3>
         <p>
-          A signed email arrives in the user's inbox containing one link to the reveal page,
-          parameterised with the session token. Default lifetime: fifteen minutes from issue,
-          configurable per policy.
+          An email arrives in the user's inbox containing one link to the reveal page,
+          parameterised with the single-use token. The link is valid for fifteen minutes
+          from issue; the length of the reveal session that follows is set per policy.
         </p>
       </li>
       <li class="step">
@@ -842,8 +842,8 @@
           Clicking the link opens the reveal page. JavaScript fetches the applicable policy,
           generates N proposals in the browser using <code>crypto.getRandomValues()</code>,
           and displays them with their entropy. The user picks one, copies it to clipboard
-          (auto-purged after thirty seconds), and the page closes itself when the session
-          expires.
+          (auto-purged after thirty seconds). When the session expires, the page wipes the
+          proposals and the clipboard and shows that the session has expired.
         </p>
       </li>
     </ol>
@@ -895,13 +895,13 @@
         <!-- arrow 1: request -->
         <g font-family="JetBrains Mono, monospace" font-size="10">
           <path d="M305 84 L 575 84" fill="none" stroke="#1E2D45" stroke-width="1.2" marker-end="url(#arr2)"/>
-          <text x="440" y="76" text-anchor="middle" fill="currentColor" opacity="0.7">POST /api/request</text>
+          <text x="440" y="76" text-anchor="middle" fill="currentColor" opacity="0.7">POST /api/v1/request</text>
         </g>
 
         <!-- arrow 2: email link + policy fetch -->
         <g font-family="JetBrains Mono, monospace" font-size="10">
           <path d="M575 134 L 305 134" fill="none" stroke="#7A1F2B" stroke-width="1.4" marker-end="url(#arr2)"/>
-          <text x="440" y="126" text-anchor="middle" fill="currentColor" opacity="0.7">email link + GET /api/policy</text>
+          <text x="440" y="126" text-anchor="middle" fill="currentColor" opacity="0.7">email link + POST /api/v1/policy</text>
         </g>
 
         <defs>
@@ -935,7 +935,7 @@
     <div class="why__grid">
       <article class="why__card">
         <span class="why__num">G1</span>
-        <h3>Citations transformed</h3>
+        <h3>Quotations transformed</h3>
         <p>
           For everyday accounts. A famous quote is picked at random from a corpus,
           transformed unpredictably (case, leet, separator), then sealed with
@@ -952,9 +952,9 @@
         <h3>Word assembly (Diceware)</h3>
         <p>
           For accounts holding sensitive data. Six words are drawn independently
-          from a five-thousand-word dictionary in the user's language, joined by
-          a separator chosen at random, sealed with four random digits. Each
-          word adds about thirteen bits of entropy.
+          from a dictionary in the user's language, joined by a separator chosen
+          at random, sealed with four random digits. With a 7,776-word list
+          (the EFF Diceware size), each word adds about 12.9 bits of entropy.
         </p>
         <p style="font-family: 'JetBrains Mono', monospace; font-size: 0.85em; opacity: 0.75;">
           cheval-table-pluie-roman-fenetre-jardin-4729
@@ -986,11 +986,11 @@
   </div>
 </section>
 
-<!-- ── Zero-knowledge by design ──────────────────────────────────────── -->
-<section id="zero-knowledge" aria-labelledby="zk-title">
+<!-- ── Server-blind generation ───────────────────────────────────────── -->
+<section id="server-blind" aria-labelledby="zk-title">
   <div class="container">
-    <span class="eyebrow">Zero-knowledge by design</span>
-    <h2 id="zk-title">The server has nothing to leak.</h2>
+    <span class="eyebrow">Server-blind generation</span>
+    <h2 id="zk-title">The server never sees the password.</h2>
     <p class="lead">
       Most password tools have a moment where the plaintext exists somewhere
       reachable — a server process, a Redis key, a log line. SealKeeper doesn't.
@@ -1000,10 +1000,10 @@
 
     <ul style="line-height: 1.8;">
       <li><strong>No password generation on the server.</strong> The server emits a policy descriptor (which generator, what parameters, applicable ANSSI level) and a single-use session token. The actual generation happens in the browser JavaScript, with <code>crypto.getRandomValues()</code>.</li>
-      <li><strong>No symmetric key on the server.</strong> There is nothing to encrypt or decrypt at the server tier — only policy, audit logs, and tokens. AES, GCM, RSA are absent from the server runtime.</li>
-      <li><strong>Bundle integrity guaranteed.</strong> All JavaScript assets are served with Subresource Integrity hashes; the Content Security Policy forbids external script injection. The compiled bundle is reproducible-built and signed at release time.</li>
-      <li><strong>No telemetry to third parties.</strong> No analytics scripts, no font CDN, no external API call. Everything is served by the same origin under your control.</li>
-      <li><strong>Memory hygiene in the browser.</strong> Once the user copies their chosen password, the clipboard is auto-purged after thirty seconds via the Clipboard API. The reveal page closes itself when the session token expires.</li>
+      <li><strong>No key to any generated password.</strong> The server holds policies, audit logs and hashed tokens — never a password, nor any key that could recover one. AES-256-GCM is used only to wrap operator secrets at rest (admin TOTP seeds, the SMTP relay password, SIEM sink credentials).</li>
+      <li><strong>Bundle served from your own origin.</strong> The generation bundle ships inside the release artefacts — the cosign-signed OCI image and the binaries with GPG-signed checksums — and is served same-origin under a Content Security Policy of <code>script-src 'self'</code>, so no external script can be injected.</li>
+      <li><strong>No telemetry to third parties.</strong> No analytics scripts, no external API call. Web fonts come from fonts.bunny.net (no Google Fonts); everything else is served by the same origin under your control.</li>
+      <li><strong>Memory hygiene in the browser.</strong> Once the user copies their chosen password, the clipboard is auto-purged after thirty seconds via the Clipboard API. When the reveal session expires, the page wipes the proposals and the clipboard and shows that the session has expired.</li>
     </ul>
   </div>
 </section>
@@ -1045,9 +1045,9 @@
         <h3>Editorial libraries</h3>
         <p>
           Upload custom word dictionaries and quotation corpora per language.
-          The built-in defaults include EFF Diceware FR/EN and a public-domain
-          quotation corpus. Use them, replace them, or extend them with your
-          own editorial material.
+          Only a small test sample ships with SealKeeper: a G1 or G2 policy
+          needs a word list or quotation corpus supplied by you — your own
+          editorial material or a public list such as EFF Diceware.
         </p>
       </article>
       <article class="why__card">
@@ -1067,7 +1067,7 @@
         <p>
           Replace the SealKeeper logo and accent colour with your own.
           Customise the email subject, header, and signature. Bundled
-          languages: FR, EN, ES, DE, IT — extensible via translation files.
+          languages: EN and FR.
         </p>
       </article>
       <article class="why__card">
@@ -1076,8 +1076,8 @@
         <p>
           Configure your SMTP relay, port, authentication, and TLS mode
           (STARTTLS, implicit). DKIM, DMARC, and SPF guidance bundled in
-          the deployment documentation. Optional rate limiting per domain
-          to prevent abuse.
+          the deployment documentation. Built-in rate limiting per e-mail
+          address (3 per hour) and per IP (10 per hour) to prevent abuse.
         </p>
       </article>
     </div>
@@ -1096,11 +1096,11 @@
     </p>
 
     <ul style="line-height: 1.8;">
-      <li><strong><a href="https://cyber.gouv.fr/publications/recommandations-relatives-lauthentification-multifacteur-et-aux-mots-de-passe" rel="external">ANSSI</a></strong> — *Recommandations relatives à l'authentification multifacteur et aux mots de passe*. Three levels of robustness (B1, B2, B3) directly mapped to the SealKeeper generators.</li>
-      <li><strong><a href="https://csrc.nist.gov/publications/detail/sp/800-63b/final" rel="external">NIST SP 800-63B</a></strong> — *Digital Identity Guidelines*. Length over complexity, no forced rotation, no composition rules unless warranted.</li>
-      <li><strong>OWASP ASVS 4.0</strong> — Authentication Verification Standard, level 2 baseline for the console.</li>
-      <li><strong><a href="https://accessibilite.numerique.gouv.fr/" rel="external">RGAA 4.1</a></strong> — French accessibility reference; SealKeeper targets level AA, including keyboard navigation, screen reader compatibility, and audio playback of generated passwords for visually impaired users.</li>
-      <li><strong>RGPD (GDPR)</strong> — Configurable retention of audit logs by the administrator, DPO export, data minimisation by design (no password stored, no plaintext logged).</li>
+      <li><strong><a href="https://cyber.gouv.fr/publications/recommandations-relatives-lauthentification-multifacteur-et-aux-mots-de-passe" rel="external">ANSSI</a></strong> — <em>Recommandations relatives à l'authentification multifacteur et aux mots de passe</em>. Three levels of robustness (B1, B2, B3) directly mapped to the SealKeeper generators.</li>
+      <li><strong><a href="https://csrc.nist.gov/publications/detail/sp/800-63b/final" rel="external">NIST SP 800-63B</a></strong> — <em>Digital Identity Guidelines</em>. Length over complexity, no forced rotation, no composition rules unless warranted.</li>
+      <li><strong>OWASP ASVS 4.0</strong> — Application Security Verification Standard, level 2 baseline for the console.</li>
+      <li><strong><a href="https://accessibilite.numerique.gouv.fr/" rel="external">RGAA 4.1</a></strong> — French accessibility reference; SealKeeper targets level AA, including keyboard navigation and screen reader compatibility.</li>
+      <li><strong>RGPD (GDPR)</strong> — Retention periods set by the operator (<code>SK_RETENTION_*</code> environment variables) and enforced by a daily purge; data minimisation by design (no password stored, no plaintext logged).</li>
       <li><strong><a href="https://datatracker.ietf.org/doc/html/rfc6238" rel="external">RFC 6238 (TOTP)</a></strong> — Time-based one-time passwords for admin console second factor.</li>
       <li><strong><a href="https://www.w3.org/TR/WebCryptoAPI/" rel="external">W3C WebCrypto API</a></strong> — Standardised cryptographic primitives in the browser, used for all in-page generation.</li>
     </ul>
@@ -1115,8 +1115,7 @@
     <p class="lead">
       SealKeeper is distributed as a single Go binary and as an OCI image. The
       command below brings up an evaluation instance with an embedded SMTP
-      capture (no real emails sent), a SQLite store, and the default EFF
-      Diceware libraries pre-installed. It is <em>not</em> a production
+      capture (no real emails sent) and a SQLite store. It is <em>not</em> a production
       configuration — see the deployment guide for that.
     </p>
 
@@ -1124,34 +1123,34 @@
       <div class="qs">
         <div class="qs__head">
           <strong>I. Start an evaluation instance</strong>
-          <button type="button" class="qs__copy" data-copy="docker run --rm -p 8443:8443 -e SK_MODE=eval ghcr.io/sched75-org/sealkeeper:latest">Copy</button>
+          <button type="button" class="qs__copy" data-copy="docker run --rm -p 8443:8443 -e SK_MODE=eval -e SK_BASE_URL=http://localhost:8443 ghcr.io/sched75-org/sealkeeper:latest">Copy</button>
         </div>
-<pre aria-label="Docker run command"><code><span class="c-com"># evaluation mode: SMTP capture, SQLite, default libraries</span>
+<pre aria-label="Docker run command"><code><span class="c-com"># evaluation mode: SMTP capture, SQLite</span>
 <span class="c-cmd">docker run</span> <span class="c-flag">--rm</span> <span class="c-flag">-p</span> 8443:8443 \
-  <span class="c-flag">-e</span> SK_MODE=<span class="c-str">"eval"</span> \
-  <span class="c-flag">-e</span> SK_BASE_URL=<span class="c-str">"https://localhost:8443"</span> \
+  <span class="c-flag">-e</span> SK_MODE=eval \
+  <span class="c-flag">-e</span> SK_BASE_URL=http://localhost:8443 \
   ghcr.io/sched75-org/sealkeeper:latest</code></pre>
       </div>
 
       <div class="qs">
         <div class="qs__head">
           <strong>II. Open the admin console</strong>
-          <button type="button" class="qs__copy" data-copy="https://localhost:8443/admin">Copy</button>
+          <button type="button" class="qs__copy" data-copy="open http://localhost:8443/admin">Copy</button>
         </div>
 <pre aria-label="Admin console URL"><code><span class="c-com"># first run prints the bootstrap password to the container logs</span>
-<span class="c-cmd">open</span> https://localhost:8443/admin
+<span class="c-cmd">open</span> http://localhost:8443/admin
 
 <span class="c-com"># add your test domain to the allowlist, e.g. example.com</span>
-<span class="c-com"># configure one B1 policy with G2 (word assembly, 6 words)</span></code></pre>
+<span class="c-com"># configure one B1 policy with G3 (random; G1/G2 need a dictionary)</span></code></pre>
       </div>
 
       <div class="qs">
         <div class="qs__head">
           <strong>III. Request a password as a user</strong>
-          <button type="button" class="qs__copy" data-copy="https://localhost:8443/">Copy</button>
+          <button type="button" class="qs__copy" data-copy="open http://localhost:8443/">Copy</button>
         </div>
 <pre aria-label="Public user request page"><code><span class="c-com"># public page — enter an email matching your allowlist</span>
-<span class="c-cmd">open</span> https://localhost:8443/
+<span class="c-cmd">open</span> http://localhost:8443/
 
 <span class="c-com"># the captured email appears in /admin/captured-mail</span>
 <span class="c-com"># click the link, see N proposals generated in your browser</span></code></pre>
@@ -1164,13 +1163,13 @@
         <dl class="preview-mail__meta">
           <dt>From</dt><dd>SealKeeper &lt;noreply@your-company.example&gt;</dd>
           <dt>To</dt><dd>jdupont@your-company.example</dd>
-          <dt>Subject</dt><dd>Your SealKeeper password proposals are ready</dd>
+          <dt>Subject</dt><dd>Your SealKeeper password proposals</dd>
           <dt>Expires</dt><dd>15 minutes from issue</dd>
           <dt>Single-use</dt><dd>Yes — link works only once</dd>
         </dl>
         <div class="preview-mail__body">
           <h4>Hello,</h4>
-          <p>Click the link below to reveal three password proposals tailored to
+          <p>Click the link below to reveal five password proposals tailored to
           your account level (B1). Pick the one you find easiest to remember.
           The proposals are generated entirely in your browser — SealKeeper's
           server never sees them.</p>
@@ -1198,14 +1197,15 @@
         SealKeeper is a security product. We treat reports the way we would
         wish ours to be treated: promptly, in writing, without legal threat.
         Encrypted mail is preferred; plain text is accepted. We acknowledge
-        within seventy-two hours and aim to publish a fix and advisory within
-        thirty days of confirmation.
+        within seventy-two hours and aim to publish a patched release within
+        thirty days for high-severity issues and ninety days for medium-severity
+        ones.
       </p>
       <p>
-        An informal bug-bounty programme rewards meaningful findings with a
-        public acknowledgement, a printed certificate of thanks, and — at our
-        discretion — a contribution to a security non-profit of the
-        researcher's choosing.
+        There is no monetary bug bounty at present. Researchers who report a
+        valid vulnerability are credited in the advisory, listed in the hall of
+        thanks and receive a signed, numbered certificate of thanks — unless
+        they ask to remain anonymous.
       </p>
     </div>
     <div>
