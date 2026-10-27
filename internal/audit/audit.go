@@ -128,7 +128,7 @@ const (
 	EventAdminLogout     = "admin.logout"
 
 	// FR-B.38: refused opening attempts of a reveal link.
-	EventTokenReuseAttempt   = "token.reuse_attempt"
+	EventTokenReuseAttempt   = "token.reuse_attempt" // #nosec G101 -- audit event type names, not credentials
 	EventTokenExpiredAttempt = "token.expired_attempt"
 	EventTokenUnknownAttempt = "token.unknown_attempt"
 	// EventRateLimitedSummary folds the request.rate_limited hits of one
