@@ -769,15 +769,37 @@ main hr {
   fill:  var(--cream) !important;
 }
 
-/* Sequence-diagram actors and notes also use foreignObject; same fix. */
+/* Sequence-diagram actor boxes are cardinal: cream text. */
 .md-rendered .mermaid .actor text,
 .md-rendered .mermaid .actor tspan,
 .md-rendered .mermaid .actor foreignObject div,
 .md-rendered .mermaid .actor foreignObject span,
-.md-rendered .mermaid .messageText,
-.md-rendered .mermaid text.actor {
+.md-rendered .mermaid text.actor-box {
   color: var(--cream) !important;
   fill:  var(--cream) !important;
+}
+
+/* Message labels, message lines, arrowheads and the stick-figure label sit
+   on the card background, not in a box: they follow the page theme. Mermaid
+   bakes its colours in at render time, so without this a theme toggle left
+   ink arrows on the dark card (and cream labels on the light one). */
+.md-rendered .mermaid .messageText,
+.md-rendered .mermaid text.actor-man,
+.md-rendered .mermaid text.actor-man tspan {
+  color: var(--fg) !important;
+  fill:  var(--fg) !important;
+  opacity: 1 !important;
+}
+.md-rendered .mermaid .messageLine0,
+.md-rendered .mermaid .messageLine1 {
+  stroke: var(--fg) !important;
+}
+.md-rendered .mermaid .flowchart-link {
+  stroke: var(--fg-muted) !important;
+}
+.md-rendered .mermaid marker path {
+  fill:   var(--fg) !important;
+  stroke: var(--fg) !important;
 }
 
 /* Notes have a gold background — force ink color for contrast. */
