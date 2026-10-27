@@ -129,3 +129,35 @@ func getDashboard(t *testing.T, h http.Handler, token string) string {
 	}
 	return w.Body.String()
 }
+
+// Regression (FR-C.23): disabling paris.corp.test refuses its users even
+// while *.corp.test is active; the request used to fall through to the
+// wildcard and be issued under the wildcard's policy.
+func TestDisabledDomainNotRescuedByActiveWildcard(t *testing.T) {
+	t.Parallel()
+	s, _, db := newModeServer(t, config.ModeProduction, false)
+	s.requestFloor = 0
+	repo := domains.NewRepo(db)
+	ctx := context.Background()
+	if _, err := repo.Create(ctx, "*.corp.test", "", true, nil); err != nil {
+		t.Fatal(err)
+	}
+	paris, err := repo.Create(ctx, "paris.corp.test", "", true, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SetActive(ctx, paris.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	h := s.Router()
+	if w := postRequest(h, "192.0.2.63:1000", "alice@paris.corp.test"); w.Code != http.StatusAccepted {
+		t.Fatalf("status %d, want the uniform 202", w.Code)
+	}
+	if n := countAudit(t, db, "token.issued"); n != 0 {
+		t.Fatalf("token.issued = %d for a disabled domain, want 0", n)
+	}
+	postRequest(h, "192.0.2.64:1000", "bob@lyon.corp.test")
+	if n := countAudit(t, db, "token.issued"); n != 1 {
+		t.Errorf("token.issued = %d, want 1 (sibling still admitted by the wildcard)", n)
+	}
+}

@@ -281,15 +281,60 @@ func TestFindMatchingIssuedFallsBackToInactiveRow(t *testing.T) {
 		t.Fatalf("FindMatchingIssued = %+v, %v, want the disabled exact row", got, err)
 	}
 
+	// A broader wildcard does not take over a link issued under the
+	// exact row: the governing row stays the most specific one.
+	if _, err := r.Create(ctx, "*.corp.test", "", true, nil); err != nil {
+		t.Fatal(err)
+	}
+	got, err = r.FindMatchingIssued(ctx, "paris.corp.test")
+	if err != nil || got.ID != exact.ID {
+		t.Fatalf("FindMatchingIssued = %+v, %v, want the disabled exact row, not the wildcard", got, err)
+	}
+	if _, err := r.FindMatchingIssued(ctx, "other.test"); !errors.Is(err, domains.ErrNotFound) {
+		t.Fatalf("FindMatchingIssued(unknown) = %v, want ErrNotFound", err)
+	}
+}
+
+// Regression (FR-C.23): disabling paris.corp.test must refuse its users
+// even while *.corp.test is active. Both the request gate and the policy
+// lookup used to skip the disabled row and fall through to the wildcard,
+// admitting the request under the wildcard's policy.
+func TestDisabledRowIsTerminalOverActiveWildcard(t *testing.T) {
+	t.Parallel()
+	r, _ := newRepo(t)
+	ctx := context.Background()
 	wild, err := r.Create(ctx, "*.corp.test", "", true, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err = r.FindMatchingIssued(ctx, "paris.corp.test")
-	if err != nil || got.ID != wild.ID {
-		t.Fatalf("FindMatchingIssued = %+v, %v, want the active wildcard first", got, err)
+	paris, err := r.Create(ctx, "paris.corp.test", "", true, nil)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, err := r.FindMatchingIssued(ctx, "other.test"); !errors.Is(err, domains.ErrNotFound) {
-		t.Fatalf("FindMatchingIssued(unknown) = %v, want ErrNotFound", err)
+	if err := r.SetActive(ctx, paris.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := r.Allows(ctx, "paris.corp.test"); err != nil || ok {
+		t.Errorf("Allows(paris.corp.test) = %v, %v, want refused", ok, err)
+	}
+	if _, err := r.FindMatching(ctx, "paris.corp.test"); !errors.Is(err, domains.ErrNotFound) {
+		t.Errorf("FindMatching(paris.corp.test) = %v, want ErrNotFound", err)
+	}
+	// Siblings, and deeper names with no row of their own (an exact row
+	// only governs its own name), still use the wildcard.
+	for _, d := range []string{"lyon.corp.test", "dept.paris.corp.test"} {
+		if ok, err := r.Allows(ctx, d); err != nil || !ok {
+			t.Errorf("Allows(%s) = %v, %v, want admitted by the wildcard", d, ok, err)
+		}
+		if got, err := r.FindMatching(ctx, d); err != nil || got.ID != wild.ID {
+			t.Errorf("FindMatching(%s) = %+v, %v, want the wildcard", d, got, err)
+		}
+	}
+	// A disabled wildcard is terminal for the names it governs too.
+	if err := r.SetActive(ctx, wild.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := r.Allows(ctx, "lyon.corp.test"); err != nil || ok {
+		t.Errorf("Allows(lyon.corp.test) under a disabled wildcard = %v, %v, want refused", ok, err)
 	}
 }

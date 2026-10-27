@@ -219,27 +219,34 @@ func (r *Repo) Count(ctx context.Context) (int64, error) {
 
 // ----- matching ------------------------------------------------------------
 
-// FindMatching returns the active allowlist row that best matches
-// `emailDomain`. Exact match wins over wildcards; the most specific
-// wildcard (deepest suffix) wins over a shallower one. Inactive rows are
-// skipped. Returns ErrNotFound when nothing applies.
+// FindMatching returns the allowlist row that governs `emailDomain`, if
+// it is active. The most specific existing row decides: exact match first,
+// then the deepest wildcard. A disabled row is terminal (FR-C.23): it
+// refuses the domain instead of falling through to a broader, active
+// wildcard, which would admit the request under another domain's policy.
+// Returns ErrNotFound when nothing applies.
 func (r *Repo) FindMatching(ctx context.Context, emailDomain string) (Domain, error) {
-	return r.findMatching(ctx, emailDomain, false)
+	row, err := r.mostSpecific(ctx, emailDomain)
+	if err != nil {
+		return Domain{}, err
+	}
+	if !row.Active {
+		return Domain{}, ErrNotFound
+	}
+	return row, nil
 }
 
 // FindMatchingIssued is FindMatching for a link that was already issued:
-// an active row still wins, but when none matches any more the most
-// specific inactive row is returned, so disabling a domain does not
-// break links sent before (FR-C.23). Never use it to admit a request.
+// it returns the governing row even when it has been disabled since, so
+// disabling a domain does not break links sent before (FR-C.23). Never use
+// it to admit a request.
 func (r *Repo) FindMatchingIssued(ctx context.Context, emailDomain string) (Domain, error) {
-	row, err := r.findMatching(ctx, emailDomain, false)
-	if !errors.Is(err, ErrNotFound) {
-		return row, err
-	}
-	return r.findMatching(ctx, emailDomain, true)
+	return r.mostSpecific(ctx, emailDomain)
 }
 
-func (r *Repo) findMatching(ctx context.Context, emailDomain string, includeInactive bool) (Domain, error) {
+// mostSpecific returns the first existing row among the exact name and its
+// ancestor wildcards, from most to least specific, active or not.
+func (r *Repo) mostSpecific(ctx context.Context, emailDomain string) (Domain, error) {
 	d := strings.ToLower(strings.TrimSpace(emailDomain))
 	if d == "" {
 		return Domain{}, ErrNotFound
@@ -254,22 +261,17 @@ func (r *Repo) findMatching(ctx context.Context, emailDomain string, includeInac
 		if errors.Is(err, ErrNotFound) {
 			continue
 		}
-		if err != nil {
-			return Domain{}, err
-		}
-		if row.Active || includeInactive {
-			return row, nil
-		}
+		return row, err
 	}
 	return Domain{}, ErrNotFound
 }
 
-// Allows reports whether `emailDomain` (e.g. "paris.entreprise.com") matches
-// any active allowlist row. An empty table refuses with ErrEmptyAllowlist
-// unless the repo was built WithOpenWhenEmpty(true), which admits all.
+// Allows reports whether `emailDomain` (e.g. "paris.entreprise.com") is
+// admitted: its governing row (see FindMatching) exists and is active. An
+// empty table refuses with ErrEmptyAllowlist unless the repo was built
+// WithOpenWhenEmpty(true), which admits all.
 func (r *Repo) Allows(ctx context.Context, emailDomain string) (bool, error) {
-	d := strings.ToLower(strings.TrimSpace(emailDomain))
-	if d == "" {
+	if strings.TrimSpace(emailDomain) == "" {
 		return false, nil
 	}
 	n, err := r.Count(ctx)
@@ -282,28 +284,11 @@ func (r *Repo) Allows(ctx context.Context, emailDomain string) (bool, error) {
 		}
 		return false, ErrEmptyAllowlist
 	}
-
-	// Build the list of candidate names: the exact value plus every
-	// ancestor wildcard form.
-	candidates := []string{d}
-	parts := strings.Split(d, ".")
-	for i := 0; i < len(parts)-1; i++ {
-		candidates = append(candidates, "*."+strings.Join(parts[i+1:], "."))
+	_, err = r.FindMatching(ctx, emailDomain)
+	if errors.Is(err, ErrNotFound) {
+		return false, nil
 	}
-
-	// Single round-trip via IN (...).
-	placeholders := make([]string, len(candidates))
-	args := make([]any, len(candidates))
-	for i, c := range candidates {
-		placeholders[i] = "?"
-		args[i] = c
-	}
-	q := `SELECT COUNT(*) FROM domains WHERE active = TRUE AND name IN (` + strings.Join(placeholders, ",") + `)`
-	var hits int64
-	if err := r.db.QueryRowContext(ctx, rebind(r.db, q), args...).Scan(&hits); err != nil {
-		return false, err
-	}
-	return hits > 0, nil
+	return err == nil, err
 }
 
 // ImportSummary is the shape returned by Import — the admin handler uses
