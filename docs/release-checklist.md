@@ -42,7 +42,7 @@ following by itself — a maintainer must configure them once in GitHub:
 | # | Step | Owner | Done? |
 |---|------|-------|-------|
 | 11 | Verify the GitHub Release page lists every artifact: binaries × 4, `SHA256SUMS{,.asc}`, image SBOM, Helm chart `.tgz`, deployment bundle `.tar.gz` + `.zip` + `.sha256`. | Release manager | ☐ |
-| 12 | Sanity-check the image: `docker run --rm -p 8443:8443 -e SK_MODE=eval ghcr.io/sealkeeper/sealkeeper:vX.Y.Z` then `curl http://localhost:8443/healthz` (smoke-image job already validated this in CI — this is a belt-and-braces check). | Release manager | ☐ |
+| 12 | Sanity-check the image: `docker run --rm -p 8443:8443 -e SK_MODE=eval ghcr.io/sched75-org/sealkeeper:vX.Y.Z` then `curl http://localhost:8443/healthz` (smoke-image job already validated this in CI — this is a belt-and-braces check). | Release manager | ☐ |
 | 13 | Verify signatures against the [verification guide](security/verification.md): `cosign verify`, `gh attestation verify`, `gpg --verify SHA256SUMS.asc`. | Release manager | ☐ |
 | 14 | Announce: short message in the project README's "Latest release" badge area, release notes excerpt to whichever channels are wired (Slack/email — optional). | Release manager | ☐ |
 | 15 | Open the next *Unreleased* block in `CHANGELOG.md` and bump development snapshot pointers if used. | Release manager | ☐ |

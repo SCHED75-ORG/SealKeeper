@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -49,7 +50,7 @@ func (s *webhookSink) Send(ctx context.Context, ev Event) error {
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.cfg.URL, bytes.NewReader(body))
 	if err != nil {
-		return err
+		return redactURLError(err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "SealKeeper/audit-dispatcher")
@@ -118,7 +119,7 @@ func (s *splunkSink) Send(ctx context.Context, ev Event) error {
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.cfg.URL, bytes.NewReader(body))
 	if err != nil {
-		return err
+		return redactURLError(err)
 	}
 	req.Header.Set("Authorization", "Splunk "+s.cfg.Token)
 	req.Header.Set("Content-Type", "application/json")
@@ -175,7 +176,7 @@ func (s *sentinelSink) Send(ctx context.Context, ev Event) error {
 	endpoint := fmt.Sprintf("https://%s.ods.opinsights.azure.com/api/logs?api-version=2016-04-01", s.cfg.WorkspaceID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
-		return err
+		return redactURLError(err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Log-Type", logType)
@@ -234,7 +235,7 @@ func (s *elasticSink) Send(ctx context.Context, ev Event) error {
 	endpoint := strings.TrimRight(s.cfg.URL, "/") + "/_bulk"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
-		return err
+		return redactURLError(err)
 	}
 	req.Header.Set("Content-Type", "application/x-ndjson")
 	switch {
@@ -273,10 +274,11 @@ func elasticDoc(ev Event) map[string]any {
 // error text reaches the admin UI and the audit log (and from there every
 // other sink), so echoing it would turn a sink into an SSRF read primitive.
 // Redirects are not followed (see NetPolicy.httpClient) and count as errors.
+// Transport errors go through redactURLError for the same reason.
 func doRequest(c *http.Client, req *http.Request, label string) error {
 	resp, err := c.Do(req)
 	if err != nil {
-		return fmt.Errorf("%s: do: %w", label, err)
+		return fmt.Errorf("%s: do: %w", label, redactURLError(err))
 	}
 	defer func() { _ = resp.Body.Close() }()
 	// Drain (bounded) so keepalive works, without retaining anything.
@@ -285,6 +287,24 @@ func doRequest(c *http.Client, req *http.Request, label string) error {
 		return fmt.Errorf("%s: HTTP %d", label, resp.StatusCode)
 	}
 	return nil
+}
+
+// redactURLError rewrites a *url.Error so its text names only the scheme and
+// host of the request URL. The sink URL is sealed at rest because its path
+// and query often hold the credential (Slack/Teams hook paths, ?token=),
+// while url.Error.Error() prints the whole URL, which would carry it into
+// the audit log, every other sink, the admin redirect and the server log.
+// The inner error stays wrapped so errors.Is / net.Error checks still work.
+func redactURLError(err error) error {
+	var ue *url.Error
+	if !errors.As(err, &ue) {
+		return err
+	}
+	where := "<redacted url>"
+	if u, perr := url.Parse(ue.URL); perr == nil && u.Host != "" {
+		where = u.Scheme + "://" + u.Host
+	}
+	return fmt.Errorf("%s %s: %w", ue.Op, where, ue.Err)
 }
 
 // closeIdle releases pooled connections of a sink's HTTP client when the

@@ -55,6 +55,27 @@ func TestCreateRejectsInvalidEmail(t *testing.T) {
 	}
 }
 
+// The login handler drops any email over MaxEmailBytes unread, so no
+// account may be created or renamed past it.
+func TestEmailCappedAtMaxEmailBytes(t *testing.T) {
+	t.Parallel()
+	r := newRepo(t)
+	ctx := context.Background()
+	at := "@example.test"
+	fits := strings.Repeat("a", admin.MaxEmailBytes-len(at)) + at
+	a, err := r.Create(ctx, fits, "supersecret-12chars")
+	if err != nil {
+		t.Fatalf("Create %d-byte email: %v", len(fits), err)
+	}
+	over := "b" + fits
+	if _, err := r.Create(ctx, over, "supersecret-12chars"); !errors.Is(err, admin.ErrInvalidEmail) {
+		t.Errorf("Create %d-byte email err = %v, want ErrInvalidEmail", len(over), err)
+	}
+	if err := r.ChangeEmail(ctx, a.ID, over); !errors.Is(err, admin.ErrInvalidEmail) {
+		t.Errorf("ChangeEmail %d-byte email err = %v, want ErrInvalidEmail", len(over), err)
+	}
+}
+
 func TestCreateRejectsDuplicate(t *testing.T) {
 	t.Parallel()
 	r := newRepo(t)
@@ -536,6 +557,42 @@ func TestVerifyPasswordCountsFailures(t *testing.T) {
 	}
 	if !errors.Is(last, admin.ErrAccountLocked) {
 		t.Fatalf("after repeated step-up failures: %v, want ErrAccountLocked", last)
+	}
+}
+
+// Regression: the step-up check never cleared an expired lockout, so a
+// lock started at /admin/login refused every sensitive action of an
+// already logged-in admin until they signed in again.
+func TestVerifyPasswordLockExpires(t *testing.T) {
+	t.Parallel()
+	const email, pw = "ops@example.test", "supersecret-12chars"
+	r, _, bad := enrolledAdmin(t, email, pw)
+	ctx := context.Background()
+	a, err := r.FindByEmail(ctx, email)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < admin.MaxFailedAttempts; i++ {
+		if _, err := r.Authenticate(ctx, email, "wrong-password", bad); !errors.Is(err, admin.ErrInvalidCreds) {
+			t.Fatalf("attempt %d: err = %v, want ErrInvalidCreds", i+1, err)
+		}
+	}
+	at := time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC) // enrolledAdmin's clock
+	during := r.WithClock(func() time.Time { return at.Add(admin.LockoutDuration - time.Minute) })
+	if err := during.VerifyPassword(ctx, a.ID, pw); !errors.Is(err, admin.ErrAccountLocked) {
+		t.Fatalf("during lockout: err = %v, want ErrAccountLocked", err)
+	}
+	after := r.WithClock(func() time.Time { return at.Add(admin.LockoutDuration + time.Minute) })
+	if err := after.VerifyPassword(ctx, a.ID, pw); err != nil {
+		t.Fatalf("after lockout expiry: err = %v, want nil", err)
+	}
+	// The new cycle still counts failures: the lock comes back.
+	var last error
+	for i := 0; i <= admin.MaxFailedAttempts; i++ {
+		last = after.VerifyPassword(ctx, a.ID, "wrong")
+	}
+	if !errors.Is(last, admin.ErrAccountLocked) {
+		t.Fatalf("new cycle failures: %v, want ErrAccountLocked", last)
 	}
 }
 

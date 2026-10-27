@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/sched75/sealkeeper/internal/audit"
+	"github.com/sched75/sealkeeper/internal/domains"
 	"github.com/sched75/sealkeeper/internal/mail"
 	"github.com/sched75/sealkeeper/internal/mailer"
 	"github.com/sched75/sealkeeper/internal/mailtemplates"
@@ -112,12 +113,7 @@ func (s *Server) requestRateGate(ctx context.Context, pr publicRequest) bool {
 		return true
 	}
 	s.rateHits.WithLabelValues(decision.Reason).Inc()
-	s.auditAppend(ctx, audit.EventRateLimited, pr.email, decision.Reason, map[string]any{
-		"ip_hash":              pr.ipHash,
-		"ua_hash":              pr.uaHash,
-		"limit_email_per_hour": s.cfg.RateLimitEmailPerHour,
-		"limit_ip_per_hour":    s.cfg.RateLimitIPPerHour,
-	})
+	s.auditRateLimited(ctx, pr, decision.Reason)
 	s.logger.Info("rate-limited request silently dropped",
 		"email", pr.email, "dimension", decision.Reason,
 	)
@@ -126,27 +122,32 @@ func (s *Server) requestRateGate(ctx context.Context, pr publicRequest) bool {
 
 // requestDomainGate — FR-C.20..23: consult the domain allowlist when it is
 // wired. A denied domain is FR-B.9-silent; a lookup error denies
-// (fail-safe) so a database hiccup can't open the gate.
+// (fail-safe) so a database hiccup can't open the gate. An empty
+// allowlist in production denies too (SK-37), audited as allowlist_empty.
 func (s *Server) requestDomainGate(ctx context.Context, pr publicRequest) bool {
 	if s.domains == nil {
 		return true
 	}
 	ok, err := s.domains.Allows(ctx, pr.domain)
-	if err != nil {
+	reason := "not_listed"
+	switch {
+	case errors.Is(err, domains.ErrEmptyAllowlist):
+		reason = "allowlist_empty"
+	case err != nil:
 		s.logger.Error("domains.Allows failed", "err", err)
 		return false
+	case ok:
+		return true
 	}
-	if !ok {
-		s.auditAppend(ctx, "request.domain_blocked", pr.email, pr.domain, map[string]any{
-			"ip_hash": pr.ipHash,
-			"ua_hash": pr.uaHash,
-		})
-		s.logger.Info("domain not in allowlist — silent drop",
-			"email", pr.email, "domain", pr.domain,
-		)
-		return false
-	}
-	return true
+	s.auditAppend(ctx, "request.domain_blocked", pr.email, pr.domain, map[string]any{
+		"ip_hash": pr.ipHash,
+		"ua_hash": pr.uaHash,
+		"reason":  reason,
+	})
+	s.logger.Info("domain not in allowlist — silent drop",
+		"email", pr.email, "domain", pr.domain, "reason", reason,
+	)
+	return false
 }
 
 // requestPolicyGate — FR-C.27..28: resolve a policy NOW so we never mint a
@@ -364,4 +365,94 @@ func (s *Server) notifyPostConsult(r *http.Request, tok tokens.Token) {
 		ip: s.clientIP(r),
 		ua: mailDisplayText(r.UserAgent(), maxMailUALen),
 	})
+}
+
+// Surfaces an opening attempt arrives through, recorded in its audit row.
+const (
+	surfacePolicyAPI  = "policy_api"
+	surfaceRevealPage = "reveal_page"
+)
+
+// unknownAttemptAuditPerIPWindow caps the token.unknown_attempt rows one
+// client can cause per 15 minutes. tokenLimiter already bounds the
+// lookups themselves; this keeps a token-space probe from turning every
+// one of them into a hash-chain row and a SIEM event.
+const unknownAttemptAuditPerIPWindow = 5
+
+// openAttemptEvents maps a refused opening to its audit event and to the
+// reveal page state.
+var openAttemptEvents = []struct {
+	err    error
+	event  string
+	state  string
+	capped bool // throttled by allowUnknownAttemptAudit
+}{
+	{tokens.ErrConsumed, audit.EventTokenReuseAttempt, "consumed", false},
+	{tokens.ErrExpired, audit.EventTokenExpiredAttempt, "expired", false},
+	{tokens.ErrNotFound, audit.EventTokenUnknownAttempt, "unknown", true},
+}
+
+// auditOpenAttempt — FR-B.38: every opening attempt is audit-logged,
+// reuses included. A successful consume writes token.consumed; this
+// records the refused ones (replayed, expired, unknown link), the first
+// being the main sign a link was intercepted or forwarded. tok is the row
+// tokens.Consume / Get returned with err (zero for an unknown token). It
+// is a no-op for a nil or unrelated (storage) error.
+func (s *Server) auditOpenAttempt(r *http.Request, surface, token string, tok tokens.Token, err error) {
+	for _, m := range openAttemptEvents {
+		if !errors.Is(err, m.err) {
+			continue
+		}
+		ip := s.clientIP(r)
+		if m.capped && !s.allowUnknownAttemptAudit(ip) {
+			return
+		}
+		details := map[string]any{
+			"surface": surface,
+			"ip_hash": s.hashShort(ip),
+			"ua_hash": s.hashShort(r.UserAgent()),
+		}
+		if tok.Domain != "" {
+			details["domain"] = tok.Domain
+		}
+		s.auditAppend(r.Context(), m.event, tok.Email, tokenRef(token), details)
+		return
+	}
+}
+
+// allowUnknownAttemptAudit charges one token.unknown_attempt row to the
+// client's rate-limit key; past the cap the probe is only counted in the
+// rate-limit metric.
+func (s *Server) allowUnknownAttemptAudit(ip string) bool {
+	if s.probeLimiter == nil || s.probeLimiter.Allow(rateLimitIPKey(ip)) {
+		return true
+	}
+	s.rateHits.WithLabelValues("unknown_token_audit").Inc()
+	return false
+}
+
+// previewRevealToken returns the reveal page state for token without
+// consuming it, and audits a refused opening (FR-B.38). A storage error
+// keeps the "ready" page: the consume call reports the real state.
+func (s *Server) previewRevealToken(r *http.Request, token string) string {
+	if s.tokens == nil {
+		return "ready"
+	}
+	tok, err := s.tokens.Get(r.Context(), token)
+	switch {
+	case err != nil:
+	case tok.ConsumedAt != nil:
+		err = tokens.ErrConsumed
+	case !time.Now().Before(tok.ExpiresAt):
+		err = tokens.ErrExpired
+	default:
+		return "ready"
+	}
+	for _, m := range openAttemptEvents {
+		if errors.Is(err, m.err) {
+			s.auditOpenAttempt(r, surfaceRevealPage, token, tok, err)
+			return m.state
+		}
+	}
+	return "ready"
 }

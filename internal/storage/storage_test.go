@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pressly/goose/v3"
+
 	"github.com/sched75/sealkeeper/internal/storage"
 	"github.com/sched75/sealkeeper/internal/storage/storagetest"
 )
@@ -137,8 +139,14 @@ func TestMigrateUpAppliedReportsVersions(t *testing.T) {
 		t.Fatalf("MigrateUpApplied first run: %v", err)
 	}
 	v, _ := s.SchemaVersion(ctx)
-	if int64(len(applied)) != v || applied[0] != 1 || applied[len(applied)-1] != v || !slices.Contains(applied, 14) {
-		t.Fatalf("applied = %v, want 1..%d", applied, v)
+	// Numbers may skip (a number reserved by a parallel branch): compare
+	// with the files on disk rather than with 1..v.
+	files, err := os.ReadDir(filepath.Join("migrations", "sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(applied) != len(files) || !slices.IsSorted(applied) || applied[0] != 1 || applied[len(applied)-1] != v || !slices.Contains(applied, 14) {
+		t.Fatalf("applied = %v, want every one of the %d migrations up to %d", applied, len(files), v)
 	}
 	again, err := s.MigrateUpApplied(ctx)
 	if err != nil {
@@ -146,6 +154,34 @@ func TestMigrateUpAppliedReportsVersions(t *testing.T) {
 	}
 	if len(again) != 0 {
 		t.Fatalf("second run applied %v, want none", again)
+	}
+}
+
+// Regression: a failing migration made MigrateUpApplied drop the versions
+// goose had already applied in the same run, so the 0014 cut-over looked
+// like it never happened.
+func TestMigrateUpAppliedReportsVersionsBeforeFailure(t *testing.T) {
+	t.Parallel()
+	s := withSQLite(t)
+	ctx, cancel := context.WithTimeout(context.Background(), storagetest.SetupTimeout)
+	defer cancel()
+	p, err := goose.NewProvider(goose.DialectSQLite3, s.DB(), os.DirFS("migrations/sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.UpTo(ctx, storage.AuditHeadMigration-1); err != nil {
+		t.Fatal(err)
+	}
+	// 0015 adds this column: make it fail on a duplicate.
+	if _, err := s.DB().ExecContext(ctx, `ALTER TABLE integrations ADD COLUMN config_enc BLOB`); err != nil {
+		t.Fatal(err)
+	}
+	applied, err := s.MigrateUpApplied(ctx)
+	if err == nil {
+		t.Fatal("blocked migration 0015 succeeded")
+	}
+	if !slices.Equal(applied, []int64{storage.AuditHeadMigration}) {
+		t.Fatalf("applied = %v, want [%d]", applied, storage.AuditHeadMigration)
 	}
 }
 

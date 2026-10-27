@@ -3,6 +3,7 @@ package tokens_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -196,5 +197,86 @@ func TestGetReturnsRow(t *testing.T) {
 	}
 	if got.ConsumedAt != nil {
 		t.Errorf("ConsumedAt should be nil for fresh token")
+	}
+}
+
+// storedValues returns every non-NULL text column of every request_tokens
+// row, so the check holds whatever the columns are called.
+func storedValues(t *testing.T, s storage.Store) []string {
+	t.Helper()
+	rows, err := s.DB().QueryContext(context.Background(), "SELECT * FROM request_tokens")
+	if err != nil {
+		t.Fatalf("select: %v", err)
+	}
+	defer rows.Close()
+	cols, err := rows.Columns()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for rows.Next() {
+		vals := make([]any, len(cols))
+		ptrs := make([]any, len(cols))
+		for i := range vals {
+			ptrs[i] = &vals[i]
+		}
+		if err := rows.Scan(ptrs...); err != nil {
+			t.Fatal(err)
+		}
+		for _, v := range vals {
+			switch x := v.(type) {
+			case string:
+				out = append(out, x)
+			case []byte:
+				out = append(out, string(x))
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// Regression (revealtokens): request_tokens.token held the bearer token
+// verbatim, so a database dump or backup yielded live reveal links. Only
+// a digest is stored now, and a stored digest is not itself a token.
+func TestDatabaseNeverHoldsRawRevealToken(t *testing.T) {
+	t.Parallel()
+	repo, s := newRepo(t, nil)
+	ctx := context.Background()
+	tok, err := repo.Issue(ctx, tokens.IssueOptions{Email: "dump@example.com"})
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	if _, err := repo.Get(ctx, tok.Token); err != nil {
+		t.Fatalf("Get(raw token): %v", err)
+	}
+	stored := storedValues(t, s)
+	if len(stored) == 0 {
+		t.Fatal("no request_tokens row written")
+	}
+	for _, v := range stored {
+		if strings.Contains(v, tok.Token) {
+			t.Fatalf("raw reveal token stored in request_tokens: %q", v)
+		}
+		if _, err := repo.Get(ctx, v); !errors.Is(err, tokens.ErrNotFound) {
+			t.Fatalf("Get(stored value %q) err = %v, want ErrNotFound", v, err)
+		}
+		if _, err := repo.Consume(ctx, v, "", ""); !errors.Is(err, tokens.ErrNotFound) {
+			t.Fatalf("Consume(stored value %q) err = %v, want ErrNotFound", v, err)
+		}
+	}
+	got, err := repo.Consume(ctx, tok.Token, "", "")
+	if err != nil {
+		t.Fatalf("Consume(raw token): %v", err)
+	}
+	if got.Token != tok.Token || got.Email != "dump@example.com" {
+		t.Fatalf("Consume returned %+v", got)
+	}
+	for _, v := range storedValues(t, s) {
+		if strings.Contains(v, tok.Token) {
+			t.Fatalf("raw reveal token stored after consumption: %q", v)
+		}
 	}
 }

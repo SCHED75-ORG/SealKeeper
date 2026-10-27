@@ -138,4 +138,64 @@ describe("calculateEntropy", () => {
     });
     expect(merged.breakdown.map((b) => b.component)).not.toContain("citation-selection");
   });
+
+  it("G1 corpus large enough for B1 does not overflow the call stack", () => {
+    // ~125k citations are needed to clear B1 on corpus size alone; spreading
+    // one argument per citation group used to throw RangeError there.
+    const r = calculateEntropy({
+      generator: "G1",
+      parameters: { library: library(130000, "Citation numero ") },
+    });
+    expect(r.anssiLevels.B1).toBe(true);
+  }, 60_000);
+
+  // Library entries holding a separator character used to be credited in
+  // full although different draws print the same password.
+  it("G2 does not credit words that hold a separator character", () => {
+    const dashes = Array.from({ length: 1024 }, (_, i) => "-".repeat(i + 1));
+    const r = calculateEntropy({
+      generator: "G2",
+      parameters: {
+        library: dashes,
+        numberOfWords: 11,
+        separatorOptions: ["-"],
+        numericGroups: [],
+      },
+    });
+    expect(r.expectedBits).toBe(0);
+    const hyphen = calculateEntropy({
+      generator: "G2",
+      parameters: {
+        library: ["porte", "monnaie", "porte-monnaie"],
+        numberOfWords: 40,
+        separatorOptions: ["-", "+"],
+      },
+    });
+    expect(hyphen.breakdown).toEqual([{ component: "digit-suffix", bits: 13.2 }]);
+    // Never joined: the separator cannot blur the entry.
+    const single = calculateEntropy({
+      generator: "G2",
+      parameters: { library: ["a-b", "c-d"], numberOfWords: 1, numericGroups: [{ separator: "" }] },
+    });
+    expect(single.expectedBits).toBe(14.2);
+  });
+
+  it("G1 folds separator characters into word breaks", () => {
+    // 2^17 citations "w?w?…w" with ? in {" ", "-"} all print "w-w-…-w".
+    const citations = Array.from({ length: 1 << 17 }, (_, i) => {
+      let s = "w";
+      for (let bit = 0; bit < 17; bit++) s += (i & (1 << bit) ? "-" : " ") + "w";
+      return s;
+    });
+    const r = calculateEntropy({
+      generator: "G1",
+      parameters: {
+        library: citations,
+        separatorOptions: ["-"],
+        numericGroups: [{ position: "suffix", digitsCount: 10 }],
+      },
+    });
+    expect(r.breakdown).toEqual([{ component: "digit-groups", bits: 33.2 }]);
+    expect(r.anssiLevels.B1).toBe(false);
+  });
 });

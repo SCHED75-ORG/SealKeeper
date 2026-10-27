@@ -587,4 +587,4 @@ Trois fonctionnalités sont reportées à v0.2 (SSE live audit log, endpoint `/h
 
 ---
 
-*Document maintenu dans le repo `sched75/sealkeeper` sous `docs/prd/G-api-rest.md`.*
+*Document maintenu dans le repo `SCHED75-ORG/SealKeeper` sous `docs/prd/G-api-rest.md`.*

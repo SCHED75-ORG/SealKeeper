@@ -15,11 +15,14 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/sched75/sealkeeper/internal/webbundle"
 )
 
 // Mode is the high-level operating mode of the SealKeeper instance.
@@ -63,6 +66,8 @@ type Config struct {
 	// startup rather than silently ignored.
 	MaintenanceMode bool `yaml:"maintenance_mode"`
 
+	// Deprecated: no /api/docs route exists. true only produces a startup
+	// warning (see Warnings) rather than being silently ignored.
 	SwaggerUIEnabled bool `yaml:"swagger_ui_enabled"`
 	DemoMode         bool `yaml:"demo_mode"`
 
@@ -78,8 +83,9 @@ type Config struct {
 
 	// WebDir is the directory served at /static/*. The reveal page <script
 	// src="/static/sealkeeper-generation.umd.js"> lives in there. Defaults
-	// to the best-existing path among /app/web (in-image), ./web/dist
-	// (developer build) and ./web (Docker copy target).
+	// to the first of /app/web (in-image), ./web/dist (developer build) and
+	// ./web (Docker copy target) that holds the bundle file. When none does
+	// the server serves the bundle embedded at build time (webbundle).
 	WebDir string `yaml:"web_dir"`
 
 	// InstanceDomain is the bare hostname used in the From: address and the
@@ -95,6 +101,15 @@ type Config struct {
 	// Rate limits (FR-B.11..13). 0 disables the corresponding limiter.
 	RateLimitEmailPerHour int `yaml:"rate_limit_email_per_hour"`
 	RateLimitIPPerHour    int `yaml:"rate_limit_ip_per_hour"`
+
+	// Retention periods (RGPD FR-I.29..37). The daily retention job started
+	// by serve deletes what is older. Whole days (hours for the session
+	// grace) so the YAML and env forms share one unit.
+	RetentionRequestTokensDays int `yaml:"retention_request_tokens_days"` // FR-I.29
+	RetentionSessionGraceHours int `yaml:"retention_session_grace_hours"` // FR-I.30
+	RetentionAuditDays         int `yaml:"retention_audit_days"`          // FR-I.31
+	RetentionCapturedMailDays  int `yaml:"retention_captured_mail_days"`  // FR-I.32
+	RetentionDisabledAdminDays int `yaml:"retention_disabled_admin_days"` // FR-I.34
 
 	// LibrariesDir is the on-disk directory backing /admin/libraries
 	// uploads. Defaults to ./data/libraries relative to the binary's cwd.
@@ -131,6 +146,12 @@ func Defaults() Config {
 		RateLimitEmailPerHour:   3,  // FR-B.11
 		RateLimitIPPerHour:      10, // FR-B.12
 		MailLanguage:            "en",
+
+		RetentionRequestTokensDays: 30,
+		RetentionSessionGraceHours: 24,
+		RetentionAuditDays:         365,
+		RetentionCapturedMailDays:  7,
+		RetentionDisabledAdminDays: 90,
 	}
 }
 
@@ -177,6 +198,7 @@ func Load() (Config, error) {
 		cfg.LibrariesDir = "data/libraries"
 	}
 	cfg.MailLanguage = strings.ToLower(strings.TrimSpace(cfg.MailLanguage))
+	cfg.SMTPTLS = strings.ToLower(strings.TrimSpace(cfg.SMTPTLS))
 
 	if err := cfg.validate(); err != nil {
 		return cfg, err
@@ -195,6 +217,9 @@ func (c Config) deprecationWarnings() []string {
 	}
 	if c.SessionTTL != d.SessionTTL {
 		out = append(out, "SK_SESSION_TTL_SECONDS / session_ttl is ignored: the user session lifetime is set per policy in /admin/policies")
+	}
+	if c.SwaggerUIEnabled {
+		out = append(out, "SK_SWAGGER_UI_ENABLED / swagger_ui_enabled is not implemented and is ignored: no /api/docs route is served")
 	}
 	return out
 }
@@ -241,6 +266,11 @@ func applyEnv(cfg *Config) error {
 	getString(&cfg.MailLanguage, "SK_MAIL_LANGUAGE")
 	getInt(&cfg.RateLimitEmailPerHour, "SK_RATE_LIMIT_EMAIL_PER_HOUR")
 	getInt(&cfg.RateLimitIPPerHour, "SK_RATE_LIMIT_IP_PER_HOUR")
+	getInt(&cfg.RetentionRequestTokensDays, "SK_RETENTION_REQUEST_TOKENS_DAYS")
+	getInt(&cfg.RetentionSessionGraceHours, "SK_RETENTION_SESSION_GRACE_HOURS")
+	getInt(&cfg.RetentionAuditDays, "SK_RETENTION_AUDIT_DAYS")
+	getInt(&cfg.RetentionCapturedMailDays, "SK_RETENTION_CAPTURED_MAIL_DAYS")
+	getInt(&cfg.RetentionDisabledAdminDays, "SK_RETENTION_DISABLED_ADMIN_DAYS")
 	getString(&cfg.LibrariesDir, "SK_LIBRARIES_DIR")
 	getString(&cfg.SMTPHost, "SK_SMTP_HOST")
 	getInt(&cfg.SMTPPort, "SK_SMTP_PORT")
@@ -319,7 +349,21 @@ func (c Config) validate() error {
 	default:
 		return fmt.Errorf("invalid SK_MAIL_LANGUAGE %q (want \"en\" or \"fr\")", c.MailLanguage)
 	}
+	if err := checkSMTPTLS(c.SMTPTLS); err != nil {
+		return err
+	}
 	return c.validateLimits()
+}
+
+// checkSMTPTLS refuses an unknown SMTP TLS mode at boot. The mailer only
+// rejects it at send time, so every reveal mail would fail silently
+// behind the always-202 public answer. Keep in sync with mailer.TLSMode.
+func checkSMTPTLS(mode string) error {
+	switch mode {
+	case "", "auto", "starttls", "implicit", "disable":
+		return nil
+	}
+	return fmt.Errorf("invalid SK_SMTP_TLS %q (want \"auto\", \"starttls\", \"implicit\" or \"disable\")", mode)
 }
 
 // validateLimits checks the numeric knobs. Durations have a one-minute
@@ -353,6 +397,32 @@ func (c Config) validateLimits() error {
 	}
 	if c.SMTPTimeout < 0 {
 		return fmt.Errorf("SK_SMTP_TIMEOUT_SECONDS must not be negative, got %s", c.SMTPTimeout)
+	}
+	return c.validateRetention()
+}
+
+// MinAuditRetentionDays is the floor on SK_RETENTION_AUDIT_DAYS: the CNIL
+// recommends keeping security traces at least six months (FR-I.31).
+const MinAuditRetentionDays = 180
+
+// validateRetention bounds the retention periods. There is no "keep
+// forever" value: FR-I.10 requires every category to expire. The audit
+// log has a six-month floor so a typo cannot purge security traces early.
+func (c Config) validateRetention() error {
+	const maxDays = 36500 // keeps the durations far from overflowing
+	for _, k := range []struct {
+		key       string
+		v, lo, hi int
+	}{
+		{"SK_RETENTION_REQUEST_TOKENS_DAYS", c.RetentionRequestTokensDays, 1, maxDays},
+		{"SK_RETENTION_SESSION_GRACE_HOURS", c.RetentionSessionGraceHours, 1, maxDays * 24},
+		{"SK_RETENTION_AUDIT_DAYS", c.RetentionAuditDays, MinAuditRetentionDays, maxDays},
+		{"SK_RETENTION_CAPTURED_MAIL_DAYS", c.RetentionCapturedMailDays, 1, maxDays},
+		{"SK_RETENTION_DISABLED_ADMIN_DAYS", c.RetentionDisabledAdminDays, 1, maxDays},
+	} {
+		if k.v < k.lo || k.v > k.hi {
+			return fmt.Errorf("%s must be between %d and %d, got %d", k.key, k.lo, k.hi, k.v)
+		}
 	}
 	return nil
 }
@@ -467,12 +537,16 @@ func parseSecondsEnv(dst *time.Duration, key string) error {
 	return nil
 }
 
-// autodetectWebDir picks the first existing path among the common locations
-// the build pipeline writes the JS bundle to.
+// autodetectWebDir picks the first path among the common locations the
+// build pipeline writes the JS bundle to that actually holds the bundle.
+// A bare directory is not enough: a standalone binary started from a cwd
+// with an unrelated (or source-only) web/ would otherwise mount it over
+// the embedded copy and 404 the reveal page's script.
 func autodetectWebDir() string {
 	candidates := []string{"/app/web", "web/dist", "./web/dist", "web", "./web"}
 	for _, c := range candidates {
-		if info, err := os.Stat(c); err == nil && info.IsDir() {
+		info, err := os.Stat(filepath.Join(c, webbundle.BundleName))
+		if err == nil && info.Mode().IsRegular() && info.Size() > 0 {
 			return c
 		}
 	}

@@ -6,13 +6,23 @@
 // driver the [storage.Store] handed it. Queries stay portable between
 // Postgres and SQLite by sticking to ANSI SQL plus a CASE-driven
 // "only mark consumed if still consumable" UPDATE.
+//
+// The bearer token itself is never stored: request_tokens.token_hash holds
+// a digest of it, so a database dump or backup yields no usable reveal
+// link (hashToken). A plain domain-separated SHA-256 suffices — the token carries 256
+// bits of CSPRNG output, so a key adds no resistance to recovering it from
+// its digest (an HMAC only helps low-entropy secrets), and keeping the
+// master secret out of the lookup means rotating that secret cannot
+// orphan pending links (same choice as admin_sessions, SK-12).
 package tokens
 
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -34,7 +44,17 @@ var (
 	ErrExpired  = errors.New("tokens: expired")
 )
 
-// Token is the row we ever expose to callers.
+// hashToken is what request_tokens.token_hash stores for a bearer token.
+// The prefix keeps it distinct from every other digest of the same token
+// (the audit tokenRef, for one).
+func hashToken(token string) string {
+	sum := sha256.Sum256([]byte("sealkeeper-reveal-token:" + token))
+	return hex.EncodeToString(sum[:])
+}
+
+// Token is the row we ever expose to callers. Token is the raw bearer
+// value: set by Issue, and echoed back from the caller's argument by Get
+// and Consume — it is never read from the database.
 type Token struct {
 	Token      string
 	Email      string
@@ -98,10 +118,10 @@ func (r *Repo) Issue(ctx context.Context, opts IssueOptions) (Token, error) {
 	expires := issued.Add(ttl)
 
 	const q = `INSERT INTO request_tokens
-		(token, email, domain, requested_ip_hash, requested_ua_hash, issued_at, expires_at)
+		(token_hash, email, domain, requested_ip_hash, requested_ua_hash, issued_at, expires_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?)`
 	if _, err := r.db.ExecContext(ctx, rebind(r.db, q),
-		tok, strings.ToLower(opts.Email), strings.ToLower(opts.Domain),
+		hashToken(tok), strings.ToLower(opts.Email), strings.ToLower(opts.Domain),
 		nullable(opts.IPHash), nullable(opts.UAHash),
 		issued, expires,
 	); err != nil {
@@ -131,7 +151,8 @@ func (r *Repo) Consume(ctx context.Context, token string, ipHash, uaHash string)
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	row, err := scanRow(tx.QueryRowContext(ctx, rebind(r.db, selectQ), token))
+	digest := hashToken(token)
+	row, err := scanRow(tx.QueryRowContext(ctx, rebind(r.db, selectQ), digest), token)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return Token{}, ErrNotFound
@@ -148,8 +169,8 @@ func (r *Repo) Consume(ctx context.Context, token string, ipHash, uaHash string)
 
 	const upd = `UPDATE request_tokens
 		SET consumed_at = ?, consumed_ip_hash = ?, consumed_ua_hash = ?
-		WHERE token = ? AND consumed_at IS NULL`
-	res, err := tx.ExecContext(ctx, rebind(r.db, upd), now, nullable(ipHash), nullable(uaHash), token)
+		WHERE token_hash = ? AND consumed_at IS NULL`
+	res, err := tx.ExecContext(ctx, rebind(r.db, upd), now, nullable(ipHash), nullable(uaHash), digest)
 	if err != nil {
 		return Token{}, fmt.Errorf("tokens.Consume: update: %w", err)
 	}
@@ -170,7 +191,7 @@ func (r *Repo) Consume(ctx context.Context, token string, ipHash, uaHash string)
 // tokens. Useful for the reveal page to check token state before the user
 // actually clicks "Décoder".
 func (r *Repo) Get(ctx context.Context, token string) (Token, error) {
-	row, err := scanRow(r.db.QueryRowContext(ctx, rebind(r.db, selectQ), token))
+	row, err := scanRow(r.db.QueryRowContext(ctx, rebind(r.db, selectQ), hashToken(token)), token)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return Token{}, ErrNotFound
@@ -180,8 +201,8 @@ func (r *Repo) Get(ctx context.Context, token string) (Token, error) {
 	return row, nil
 }
 
-const selectQ = `SELECT token, email, domain, issued_at, expires_at, consumed_at
-	FROM request_tokens WHERE token = ?`
+const selectQ = `SELECT email, domain, issued_at, expires_at, consumed_at
+	FROM request_tokens WHERE token_hash = ?`
 
 // rowScanner abstracts *sql.Row and *sql.Rows so scanRow works for both.
 type rowScanner interface {
@@ -190,15 +211,16 @@ type rowScanner interface {
 
 // scanRow reads a request_tokens row, tolerating both time.Time (Postgres,
 // driver-decoded) and string (SQLite, raw TIMESTAMP text) representations
-// for the timestamp columns.
-func scanRow(rs rowScanner) (Token, error) {
+// for the timestamp columns. token is the caller's bearer value: only its
+// digest is stored.
+func scanRow(rs rowScanner, token string) (Token, error) {
 	var (
-		row         Token
+		row         = Token{Token: token}
 		issuedRaw   any
 		expiresRaw  any
 		consumedRaw any
 	)
-	if err := rs.Scan(&row.Token, &row.Email, &row.Domain, &issuedRaw, &expiresRaw, &consumedRaw); err != nil {
+	if err := rs.Scan(&row.Email, &row.Domain, &issuedRaw, &expiresRaw, &consumedRaw); err != nil {
 		return Token{}, err
 	}
 	t, err := toTime(issuedRaw)

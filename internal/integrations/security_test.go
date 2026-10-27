@@ -139,6 +139,81 @@ func TestDispatcherSecurityEventSurvivesBulkFlood(t *testing.T) {
 	}
 }
 
+// Regression (r3 #3): admin.login_failed can be produced without any
+// credential (a rate-limited POST /admin/login costs no bcrypt). It used to
+// share the security lane with authenticated admin changes, so a flood of
+// failed logins filled that lane and admin.created was dropped.
+func TestDispatcherLoginFailedFloodKeepsAdminEvents(t *testing.T) {
+	t.Parallel()
+	repo := newRepo(t)
+	rs := newRecordingServer(t, nil)
+	mkWebhook(t, repo, "siem", rs.srv.URL)
+
+	d := integrations.NewDispatcher(repo, nil, 8, 5*time.Second).WithNetPolicy(integrations.TestPolicy)
+	// Not started yet: the intake lanes fill up.
+	for i := 0; i < 500; i++ {
+		d.Push(integrations.NewEvent(int64(i), "admin.login_failed", "x", "", nil, "", "", time.Now()))
+	}
+	d.Push(integrations.NewEvent(501, "admin.created", "mallory", "backdoor@evil", nil, "", "", time.Now()))
+	if st := d.Stats(); st.DropsSecurity != 0 || st.DropsAnonymous == 0 {
+		t.Fatalf("Stats = %+v, want anonymous-lane drops only", st)
+	}
+	d.Start(context.Background())
+	t.Cleanup(d.Stop)
+	if !waitFor(t, 5*time.Second, func() bool { return rs.has("admin.created") }) {
+		t.Fatalf("admin.created lost behind login_failed flood; stats=%+v", d.Stats())
+	}
+}
+
+// Same flood against a stalled sink: the per-sink queues must keep the
+// authenticated event too, and the drop notice must name the lane.
+func TestDispatcherLoginFailedFloodStalledSinkKeepsAdminEvents(t *testing.T) {
+	t.Parallel()
+	repo := newRepo(t)
+	release := make(chan struct{})
+	rs := newRecordingServer(t, release)
+	mkWebhook(t, repo, "stuck", rs.srv.URL)
+
+	d := integrations.NewDispatcher(repo, nil, 2, 10*time.Second).WithNetPolicy(integrations.TestPolicy)
+	d.Start(context.Background())
+	t.Cleanup(d.Stop)
+
+	for i := 0; i < 200; i++ {
+		d.Push(integrations.NewEvent(int64(i), "admin.login_failed", "x", "", nil, "", "", time.Now()))
+	}
+	if !waitFor(t, 3*time.Second, func() bool { return d.Stats().DropsAnonymous > 0 }) {
+		t.Fatalf("expected anonymous-lane drops; stats=%+v", d.Stats())
+	}
+	d.Push(integrations.NewEvent(1000, "admin.created", "mallory", "backdoor@evil", nil, "", "", time.Now()))
+	time.Sleep(100 * time.Millisecond) // let the router hand it to the worker
+	close(release)
+	if !waitFor(t, 5*time.Second, func() bool { return rs.has("admin.created") }) {
+		t.Fatalf("admin.created lost behind login_failed flood; stats=%+v", d.Stats())
+	}
+	if st := d.Stats(); st.DropsSecurity != 0 {
+		t.Fatalf("Stats = %+v, want no security-lane drop", st)
+	}
+}
+
+func TestLaneOf(t *testing.T) {
+	t.Parallel()
+	cases := []struct{ ev, want string }{
+		{"request.rate_limited", "bulk"},
+		{"mail.send_failed", "bulk"},
+		{"admin.login_failed", "anonymous"},
+		{"admin.login", "security"},
+		{"admin.created", "security"},
+		{"admin.step_up_failed", "security"},
+		{"integration.deleted", "security"},
+		{"unknown.type", "security"},
+	}
+	for _, c := range cases {
+		if got := integrations.LaneOf(c.ev); got != c.want {
+			t.Errorf("LaneOf(%q) = %q, want %q", c.ev, got, c.want)
+		}
+	}
+}
+
 // Drops are surfaced to the sink itself once it recovers, and exported as
 // Prometheus counters.
 func TestDispatcherDropNoticeAndMetrics(t *testing.T) {
@@ -428,6 +503,55 @@ func TestTestSinkErrorCarriesStatusOnly(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "hunter2") || strings.Contains(err.Error(), "internal_secret") {
 		t.Fatalf("err = %q reflects the response body", err)
+	}
+}
+
+// Regression: a transport failure surfaced Go's *url.Error text, which holds
+// the whole request URL. Webhook paths and query strings carry secrets
+// (Slack/Teams hooks, ?token=), and the error reaches the audit log, every
+// other sink and the admin redirect, so only scheme + host may remain.
+func TestTestSinkTransportErrorRedactsURL(t *testing.T) {
+	t.Parallel()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	closedAddr := ln.Addr().String()
+	_ = ln.Close()
+	// A plain-http listener reached over https fails the TLS handshake.
+	plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(plain.Close)
+
+	const path = "/services/T000/B000/XXXXSECRETXXXX?token=hec-abc123"
+	cases := []struct {
+		name, base string
+	}{
+		{"connection refused", "http://" + closedAddr},
+		{"tls failure", "https://" + plain.Listener.Addr().String()},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			row := integrations.Integration{
+				Name: "leaky", Kind: integrations.KindWebhook,
+				ConfigJSON: json.RawMessage(`{"url":"` + c.base + path + `"}`),
+			}
+			err := integrations.TestSink(context.Background(), row, "sealkeeper.test", integrations.TestPolicy)
+			if err == nil {
+				t.Fatal("TestSink succeeded, want a transport error")
+			}
+			msg := err.Error()
+			for _, secret := range []string{"XXXXSECRETXXXX", "hec-abc123", "/services"} {
+				if strings.Contains(msg, secret) {
+					t.Fatalf("err = %q leaks %q from the sink URL", msg, secret)
+				}
+			}
+			if !strings.Contains(msg, "127.0.0.1") {
+				t.Errorf("err = %q, want the sink host kept for diagnosis", msg)
+			}
+		})
 	}
 }
 

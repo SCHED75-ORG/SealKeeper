@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sched75/sealkeeper/internal/mail"
 	"github.com/sched75/sealkeeper/internal/storage"
 )
 
@@ -36,6 +37,10 @@ var (
 	ErrNotFound      = errors.New("elevations: not found")
 	ErrAlreadyExists = errors.New("elevations: already exists")
 	ErrInvalidLevel  = errors.New("elevations: invalid level")
+	ErrInvalidEmail  = errors.New("elevations: invalid email")
+	// ErrDomainMismatch: the email does not belong to the chosen domain
+	// row, so that row's cascade delete would not remove it (FR-C.24).
+	ErrDomainMismatch = errors.New("elevations: email outside the domain")
 )
 
 // Elevation is the row view.
@@ -66,16 +71,21 @@ func (r *Repo) WithClock(now func() time.Time) *Repo {
 	return &c
 }
 
-// Create inserts an elevation. The email is canonicalised to lowercase and
-// trimmed. Returns ErrAlreadyExists when the (domain_id, email) pair
-// already has a row — admins must Delete then re-Create to change level.
+// Create inserts an elevation. The email must be a bare address (stored
+// lowercase) under the domain row: exact name, or a descendant of a
+// wildcard row (ErrDomainMismatch). Returns ErrAlreadyExists when the
+// address already sits on a list under any domain row (FR-C.39) — admins
+// must Delete then re-Create to change level.
 func (r *Repo) Create(ctx context.Context, domainID int64, email string, level Level, reason string, adminID *int64) (Elevation, error) {
 	if level != LevelB2 && level != LevelB3 {
 		return Elevation{}, fmt.Errorf("%w: %q", ErrInvalidLevel, level)
 	}
-	email = strings.ToLower(strings.TrimSpace(email))
-	if email == "" {
-		return Elevation{}, errors.New("elevations.Create: empty email")
+	email, err := mail.NormalizeAddress(email)
+	if err != nil {
+		return Elevation{}, fmt.Errorf("%w: %w", ErrInvalidEmail, err)
+	}
+	if err := r.checkPlacement(ctx, domainID, email); err != nil {
+		return Elevation{}, err
 	}
 	now := r.now().UTC()
 	const q = `INSERT INTO elevations
@@ -99,6 +109,42 @@ func (r *Repo) Create(ctx context.Context, domainID int64, email string, level L
 		CreatedByAdminID: adminID,
 		CreatedAt:        now,
 	}, nil
+}
+
+// checkPlacement refuses an email outside the domain row and an email
+// that already has a row under any domain. The probe is not atomic with
+// the INSERT; the (domain_id, email) UNIQUE constraint still covers the
+// same-row race, and the admin surface is the only writer.
+func (r *Repo) checkPlacement(ctx context.Context, domainID int64, email string) error {
+	var name string
+	err := r.db.QueryRowContext(ctx, rebind(r.db, `SELECT name FROM domains WHERE id = ?`), domainID).Scan(&name)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("%w: unknown domain id %d", ErrDomainMismatch, domainID)
+	}
+	if err != nil {
+		return fmt.Errorf("elevations.Create: %w", err)
+	}
+	if !domainCovers(name, email[strings.LastIndexByte(email, '@')+1:]) {
+		return fmt.Errorf("%w: %s is not under %s", ErrDomainMismatch, email, name)
+	}
+	var n int
+	err = r.db.QueryRowContext(ctx, rebind(r.db, `SELECT COUNT(*) FROM elevations WHERE email = ?`), email).Scan(&n)
+	if err != nil {
+		return fmt.Errorf("elevations.Create: %w", err)
+	}
+	if n > 0 {
+		return ErrAlreadyExists
+	}
+	return nil
+}
+
+// domainCovers mirrors domains.FindMatching: an exact row matches only
+// its own name, a "*.x" row matches strict descendants of x.
+func domainCovers(name, emailDomain string) bool {
+	if strings.HasPrefix(name, "*.") {
+		return strings.HasSuffix(emailDomain, name[1:])
+	}
+	return emailDomain == name
 }
 
 // Lookup returns the level for an (domain_id, email) pair. Returns LevelB1

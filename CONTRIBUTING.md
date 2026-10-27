@@ -12,7 +12,7 @@ By participating, you agree to abide by our [Code of Conduct](CODE_OF_CONDUCT.md
 
 Before opening a new issue, please:
 
-1. Search [existing issues](https://github.com/sched75/sealkeeper/issues) to avoid duplicates
+1. Search [existing issues](https://github.com/SCHED75-ORG/SealKeeper/issues) to avoid duplicates
 2. For bugs: use the **Bug report** template and include enough information to reproduce
 3. For features: use the **Feature request** template and explain the user need clearly
 4. For security: **do not file a public issue** — see [`SECURITY.md`](SECURITY.md)
@@ -30,7 +30,7 @@ Before opening a new issue, please:
 sequenceDiagram
     actor C as Contributor
     participant F as Fork
-    participant U as Upstream (sched75/sealkeeper)
+    participant U as Upstream (SCHED75-ORG/SealKeeper)
     participant CI as GitHub Actions
     participant M as Maintainer
 
@@ -111,7 +111,7 @@ security(crypto): replace deprecated GCM implementation
 
 ```bash
 # Clone the repository
-git clone https://github.com/sched75/sealkeeper.git
+git clone https://github.com/SCHED75-ORG/SealKeeper.git
 cd sealkeeper
 
 # Build the binary
@@ -170,6 +170,6 @@ All contributors are listed in the [`CONTRIBUTORS.md`](CONTRIBUTORS.md) file (cr
 
 ## Questions?
 
-If anything in this guide is unclear, please open an issue with the `question` label or start a [discussion](https://github.com/sched75/sealkeeper/discussions).
+If anything in this guide is unclear, please open an issue with the `question` label or start a [discussion](https://github.com/SCHED75-ORG/SealKeeper/discussions).
 
 Thank you for contributing to SealKeeper!

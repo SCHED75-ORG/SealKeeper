@@ -60,11 +60,11 @@ upgrade:
 
 ```bash
 # Pull the new image
-kubectl -n sealkeeper set image deploy/sealkeeper sealkeeper=ghcr.io/sealkeeper/sealkeeper:vX.Y.Z
+kubectl -n sealkeeper set image deploy/sealkeeper sealkeeper=ghcr.io/sched75-org/sealkeeper:vX.Y.Z
 
 # Run migrations from a one-shot Job (the binary's `migrate up` sub-command)
 kubectl -n sealkeeper run sk-migrate --rm -it --restart=Never \
-  --image=ghcr.io/sealkeeper/sealkeeper:vX.Y.Z \
+  --image=ghcr.io/sched75-org/sealkeeper:vX.Y.Z \
   --env="SK_DATABASE_URL=$(kubectl -n sealkeeper get secret sealkeeper -o jsonpath='{.data.SK_DATABASE_URL}' | base64 -d)" \
   -- migrate up
 ```

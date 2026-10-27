@@ -71,7 +71,7 @@ func querySlug(r *http.Request, name string) string {
 
 // staticFS serves files from dir but refuses directories (no listings, no
 // index.html fallbacks) and any path segment starting with '.' (.env, .git).
-type staticFS struct{ dir http.Dir }
+type staticFS struct{ dir http.FileSystem }
 
 func (f staticFS) Open(name string) (http.File, error) {
 	for _, seg := range strings.Split(path.Clean("/"+name), "/") {

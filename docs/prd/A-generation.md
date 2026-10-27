@@ -390,4 +390,4 @@ Toutes les questions ouvertes ont été tranchées le 16 mai 2026 par Pascal-Lou
 
 ---
 
-*Document maintenu dans le repo `sched75/sealkeeper` sous `docs/prd/A-generation.md`. Toute proposition de modification passe par PR sur `main`.*
+*Document maintenu dans le repo `SCHED75-ORG/SealKeeper` sous `docs/prd/A-generation.md`. Toute proposition de modification passe par PR sur `main`.*

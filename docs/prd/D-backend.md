@@ -421,4 +421,4 @@ Les décisions techniques structurantes sont prises et liantes :
 
 ---
 
-*Document maintenu dans le repo `sched75/sealkeeper` sous `docs/prd/D-backend.md`.*
+*Document maintenu dans le repo `SCHED75-ORG/SealKeeper` sous `docs/prd/D-backend.md`.*

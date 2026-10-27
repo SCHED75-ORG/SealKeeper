@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -59,6 +60,31 @@ func TestLoad_MailLanguage(t *testing.T) {
 	}
 }
 
+// An unknown SMTP TLS mode used to load cleanly and only fail at send
+// time ("unknown TLS mode"), silently dropping every reveal mail.
+func TestLoad_SMTPTLS(t *testing.T) {
+	for _, val := range []string{"STARTTLS-only", "tls", "ssl", "none", "true"} {
+		t.Run("refuses "+val, func(t *testing.T) {
+			evalEnv(t)
+			t.Setenv("SK_SMTP_TLS", val)
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), "SK_SMTP_TLS") {
+				t.Fatalf("SK_SMTP_TLS=%q: err = %v, want a refusal naming SK_SMTP_TLS", val, err)
+			}
+		})
+	}
+	cases := map[string]string{"": "", "auto": "auto", " STARTTLS ": "starttls", "Implicit": "implicit", "disable": "disable"}
+	for in, want := range cases {
+		t.Run("accepts "+in, func(t *testing.T) {
+			evalEnv(t)
+			t.Setenv("SK_SMTP_TLS", in)
+			cfg, err := Load()
+			if err != nil || cfg.SMTPTLS != want {
+				t.Fatalf("SK_SMTP_TLS=%q: SMTPTLS = %q, err = %v; want %q, nil", in, cfg.SMTPTLS, err, want)
+			}
+		})
+	}
+}
+
 func TestLoad_AdminSessionKnobs(t *testing.T) {
 	evalEnv(t)
 	t.Setenv("SK_ADMIN_SESSION_TTL_SECONDS", "3600")
@@ -101,10 +127,11 @@ func TestLoad_DeprecatedKnobs(t *testing.T) {
 
 	t.Setenv("SK_MAX_ACTIVE_SESSIONS", "50")
 	t.Setenv("SK_SESSION_TTL_SECONDS", "300")
+	t.Setenv("SK_SWAGGER_UI_ENABLED", "true") // no /api/docs route exists
 	if cfg, err = Load(); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if len(cfg.Warnings) != 2 {
+	if len(cfg.Warnings) != 3 {
 		t.Errorf("Warnings = %v, want one per ignored knob", cfg.Warnings)
 	}
 }
@@ -164,5 +191,41 @@ func TestLoad_YAMLUnknownKeyRejected(t *testing.T) {
 	t.Setenv("SK_CONFIG_FILE", empty)
 	if _, err := Load(); err != nil {
 		t.Fatalf("Load(empty file): %v", err)
+	}
+}
+
+// FR-I.29..34: the retention periods default to the PRD values, are
+// configurable, and refuse values that disable expiry or would purge
+// security traces before six months.
+func TestLoad_Retention(t *testing.T) {
+	evalEnv(t)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	got := []int{cfg.RetentionRequestTokensDays, cfg.RetentionSessionGraceHours, cfg.RetentionAuditDays,
+		cfg.RetentionCapturedMailDays, cfg.RetentionDisabledAdminDays}
+	if want := []int{30, 24, 365, 7, 90}; !slices.Equal(got, want) {
+		t.Fatalf("retention defaults = %v, want %v", got, want)
+	}
+	t.Setenv("SK_RETENTION_AUDIT_DAYS", "400")
+	if cfg, err = Load(); err != nil || cfg.RetentionAuditDays != 400 {
+		t.Fatalf("SK_RETENTION_AUDIT_DAYS=400: %d, %v", cfg.RetentionAuditDays, err)
+	}
+
+	for key, val := range map[string]string{
+		"SK_RETENTION_AUDIT_DAYS":          "30",
+		"SK_RETENTION_REQUEST_TOKENS_DAYS": "0",
+		"SK_RETENTION_SESSION_GRACE_HOURS": "-1",
+		"SK_RETENTION_CAPTURED_MAIL_DAYS":  "999999",
+		"SK_RETENTION_DISABLED_ADMIN_DAYS": "ninety",
+	} {
+		t.Run(key, func(t *testing.T) {
+			evalEnv(t)
+			t.Setenv(key, val)
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), key) {
+				t.Fatalf("Load() err = %v, want an error naming %s", err, key)
+			}
+		})
 	}
 }

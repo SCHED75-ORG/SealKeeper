@@ -52,6 +52,15 @@ func opaqueToken(n int) (string, error) {
 // to a stopwatch attacker.
 const adminConstantTime = 300 * time.Millisecond
 
+// Body caps for the admin POSTs reachable without a session. Without them
+// ParseForm buffers up to 10 MB, and the login email went verbatim into the
+// audit log and the redirect. The login form is four short fields; the
+// WebAuthn assertion is a few KB of JSON.
+const (
+	adminLoginMaxBodyBytes    = 8 << 10
+	adminWebauthnMaxBodyBytes = 64 << 10
+)
+
 const (
 	cookieAdminSession = "sk_admin_session"
 	cookieAdminCSRF    = "sk_admin_csrf"
@@ -225,6 +234,7 @@ func (s *Server) handleAdminLoginPost(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "admin disabled (no storage)", http.StatusServiceUnavailable)
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, adminLoginMaxBodyBytes)
 	if err := r.ParseForm(); err != nil {
 		s.adminLoginError(w, r, "bad_form")
 		return
@@ -234,11 +244,22 @@ func (s *Server) handleAdminLoginPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// No admin can hold an address over MaxEmailBytes; audit a bounded
+	// prefix and answer like a wrong password.
 	email := strings.TrimSpace(r.FormValue("email"))
+	overlong := len(email) > admin.MaxEmailBytes
+	if overlong {
+		email = strings.ToValidUTF8(email[:admin.MaxEmailBytes], "")
+	}
 	password := r.FormValue("password")
 	if !s.loginLimiter.Allow(rateLimitIPKey(s.clientIP(r))) {
 		s.auditAppend(r.Context(), "admin.login_failed", email, "", map[string]any{"reason": "rate_limited"})
 		s.adminLoginError(w, r, "rate_limited")
+		return
+	}
+	if overlong {
+		s.auditAppend(r.Context(), "admin.login_failed", email, "", map[string]any{"reason": "email_too_long"})
+		s.adminLoginError(w, r, "bad_creds")
 		return
 	}
 	totpCode := strings.TrimSpace(r.FormValue("totp"))
@@ -294,12 +315,14 @@ func (s *Server) respondAdminLoginFailure(w http.ResponseWriter, r *http.Request
 	case errors.Is(err, admin.ErrTOTPRequired):
 		// Password OK, but the second factor still needs to be supplied.
 		// Branch to the WebAuthn step-up flow when the admin has at least
-		// one registered key — otherwise re-render the form asking for
-		// the TOTP code on top of the existing inputs.
+		// one registered key. Otherwise answer exactly like a wrong
+		// password: a distinct slug confirmed the password without the
+		// second factor. The audit log keeps the real reason.
 		if s.tryWebauthnStepUp(w, r, ad) {
 			return
 		}
-		s.adminLoginError(w, r, "totp_required")
+		s.auditAppend(r.Context(), "admin.login_failed", email, "", map[string]any{"reason": "totp_missing"})
+		s.adminLoginError(w, r, "bad_creds")
 	default:
 		s.logger.Error("admin.Authenticate failed", "err", err)
 		s.adminLoginError(w, r, "internal")
@@ -311,6 +334,7 @@ func (s *Server) handleAdminLogout(w http.ResponseWriter, r *http.Request) {
 		// Require the session's CSRF token so a cross-site POST cannot log
 		// the operator out (e.g. in the middle of an incident).
 		if sess, _, err := s.adminRepo.LookupSession(r.Context(), c.Value); err == nil {
+			r.Body = http.MaxBytesReader(w, r.Body, adminLoginMaxBodyBytes)
 			_ = r.ParseForm()
 			if !constantTimeEqualString(sess.CSRFToken, r.FormValue("csrf_token")) {
 				http.Error(w, "csrf", http.StatusForbidden)
@@ -427,6 +451,7 @@ func (s *Server) handleAdminLoginWebauthnBegin(w http.ResponseWriter, r *http.Re
 		http.Error(w, "webauthn not configured", http.StatusServiceUnavailable)
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, adminLoginMaxBodyBytes)
 	if err := r.ParseForm(); err != nil || !s.checkLoginCSRF(r) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
@@ -468,6 +493,7 @@ func (s *Server) handleAdminLoginWebauthnFinish(w http.ResponseWriter, r *http.R
 		http.Error(w, "webauthn not configured", http.StatusServiceUnavailable)
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, adminWebauthnMaxBodyBytes)
 	if !s.checkLoginCSRF(r) {
 		http.Error(w, "csrf", http.StatusForbidden)
 		return
@@ -543,6 +569,7 @@ func (s *Server) handleAdminLoginWebauthnFinish(w http.ResponseWriter, r *http.R
 // step-up and return to the password form (or use TOTP). We just drop the
 // pending token + cookies and bounce to /admin/login.
 func (s *Server) handleAdminLoginWebauthnCancel(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, adminLoginMaxBodyBytes)
 	if err := r.ParseForm(); err != nil || !s.checkLoginCSRF(r) {
 		http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
 		return
@@ -723,7 +750,20 @@ func (s *Server) handleAdminDashboard(w http.ResponseWriter, r *http.Request) {
 		"BaseURL":        s.cfg.BaseURL,
 		"InstanceDomain": s.cfg.InstanceDomain,
 		"SenderName":     s.currentSender().Name(),
+		"AllowlistEmpty": s.allowlistEmpty(r.Context()),
+		"AllowlistOpen":  s.domains != nil && s.domains.OpenWhenEmpty(),
 	})
+}
+
+// allowlistEmpty reports whether the domain allowlist has no row at all —
+// the dashboard warns because production then refuses every request
+// (SK-37). A lookup error reports false: the gate itself fails safe.
+func (s *Server) allowlistEmpty(ctx context.Context) bool {
+	if s.domains == nil {
+		return false
+	}
+	n, err := s.domains.Count(ctx)
+	return err == nil && n == 0
 }
 
 func (s *Server) handleAdminAudit(w http.ResponseWriter, r *http.Request) {
@@ -1250,6 +1290,12 @@ func (s *Server) handleAdminElevationAdd(w http.ResponseWriter, r *http.Request)
 	switch {
 	case errors.Is(err, elevations.ErrInvalidLevel):
 		http.Redirect(w, r, "/admin/elevations?err=invalid_level", http.StatusSeeOther)
+		return
+	case errors.Is(err, elevations.ErrInvalidEmail):
+		http.Redirect(w, r, "/admin/elevations?err=invalid_email", http.StatusSeeOther)
+		return
+	case errors.Is(err, elevations.ErrDomainMismatch):
+		http.Redirect(w, r, "/admin/elevations?err=domain_mismatch", http.StatusSeeOther)
 		return
 	case errors.Is(err, elevations.ErrAlreadyExists):
 		http.Redirect(w, r, "/admin/elevations?err=duplicate", http.StatusSeeOther)
@@ -2207,7 +2253,9 @@ func (s *Server) draftSetup(r *http.Request) (totp.Secret, string, []string) {
 
 func (s *Server) adminLoginError(w http.ResponseWriter, r *http.Request, slug string) {
 	q := "?err=" + slug
-	if email := strings.TrimSpace(r.FormValue("email")); email != "" {
+	// An overlong email is never echoed: it could only be an attacker's
+	// payload, and the Location header would carry it URL-escaped.
+	if email := strings.TrimSpace(r.FormValue("email")); email != "" && len(email) <= admin.MaxEmailBytes {
 		q += "&email=" + url.QueryEscape(email)
 	}
 	http.Redirect(w, r, "/admin/login"+q, http.StatusSeeOther)
@@ -2396,8 +2444,6 @@ const adminLoginTpl = `{{define "login.html"}}{{template "header" .}}
     Too many sign-in attempts from your network. Try again in a few minutes.
   {{ else if eq .Error "disabled" }}
     This account has been disabled by another administrator.
-  {{ else if eq .Error "totp_required" }}
-    Password accepted — enter your authenticator code to finish signing in.
   {{ else }}
     {{ .Error }}
   {{ end }}
@@ -2550,6 +2596,18 @@ const adminDashboardTpl = `{{define "dashboard.html"}}{{template "header" .}}
     <div style="font-family:var(--font-mono); font-size:0.9rem; padding-top:0.4rem">{{ if .Admin.LastLoginAt }}{{ .Admin.LastLoginAt.Format "2006-01-02 15:04 UTC" }}{{ else }}—{{ end }}</div>
   </div>
 </section>
+
+{{ if .AllowlistEmpty }}{{ if .AllowlistOpen }}
+<section role="status" style="margin:0 0 1.5rem; background:#FBF7EE; border:1px solid var(--gold); border-radius:2px; padding:0.9rem 1.25rem">
+  <strong>The domain allowlist is empty — every domain is accepted.</strong>
+  This zero-config default holds only in eval and demo modes, where reveal mail is captured and never relayed. In production an empty allowlist refuses every request: add your domains under <a href="/admin/domains">Domains</a> before switching.
+</section>
+{{ else }}
+<section role="alert" style="margin:0 0 1.5rem; background:#FBF7EE; border:2px solid var(--cardinal); border-radius:2px; padding:0.9rem 1.25rem">
+  <strong style="color:var(--cardinal)">The domain allowlist is empty — every public request is refused.</strong>
+  Production fails closed so the instance never mails reveal links to arbitrary addresses. Visitors still see the usual confirmation; each refusal is audited as <code>request.domain_blocked</code> (reason <code>allowlist_empty</code>). Add the email domains you serve under <a href="/admin/domains">Domains</a>.
+</section>
+{{ end }}{{ end }}
 
 <p style="color:var(--stone); font-size:0.9rem">
   Base URL <code>{{ .BaseURL }}</code> · Instance domain <code>{{ .InstanceDomain }}</code> · Session expires <code>{{ .Session.ExpiresAt.Format "15:04 UTC" }}</code>.
@@ -2895,7 +2953,7 @@ const adminElevationsTpl = `{{define "elevations.html"}}{{template "header" .}}
 <h2>Elevations</h2>
 {{ if .Error }}<div class="err">{{ .Error }}{{ if .Details }} — <code>{{ .Details }}</code>{{ end }}</div>{{ end }}
 {{ if .OK }}<div style="background:#dcfce7;color:#166534;padding:0.5rem 1rem;border-radius:4px;margin-bottom:1rem">{{ .OK }}{{ if eq .OK "imported" }} — created <strong>{{ .ImportCreated }}</strong>, skipped <strong>{{ .ImportSkipped }}</strong>, errors <strong>{{ .ImportErrors }}</strong>{{ if .Details }}<br><small>{{ .Details }}</small>{{ end }}{{ end }}</div>{{ end }}
-<p>Elevations bind a specific email to the B2 or B3 policy of its domain (FR-C.38..46). An email can be in at most one list per domain.</p>
+<p>Elevations bind a specific email to the B2 or B3 policy of its domain (FR-C.38..46). The email must belong to the chosen domain, and an email can be in at most one of the two lists.</p>
 
 <table data-testid="elevations-table"><thead><tr><th>Domain</th><th>Email</th><th>Level</th><th>Reason</th><th>Added</th><th>Last used</th><th></th></tr></thead><tbody>
 {{ range .Items }}<tr>
@@ -4199,7 +4257,14 @@ func (s *Server) handleAdminSMTPClear(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/admin/smtp?err=internal", http.StatusSeeOther)
 		return
 	}
-	s.auditAppend(r.Context(), "smtp.cleared", a.Email, "", nil)
+	// The cleared relay must stop carrying mail now, not at next restart.
+	if err := s.RebuildSMTPSender(r.Context()); err != nil {
+		s.logger.Error("RebuildSMTPSender after clear failed; reinstating boot sender", "err", err)
+		s.resetSMTPSender()
+	}
+	s.auditAppend(r.Context(), "smtp.cleared", a.Email, "", map[string]any{
+		"transport": s.currentSender().Name(),
+	})
 	http.Redirect(w, r, "/admin/smtp?ok=cleared", http.StatusSeeOther)
 }
 

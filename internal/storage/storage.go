@@ -70,13 +70,24 @@ type Store interface {
 	// MigrateUp runs all pending up migrations. Idempotent.
 	MigrateUp(ctx context.Context) error
 	// MigrateUpApplied is MigrateUp that also returns the versions this
-	// call applied. Callers use it for one-shot work tied to a specific
-	// migration (the audit anchor seal after 0014).
+	// call applied, including those applied before a failing migration.
 	MigrateUpApplied(ctx context.Context) ([]int64, error)
+	// MigrateUpCutover is MigrateUpApplied that runs cutover in the same
+	// transaction as migration AuditHeadMigration (the audit chain's legacy
+	// cut-over, see audit.Repo.SealCutover).
+	MigrateUpCutover(ctx context.Context, cutover CutoverFunc) ([]int64, error)
 	// SchemaVersion returns the version recorded by goose. Zero means no
 	// migration has ever been applied.
 	SchemaVersion(ctx context.Context) (int64, error)
 }
+
+// AuditHeadMigration is the schema version that creates audit_head and
+// records the audit chain's legacy cut-over.
+const AuditHeadMigration int64 = 14
+
+// CutoverFunc is run by MigrateUpCutover inside the transaction that
+// applies AuditHeadMigration, after the migration's own SQL.
+type CutoverFunc func(ctx context.Context, tx *sql.Tx) error
 
 // Options configures [Open].
 type Options struct {

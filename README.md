@@ -6,11 +6,11 @@
 
 *Self-hosted password distributor for enterprises. The browser generates, the server gates. No password ever crosses the wire.*
 
-[![License: AGPL v3](https://img.shields.io/github/license/sched75/sealkeeper?style=flat-square&color=7A1F2B&labelColor=1A1814)](LICENSE)
-[![Go Version](https://img.shields.io/github/go-mod/go-version/sched75/sealkeeper?style=flat-square&color=C9A961&labelColor=1A1814&logo=go&logoColor=C9A961)](go.mod)
-[![Build Status](https://img.shields.io/github/actions/workflow/status/sched75/sealkeeper/ci.yml?branch=main&style=flat-square&color=1E2D45&labelColor=1A1814)](https://github.com/sched75/sealkeeper/actions)
-[![Latest Release](https://img.shields.io/github/v/release/sched75/sealkeeper?style=flat-square&include_prereleases&color=C9A961&labelColor=1A1814)](https://github.com/sched75/sealkeeper/releases)
-[![Stars](https://img.shields.io/github/stars/sched75/sealkeeper?style=flat-square&color=C9A961&labelColor=1A1814&logo=github&logoColor=C9A961)](https://github.com/sched75/sealkeeper/stargazers)
+[![License: AGPL v3](https://img.shields.io/github/license/SCHED75-ORG/SealKeeper?style=flat-square&color=7A1F2B&labelColor=1A1814)](LICENSE)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/SCHED75-ORG/SealKeeper?style=flat-square&color=C9A961&labelColor=1A1814&logo=go&logoColor=C9A961)](go.mod)
+[![Build Status](https://img.shields.io/github/actions/workflow/status/SCHED75-ORG/SealKeeper/ci.yml?branch=main&style=flat-square&color=1E2D45&labelColor=1A1814)](https://github.com/SCHED75-ORG/SealKeeper/actions)
+[![Latest Release](https://img.shields.io/github/v/release/SCHED75-ORG/SealKeeper?style=flat-square&include_prereleases&color=C9A961&labelColor=1A1814)](https://github.com/SCHED75-ORG/SealKeeper/releases)
+[![Stars](https://img.shields.io/github/stars/SCHED75-ORG/SealKeeper?style=flat-square&color=C9A961&labelColor=1A1814&logo=github&logoColor=C9A961)](https://github.com/SCHED75-ORG/SealKeeper/stargazers)
 
 [Website](https://sealkeeper.eu) · [Documentation](https://sealkeeper.eu/docs.html) · [Security](SECURITY.md) · [Contributing](CONTRIBUTING.md) · [Hall of thanks](https://sealkeeper.eu/hall-of-thanks.html)
 
@@ -53,7 +53,7 @@ The fastest way to try SealKeeper is in **evaluation mode**, which captures emai
 docker run --rm -p 8443:8443 \
   -e SK_MODE=eval \
   -e SK_BASE_URL="https://localhost:8443" \
-  ghcr.io/sealkeeper/sealkeeper:latest
+  ghcr.io/sched75-org/sealkeeper:latest
 ```
 
 The first run prints a bootstrap password to the container logs. Then:

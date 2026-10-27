@@ -885,14 +885,14 @@
       <div class="qs">
         <div class="qs__head">
           <strong>I. Run the service</strong>
-          <button type="button" class="qs__copy" data-copy="docker run --rm -p 8443:8443 -e SK_BASE_URL=https://seal.example.eu -e SK_SMTP_HOST=smtp.example.eu ghcr.io/sealkeeper/sealkeeper:latest">Copy</button>
+          <button type="button" class="qs__copy" data-copy="docker run --rm -p 8443:8443 -e SK_BASE_URL=https://seal.example.eu -e SK_SMTP_HOST=smtp.example.eu ghcr.io/sched75-org/sealkeeper:latest">Copy</button>
         </div>
 <pre aria-label="Docker run command"><code><span class="c-com"># minimal local instance, persists to /var/lib/sealkeeper</span>
 <span class="c-cmd">docker run</span> <span class="c-flag">--rm</span> <span class="c-flag">-p</span> 8443:8443 \
   <span class="c-flag">-e</span> SK_BASE_URL=<span class="c-str">"https://seal.example.eu"</span> \
   <span class="c-flag">-e</span> SK_SMTP_HOST=<span class="c-str">"smtp.example.eu"</span> \
   <span class="c-flag">-v</span> sealkeeper:/var/lib/sealkeeper \
-  ghcr.io/sealkeeper/sealkeeper:latest</code></pre>
+  ghcr.io/sched75-org/sealkeeper:latest</code></pre>
       </div>
 
       <div class="qs">

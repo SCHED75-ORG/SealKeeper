@@ -40,6 +40,7 @@ import (
 	"github.com/sched75/sealkeeper/internal/mailer"
 	"github.com/sched75/sealkeeper/internal/mailtemplates"
 	"github.com/sched75/sealkeeper/internal/policies"
+	"github.com/sched75/sealkeeper/internal/retention"
 	"github.com/sched75/sealkeeper/internal/smtpconfig"
 	"github.com/sched75/sealkeeper/internal/storage"
 	"github.com/sched75/sealkeeper/internal/tokens"
@@ -146,7 +147,7 @@ func runServe(args []string) int {
 		// Eval mode runs migrations automatically so `docker run … -e SK_MODE=eval`
 		// works with zero ceremony (FR-H.11..19). Production deployments are
 		// expected to run `sealkeeper migrate up` as a discrete step (FR-H.63).
-		if applied, err = store.MigrateUpApplied(ctx); err != nil {
+		if applied, err = migrateUp(ctx, cfg, store); err != nil {
 			logger.Error("eval auto-migrate failed", "err", err)
 			return 1
 		}
@@ -256,12 +257,32 @@ func runServe(args []string) int {
 		go resetter.Run(ctx)
 	}
 
+	// RGPD FR-I.37: purge data past its retention period now, then daily.
+	go newRetentionJob(cfg, store.DB(), auditRepo, srv, logger).Run(ctx, retention.Interval)
+
 	if err := srv.Run(ctx); err != nil {
 		logger.Error("http server exited with error", "err", err)
 		return 1
 	}
 	logger.Info("sealkeeper stopped cleanly")
 	return 0
+}
+
+// newRetentionJob builds the retention purge (FR-I.29..38) from the
+// SK_RETENTION_* knobs. The run summary goes through the server's audit
+// writer, so the SIEM integrations receive it like any other event.
+func newRetentionJob(cfg config.Config, db *sql.DB, auditRepo *audit.Repo, srv *httpserver.Server, logger *slog.Logger) *retention.Job {
+	const day = 24 * time.Hour
+	policy := retention.Policy{
+		RequestTokens:  time.Duration(cfg.RetentionRequestTokensDays) * day,
+		SessionGrace:   time.Duration(cfg.RetentionSessionGraceHours) * time.Hour,
+		AuditLog:       time.Duration(cfg.RetentionAuditDays) * day,
+		CapturedMail:   time.Duration(cfg.RetentionCapturedMailDays) * day,
+		DisabledAdmins: time.Duration(cfg.RetentionDisabledAdminDays) * day,
+	}
+	return retention.NewJob(db, auditRepo, policy, logger).
+		WithMailStore(srv.MailStore()).
+		WithRecorder(srv.AppendAudit)
 }
 
 func runMigrate(args []string) int {
@@ -321,16 +342,20 @@ func runMigrate(args []string) int {
 func runMigrateUp(ctx context.Context, cfg config.Config, store storage.Store, logger *slog.Logger) int {
 	// An unreadable version (fresh database) counts as 0.
 	before, _ := store.SchemaVersion(ctx)
-	applied, err := store.MigrateUpApplied(ctx)
+	var (
+		applied []int64
+		err     error
+	)
+	if cfg.MasterSecret != "" {
+		applied, err = migrateUp(ctx, cfg, store)
+	} else {
+		applied, err = store.MigrateUpApplied(ctx)
+	}
 	if err != nil {
 		logger.Error("migrate up failed", "err", err)
 		return 1
 	}
 	v, _ := store.SchemaVersion(ctx)
-	// Seal the audit head anchor right after migration 0014 so a
-	// migrated legacy log is anchored before anything else runs: only
-	// the process that applied 0014 may take the legacy rows under the
-	// key (see audit.SealAnchor).
 	if cfg.MasterSecret != "" {
 		if code := auditMigration(ctx, cfg, store, logger, applied, before, v); code != 0 {
 			return code
@@ -514,11 +539,23 @@ func runAdmin(args []string) int {
 	}
 }
 
+// migrateUp applies pending migrations. Migration 0014 seals the audit
+// chain's legacy cut-over in its own transaction (audit.Repo.SealCutover),
+// so a crash, a timeout or a later failing migration cannot lose it.
+func migrateUp(ctx context.Context, cfg config.Config, store storage.Store) ([]int64, error) {
+	key, err := audit.DeriveKey(cfg.MasterSecret)
+	if err != nil {
+		return nil, err
+	}
+	return store.MigrateUpCutover(ctx, audit.NewRepo(store.DB(), key).SealCutover)
+}
+
 // openAuditRepo binds the audit log to the HKDF-derived chain key
 // (FR-E.3) and seals the head anchor. applied lists the migrations this
-// process just ran; a legacy log is blessed only when 0014 is among them.
-// A seal failure (e.g. migrations not applied yet) is logged, not fatal:
-// VerifyChain reports the chain as unanchored until it succeeds.
+// process just ran; a legacy log is blessed only when 0014 is among them
+// (migrateUp has normally sealed it already). A seal failure (e.g.
+// migrations not applied yet) is logged, not fatal: VerifyChain reports
+// the chain as unanchored until it succeeds.
 func openAuditRepo(ctx context.Context, cfg config.Config, db *sql.DB, logger *slog.Logger, applied []int64) (*audit.Repo, error) {
 	key, err := audit.DeriveKey(cfg.MasterSecret)
 	if err != nil {
@@ -560,18 +597,11 @@ func openAdminRepo(ctx context.Context) (*admin.Repo, func(), error) {
 		return nil, func() {}, fmt.Errorf("storage: %w", err)
 	}
 	cleanup := func() { _ = store.Close() }
-	applied, err := store.MigrateUpApplied(ctx)
-	if err != nil {
+	// An admin subcommand can be the first run after an upgrade: migrateUp
+	// seals the audit cut-over inside migration 0014 itself.
+	if _, err := migrateUp(ctx, cfg, store); err != nil {
 		cleanup()
 		return nil, func() {}, fmt.Errorf("migrate: %w", err)
-	}
-	// An admin subcommand can be the first run after an upgrade; it must
-	// seal the cut-over itself, no later boot is allowed to.
-	if slices.Contains(applied, audit.HeadMigration) {
-		if _, err := openAuditRepo(ctx, cfg, store.DB(), buildLogger(cfg), applied); err != nil {
-			cleanup()
-			return nil, func() {}, fmt.Errorf("audit: %w", err)
-		}
 	}
 	box, err := cryptobox.New(cfg.MasterSecret)
 	if err != nil {

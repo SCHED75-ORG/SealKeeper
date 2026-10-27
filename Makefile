@@ -17,7 +17,7 @@ HELM           ?= helm
 VERSION        ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT         ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 BUILD_DATE     ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
-IMAGE_REPO     ?= ghcr.io/sealkeeper/sealkeeper
+IMAGE_REPO     ?= ghcr.io/sched75-org/sealkeeper
 IMAGE          ?= $(IMAGE_REPO):$(VERSION)
 
 LDFLAGS         = -s -w \
@@ -40,8 +40,15 @@ build: ## Build local binary into ./dist/sealkeeper
 	mkdir -p dist
 	$(GO) build -trimpath -buildvcs=true -ldflags "$(LDFLAGS)" -o dist/sealkeeper ./cmd/sealkeeper
 
+.PHONY: web-embed
+web-embed: ## Build the JS bundle and copy it into internal/webbundle for go:embed
+	cd web && npm ci --ignore-scripts --no-audit --no-fund && npm run build
+	test -s web/dist/sealkeeper-generation.umd.js
+	test -s web/dist/sealkeeper-generation.umd.js.map
+	cp web/dist/sealkeeper-generation.umd.js web/dist/sealkeeper-generation.umd.js.map internal/webbundle/dist/
+
 .PHONY: build-all
-build-all: ## Build linux+darwin × amd64+arm64 binaries
+build-all: web-embed ## Build linux+darwin × amd64+arm64 binaries (bundle embedded)
 	mkdir -p dist
 	for os in linux darwin; do \
 	  for arch in amd64 arm64; do \

@@ -12,7 +12,7 @@
 //	POST /api/v1/policy           — single-use consumption, token in the
 //	                                JSON body, never the URL (FR-B.36)
 //	GET  /reveal/{token}          — reveal page HTML (loads UMD bundle)
-//	GET  /static/*                — JS bundle + assets (config.WebDir)
+//	GET  /static/*                — JS bundle + assets (config.WebDir, else embedded)
 //	GET  /__captured_mail         — eval mail queue; demo: caller's own mail
 package httpserver
 
@@ -26,6 +26,7 @@ import (
 	"errors"
 	"fmt"
 	htmltemplate "html/template"
+	"io/fs"
 	"log/slog"
 	"math"
 	"mime"
@@ -65,6 +66,7 @@ import (
 	"github.com/sched75/sealkeeper/internal/tokens"
 	"github.com/sched75/sealkeeper/internal/version"
 	"github.com/sched75/sealkeeper/internal/webauthn"
+	"github.com/sched75/sealkeeper/internal/webbundle"
 )
 
 // pseudonymKey derives the audit pseudonymisation key from the master
@@ -132,6 +134,13 @@ type Server struct {
 	// tokenLookupPerIPWindow).
 	tokenLimiter *ratelimit.Limiter
 
+	// probeLimiter caps the token.unknown_attempt rows per client
+	// (see unknownAttemptAuditPerIPWindow).
+	probeLimiter *ratelimit.Limiter
+	// rateAudit folds the audit rows of throttled public requests (see
+	// ratelimitaudit.go).
+	rateAudit *rateAuditAgg
+
 	// pseudonymKey keys hashShort (derived from the master secret).
 	pseudonymKey []byte
 
@@ -151,9 +160,17 @@ type Server struct {
 	// sender is never nil — capture in eval, noop otherwise. /admin/smtp
 	// swaps it while requests read it: go through currentSender /
 	// storeSender. smtpMu serialises RebuildSMTPSender so the last
-	// rebuild always installs the latest saved relay.
-	sender atomic.Pointer[senderRef]
-	smtpMu sync.Mutex
+	// rebuild always installs the latest saved relay. bootSender is the
+	// transport to fall back to when the /admin/smtp override is cleared:
+	// the env-wired relay from SetSender, else capture / noop per mode.
+	sender     atomic.Pointer[senderRef]
+	bootSender atomic.Pointer[senderRef]
+	smtpMu     sync.Mutex
+
+	// embeddedWeb is the JS bundle compiled into the binary (nil when it
+	// was built without one). /static/* falls back to it when no WebDir
+	// is configured, so a standalone release binary serves the bundle.
+	embeddedWeb fs.FS
 }
 
 // New builds an HTTP server with the given configuration.
@@ -216,6 +233,8 @@ func New(cfg config.Config, logger *slog.Logger) *Server {
 		ceremonyKey:    ceremonyKey(cfg.MasterSecret),
 		loginLimiter:   ratelimit.New(adminLoginPerIPWindow, 15*time.Minute),
 		tokenLimiter:   ratelimit.New(tokenLookupPerIPWindow, 15*time.Minute),
+		probeLimiter:   ratelimit.New(unknownAttemptAuditPerIPWindow, 15*time.Minute),
+		rateAudit:      newRateAuditAgg(rateAuditMaxKeys, rateAuditMaxPeers),
 		cfg:            cfg,
 		logger:         logger,
 		readyz:         readiness.New(),
@@ -233,8 +252,10 @@ func New(cfg config.Config, logger *slog.Logger) *Server {
 		requestFloor:   requestLatencyFloor,
 		mailSlots:      make(chan struct{}, mailWorkers),
 		mailQueue:      make(chan struct{}, mailQueueDepth),
+		embeddedWeb:    webbundle.FS(),
 	}
 	s.storeSender(defaultSender)
+	s.bootSender.Store(&senderRef{defaultSender})
 	return s
 }
 
@@ -277,12 +298,22 @@ func (s *Server) SetSender(sender mailer.Sender) {
 			return
 		}
 	}
+	s.smtpMu.Lock()
+	defer s.smtpMu.Unlock()
+	s.bootSender.Store(&senderRef{sender})
 	s.storeSender(sender)
 }
 
-// SetDomains binds the allowlist repo. When nil, every domain is accepted —
-// matching the zero-config eval behaviour.
-func (s *Server) SetDomains(repo *domains.Repo) { s.domains = repo }
+// SetDomains binds the allowlist repo. When nil, every domain is accepted
+// (unit-test wiring only; main.go always binds one). The run mode decides
+// what an EMPTY allowlist means (SK-37): production fails closed, eval and
+// demo — whose reveal mail is captured, never relayed — stay zero-config.
+func (s *Server) SetDomains(repo *domains.Repo) {
+	if repo != nil {
+		repo = repo.WithOpenWhenEmpty(s.cfg.IsEval() || s.cfg.IsDemo())
+	}
+	s.domains = repo
+}
 
 // SetPolicies binds the policies + elevations repos used to resolve a
 // request to a concrete PolicyDescriptor. When both repos are nil the
@@ -332,9 +363,10 @@ func (s *Server) SetWebauthn(repo *webauthn.Repo) { s.webauthn = repo }
 func (s *Server) SetSMTPConfig(repo *smtpconfig.Repo) { s.smtpConfig = repo }
 
 // RebuildSMTPSender refreshes the active mail sender from the DB
-// override. When the override row is empty (no host saved) the
-// existing env-wired sender stays put. Demo mode short-circuits to
-// keep the capture sender pinned regardless of what's saved.
+// override. When the override row is empty (no host saved, or just
+// cleared) the boot sender is reinstated so a previously saved relay
+// stops carrying mail at once. Demo mode short-circuits to keep the
+// capture sender pinned regardless of what's saved.
 func (s *Server) RebuildSMTPSender(ctx context.Context) error {
 	if s.smtpConfig == nil {
 		return nil
@@ -346,6 +378,7 @@ func (s *Server) RebuildSMTPSender(ctx context.Context) error {
 	defer s.smtpMu.Unlock()
 	cfg, err := s.smtpConfig.Get(ctx)
 	if errors.Is(err, smtpconfig.ErrNotConfigured) {
+		s.storeSender(s.bootSender.Load().Sender)
 		return nil
 	}
 	if err != nil {
@@ -371,6 +404,15 @@ func (s *Server) RebuildSMTPSender(ctx context.Context) error {
 	// demo so direct assignment is fine.
 	s.storeSender(sender)
 	return nil
+}
+
+// resetSMTPSender drops any admin-saved relay and reinstates the boot
+// sender without reading the DB — the fail-closed path for a clear whose
+// rebuild errored.
+func (s *Server) resetSMTPSender() {
+	s.smtpMu.Lock()
+	defer s.smtpMu.Unlock()
+	s.storeSender(s.bootSender.Load().Sender)
 }
 
 // resolveBranding returns the current branding row. Used by every
@@ -428,9 +470,8 @@ func (s *Server) Router() http.Handler {
 
 	r.Get("/reveal/{token}", s.handleRevealPage)
 
-	if s.cfg.WebDir != "" {
-		fs := http.FileServer(staticFS{dir: http.Dir(s.cfg.WebDir)})
-		r.Handle("/static/*", http.StripPrefix("/static/", fs))
+	if static := s.staticFiles(); static != nil {
+		r.Handle("/static/*", http.StripPrefix("/static/", http.FileServer(staticFS{dir: static})))
 	}
 
 	// /__captured_mail is the in-memory mail viewer (FR-H.17 / FR-H.79 —
@@ -453,6 +494,18 @@ func (s *Server) Router() http.Handler {
 	}
 
 	return r
+}
+
+// staticFiles is the /static/* tree: the configured WebDir (the Docker
+// image's /app/web), else the bundle embedded at build time, else nil.
+func (s *Server) staticFiles() http.FileSystem {
+	switch {
+	case s.cfg.WebDir != "":
+		return http.Dir(s.cfg.WebDir)
+	case s.embeddedWeb != nil:
+		return http.FS(s.embeddedWeb)
+	}
+	return nil
 }
 
 // handleBrandingLogo streams the current branding logo. 404 when no logo
@@ -493,11 +546,12 @@ func (s *Server) Run(ctx context.Context) error {
 	// stays in memory for the life of the process.
 	stopJanitors := make(chan struct{})
 	defer close(stopJanitors)
-	for _, l := range []*ratelimit.Limiter{s.limiter.Email, s.limiter.IP, s.loginLimiter, s.tokenLimiter} {
+	for _, l := range []*ratelimit.Limiter{s.limiter.Email, s.limiter.IP, s.loginLimiter, s.tokenLimiter, s.probeLimiter} {
 		if l != nil {
 			go l.RunJanitor(stopJanitors, 5*time.Minute)
 		}
 	}
+	stopRateAudit := s.startRateAuditFlusher()
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -514,9 +568,11 @@ func (s *Server) Run(ctx context.Context) error {
 		defer cancel()
 		s.logger.Info("http server shutting down")
 		err := srv.Shutdown(shutdownCtx)
-		s.WaitMail(shutdownCtx) // let queued reveal mails reach the relay
+		s.WaitMail(shutdownCtx)    // let queued reveal mails reach the relay
+		stopRateAudit(shutdownCtx) // no throttled hit goes unaccounted
 		return err
 	case err := <-errCh:
+		stopRateAudit(context.Background())
 		return err
 	}
 }
@@ -629,6 +685,13 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		extra["debug_reveal_url"] = revealURL
 	}
 	acceptedResp(extra)
+}
+
+// AppendAudit records an event from a background job (e.g. the retention
+// purge) exactly like a handler does: into the audit log, then out to the
+// enabled SIEM integrations.
+func (s *Server) AppendAudit(ctx context.Context, event, actor, target string, details map[string]any) {
+	s.auditAppend(ctx, event, actor, target, details)
 }
 
 // auditAppend is a fire-and-forget audit helper. Errors are logged but never
@@ -775,6 +838,7 @@ func (s *Server) handlePolicyConsume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tok, err := s.tokens.Consume(r.Context(), tokenParam, ipHash, uaHash)
+	s.auditOpenAttempt(r, surfacePolicyAPI, tokenParam, tok, err)
 	if s.writeConsumeError(w, err) {
 		return
 	}
@@ -818,7 +882,7 @@ func (s *Server) shouldNotifyPostConsult(ctx context.Context, email string) bool
 	if s.policies == nil || s.mailTpls == nil {
 		return false
 	}
-	pol, err := s.policies.Resolve(ctx, email)
+	pol, err := s.policies.ResolveIssued(ctx, email)
 	if err != nil {
 		return false
 	}
@@ -954,7 +1018,9 @@ func (s *Server) resolvedPolicy(ctx context.Context, email string) (map[string]a
 	if s.policies == nil {
 		return policyDefaultMap(), nil
 	}
-	row, err := s.policies.Resolve(ctx, email)
+	// Only consume paths call this: the token was admitted at issue time,
+	// so a domain disabled since then must not break it (FR-C.23).
+	row, err := s.policies.ResolveIssued(ctx, email)
 	if errors.Is(err, policies.ErrNoPolicy) {
 		n, cerr := s.policies.Count(ctx)
 		if cerr != nil {
@@ -1023,20 +1089,9 @@ func policyDefaultMap() map[string]any {
 // "expired" page instead of revealing nothing.
 func (s *Server) handleRevealPage(w http.ResponseWriter, r *http.Request) {
 	token := chi.URLParam(r, "token")
-	state := "ready"
-	status := http.StatusOK
-	if !s.allowTokenLookup(w, s.clientIP(r)) {
-		state, status = "rate_limited", http.StatusTooManyRequests
-	} else if s.tokens != nil {
-		if tok, err := s.tokens.Get(r.Context(), token); err == nil {
-			if tok.ConsumedAt != nil {
-				state = "consumed"
-			} else if !time.Now().Before(tok.ExpiresAt) {
-				state = "expired"
-			}
-		} else if errors.Is(err, tokens.ErrNotFound) {
-			state = "unknown"
-		}
+	state, status := "rate_limited", http.StatusTooManyRequests
+	if s.allowTokenLookup(w, s.clientIP(r)) {
+		state, status = s.previewRevealToken(r, token), http.StatusOK
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -1056,13 +1111,15 @@ func (s *Server) handleRevealPage(w http.ResponseWriter, r *http.Request) {
 }
 
 // allowTokenLookup charges one reveal-token lookup to ip and reports
-// whether it is under the cap; when it is not, Retry-After is set.
+// whether it is under the cap; when it is not, Retry-After is set. The
+// bucket is the rateLimitIPKey (IPv6 /64), not the raw address.
 func (s *Server) allowTokenLookup(w http.ResponseWriter, ip string) bool {
-	if s.tokenLimiter == nil || s.tokenLimiter.Allow(ip) {
+	key := rateLimitIPKey(ip)
+	if s.tokenLimiter == nil || s.tokenLimiter.Allow(key) {
 		return true
 	}
 	s.rateHits.WithLabelValues("token_lookup").Inc()
-	_, _, resetAt := s.tokenLimiter.Inspect(ip)
+	_, _, resetAt := s.tokenLimiter.Inspect(key)
 	w.Header().Set("Retry-After", strconv.Itoa(max(1, int(math.Ceil(time.Until(resetAt).Seconds())))))
 	return false
 }

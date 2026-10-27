@@ -1,0 +1,7 @@
+# Vendored website bundles must stay byte-identical to upstream so
+# design/vendor/SHA256SUMS holds on every checkout (core.autocrlf included).
+design/vendor/*.js -text
+# Cloudflare parses _headers itself; keep LF whatever the checkout.
+design/_headers text eol=lf
+design/.well-known/security.txt text eol=lf
+design/vendor/SHA256SUMS text eol=lf

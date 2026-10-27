@@ -46,7 +46,7 @@ services:
       - no-new-privileges:true
 
   sealkeeper:
-    image: ${SK_IMAGE:-ghcr.io/sealkeeper/sealkeeper:latest} # FR-H.3
+    image: ${SK_IMAGE:-ghcr.io/sched75-org/sealkeeper:latest} # FR-H.3
     container_name: sealkeeper
     restart: unless-stopped # FR-H.25
     depends_on:
@@ -80,7 +80,6 @@ services:
       SK_MAX_LIBRARY_SIZE_MB: ${SK_MAX_LIBRARY_SIZE_MB:-10}
       SK_ADMIN_SESSION_TTL_SECONDS: ${SK_ADMIN_SESSION_TTL_SECONDS:-28800}
       SK_ADMIN_SESSION_IDLE_SECONDS: ${SK_ADMIN_SESSION_IDLE_SECONDS:-1800}
-      SK_SWAGGER_UI_ENABLED: ${SK_SWAGGER_UI_ENABLED:-false}
       SK_DEMO_MODE: ${SK_DEMO_MODE:-false}
     volumes:
       - sealkeeper-data:/data # libraries + (eval) SQLite
@@ -128,7 +127,9 @@ services:
       backend: # to reach sealkeeper-backend:8443
         ipv4_address: 172.31.250.10 # == SK_TRUSTED_PROXY_CIDRS default
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:2019/config/"]
+      # Caddy's admin API binds 127.0.0.1 only; "localhost" resolves to
+      # ::1 first in the Alpine image, so it was always unhealthy.
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:2019/config/"]
       interval: 30s
       timeout: 5s
       retries: 3

@@ -219,16 +219,15 @@ func TestPublicFlowNeverLogsRevealToken(t *testing.T) {
 	s.SetTokens(tokens.NewRepo(db))
 	s.SetAudit(audit.NewRepo(db, make([]byte, audit.KeySize)))
 	s.cfg.InstanceDomain = "sk.test"
+	rs := &recordSender{}
+	s.SetSender(rs)
 	h := s.Router()
 
 	r := httptest.NewRequest(http.MethodPost, "/api/v1/request", strings.NewReader(`{"email":"user@example.test"}`))
 	r.Header.Set("Content-Type", "application/json")
 	h.ServeHTTP(httptest.NewRecorder(), r)
 	s.WaitMail(context.Background())
-	var tok string
-	if err := db.QueryRowContext(context.Background(), "SELECT token FROM request_tokens").Scan(&tok); err != nil {
-		t.Fatalf("no token issued: %v", err)
-	}
+	tok := mailedRevealToken(t, rs)
 	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/reveal/"+tok, nil))
 	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/v1/policy?token="+tok, nil))
 	postPolicy(h, tok)

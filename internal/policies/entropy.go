@@ -501,9 +501,15 @@ func contains(list []string, s string) bool {
 
 func entropyG2(p g2Params) EntropyReport {
 	var b breakdown
-	b.push("word-selection", float64(p.wordCount)*math.Log2(float64(len(p.words))))
-	if p.wordCount > 1 || (p.digits != nil && !p.digitsGlued) {
-		b.push("separator", math.Log2(float64(len(p.separators))))
+	joined := p.wordCount > 1 || (p.digits != nil && !p.digitsGlued)
+	// A word holding a separator character lets different draws print the
+	// same text ("porte" "monnaie" vs "porte-monnaie"): neither the words
+	// nor the separator are guaranteed then, only the digits.
+	if !joined || !anyHolds(p.words, runeSet(p.separators)) {
+		b.push("word-selection", float64(p.wordCount)*math.Log2(float64(len(p.words))))
+		if joined {
+			b.push("separator", math.Log2(float64(len(p.separators))))
+		}
 	}
 	if p.digits != nil {
 		b.push("digit-suffix", float64(p.digits.digitsCount)*math.Log2(10))
@@ -860,20 +866,7 @@ func (c *g1Calc) libraryFacts() libFacts {
 // citationBits: log2(N / largest group of citations that may yield the
 // same text), grouping transitively (union-find).
 func (c *g1Calc) citationBits() float64 {
-	var symbols []string
-	for _, t := range c.ts {
-		if t.code == "T08" {
-			symbols = t.symbols
-			break
-		}
-	}
-	key := func(s string) string {
-		s = c.text.collapseSpaces(s)
-		if c.hasJoin {
-			s = c.text.dropRuns(s, symbols)
-		}
-		return s
-	}
+	key := c.citationKey()
 	n := len(c.p.citations)
 	parent := make([]int, n)
 	for i := range parent {
@@ -905,6 +898,36 @@ func (c *g1Calc) citationBits() float64 {
 		largest = max(largest, sizes[r])
 	}
 	return math.Log2(float64(n) / float64(largest))
+}
+
+// citationKey folds what may not survive to the output: the generator turns
+// whitespace into a separator, so a separator character inside a citation
+// is indistinguishable from a word break ("w w" and "w-w" both print
+// "w-w"). Runs of whitespace and separator characters split the text into
+// tokens; when a joining transform may remove the breaks (or insert "_" or
+// a T08 symbol there) the tokens are glued back together.
+func (c *g1Calc) citationKey() func(string) string {
+	breaks := map[rune]bool{}
+	addChars := func(list []string) {
+		for _, s := range list {
+			for _, r := range wtf8Runes(c.folded(s)) {
+				breaks[r] = true
+			}
+		}
+	}
+	addChars(c.p.separators)
+	glue := " "
+	if c.hasJoin {
+		glue = ""
+		breaks['_'] = true
+		for _, t := range c.ts {
+			if t.code == "T08" {
+				addChars(t.symbols)
+				break
+			}
+		}
+	}
+	return func(s string) string { return strings.Join(tokens(s, breaks), glue) }
 }
 
 // choiceBits: min-entropy of a uniform choice among outputs(s) for the
@@ -1042,6 +1065,29 @@ func uniqueOrdered(list []string) []string {
 	return out
 }
 
+// runeSet: every character of every string in list.
+func runeSet(list []string) map[rune]bool {
+	set := map[rune]bool{}
+	for _, s := range list {
+		for _, r := range wtf8Runes(s) {
+			set[r] = true
+		}
+	}
+	return set
+}
+
+// anyHolds: some string of list contains a character of set.
+func anyHolds(list []string, set map[rune]bool) bool {
+	for _, s := range list {
+		for _, r := range wtf8Runes(s) {
+			if set[r] {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func containsRune(list []rune, r rune) bool {
 	for _, v := range list {
 		if v == r {
@@ -1125,24 +1171,7 @@ func (j jsText) trim(s string) string {
 }
 
 // words: s.trim().split(/\s+/u).filter(Boolean).
-func (j jsText) words(s string) []string {
-	var out []string
-	var cur []rune
-	for _, r := range wtf8Runes(s) {
-		if isJSSpace(r) {
-			if len(cur) > 0 {
-				out = append(out, wtf8String(cur))
-				cur = nil
-			}
-			continue
-		}
-		cur = append(cur, r)
-	}
-	if len(cur) > 0 {
-		out = append(out, wtf8String(cur))
-	}
-	return out
-}
+func (j jsText) words(s string) []string { return tokens(s, nil) }
 
 func (j jsText) reverseWords(s string) string {
 	ws := j.words(s)
@@ -1173,53 +1202,25 @@ func (j jsText) joined(s string) string {
 	return wtf8String(out)
 }
 
-// collapseSpaces: s.replace(/\s+/gu, " ").
-func (j jsText) collapseSpaces(s string) string {
-	var out []rune
-	inSpace := false
+// tokens: the non-empty runs of s between whitespace and `breaks`
+// characters.
+func tokens(s string, breaks map[rune]bool) []string {
+	var out []string
+	var cur []rune
 	for _, r := range wtf8Runes(s) {
-		if isJSSpace(r) {
-			if !inSpace {
-				out = append(out, ' ')
+		if isJSSpace(r) || breaks[r] {
+			if len(cur) > 0 {
+				out = append(out, wtf8String(cur))
+				cur = nil
 			}
-			inSpace = true
 			continue
 		}
-		inSpace = false
-		out = append(out, r)
+		cur = append(cur, r)
 	}
-	return wtf8String(out)
-}
-
-// dropRuns: s.replace(/(?:\s|_|sym1|sym2…)+/gu, ""). The alternatives are
-// tried in order at each position, as the regex engine does.
-func (j jsText) dropRuns(s string, symbols []string) string {
-	rs := wtf8Runes(s)
-	syms := make([][]rune, len(symbols))
-	for i, sym := range symbols {
-		syms[i] = wtf8Runes(sym)
+	if len(cur) > 0 {
+		out = append(out, wtf8String(cur))
 	}
-	match := func(pos int) int {
-		if isJSSpace(rs[pos]) || rs[pos] == '_' {
-			return 1
-		}
-		for _, sym := range syms {
-			if pos+len(sym) <= len(rs) && runesEqual(rs[pos:pos+len(sym)], sym) {
-				return len(sym)
-			}
-		}
-		return 0
-	}
-	var out []rune
-	for pos := 0; pos < len(rs); {
-		if n := match(pos); n > 0 {
-			pos += n
-			continue
-		}
-		out = append(out, rs[pos])
-		pos++
-	}
-	return wtf8String(out)
+	return out
 }
 
 // variantsT05: bypass, first-N UTF-16 units of each word, first unit of
@@ -1282,18 +1283,6 @@ func utf16Len(s string) int {
 func highSurrogate(r rune) rune { return 0xD800 + ((r - 0x10000) >> 10) }
 
 func isSurrogate(r rune) bool { return r >= 0xD800 && r <= 0xDFFF }
-
-func runesEqual(a, b []rune) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
 
 // wtf8Runes decodes UTF-8 plus the WTF-8 encoding of lone surrogates.
 func wtf8Runes(s string) []rune {

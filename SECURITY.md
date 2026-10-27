@@ -19,7 +19,7 @@ Until we reach v1.0.0, only the latest tagged release receives security updates.
 Instead, report security issues by one of these channels, in order of preference:
 
 1. **Email** — `security@sealkeeper.eu` (PGP encryption recommended; key fingerprint below)
-2. **GitHub Security Advisories** — [private advisory form](https://github.com/sched75/sealkeeper/security/advisories/new)
+2. **GitHub Security Advisories** — [private advisory form](https://github.com/SCHED75-ORG/SealKeeper/security/advisories/new)
 
 ### PGP Key
 
@@ -53,7 +53,7 @@ Researchers who report a valid vulnerability are credited in the published advis
 
 | Researcher | Advisories |
 |------------|------------|
-| Sri Charan Pedhiti ([@Char0n1507](https://github.com/Char0n1507)) | [GHSA-xr59-fxvh-vx8h](https://github.com/sched75/SealKeeper/security/advisories/GHSA-xr59-fxvh-vx8h), [GHSA-h3vw-xg58-625j](https://github.com/sched75/SealKeeper/security/advisories/GHSA-h3vw-xg58-625j) |
+| Sri Charan Pedhiti ([@Char0n1507](https://github.com/Char0n1507)) | [GHSA-xr59-fxvh-vx8h](https://github.com/SCHED75-ORG/SealKeeper/security/advisories/GHSA-xr59-fxvh-vx8h), [GHSA-h3vw-xg58-625j](https://github.com/SCHED75-ORG/SealKeeper/security/advisories/GHSA-h3vw-xg58-625j) |
 
 ## Scope
 

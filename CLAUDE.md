@@ -54,7 +54,8 @@ It is opinionated about three things: **single-binary distribution**, **AGPL v3 
 │   ├── tokens/                 # reveal tokens (issue + atomic consume)
 │   ├── totp/                   # RFC 6238 HMAC-SHA1, base32 secrets, recovery codes
 │   ├── version/                # ldflags-injected build metadata
-│   └── webauthn/               # FIDO2 registration + assertion ceremonies
+│   ├── webauthn/               # FIDO2 registration + assertion ceremonies
+│   └── webbundle/              # go:embed copy of the JS bundle (standalone binaries; `make web-embed`)
 ├── web/                        # JavaScript generation bundle (Vite + Vitest)
 │   ├── src/
 │   │   ├── entropy.js          # calculateEntropy() — shared by user UI + admin
@@ -103,10 +104,14 @@ Migrations live under `internal/storage/migrations/{postgres,sqlite}/`. Each mig
 | 0013 | *(`admins.totp_last_step`)*         | Last accepted TOTP time-step: a code is single-use within its window |
 | 0014 | `audit_head`                        | HMAC-sealed head anchor of the audit chain (single row, CHECK id=1); `legacy_until` cut-over |
 | 0015 | *(`integrations.config_enc`)*       | Sink credentials sealed with cryptobox; legacy clear rows sealed at boot by `SealLegacyConfigs` |
+| 0016 | *(`request_tokens.token` → `token_hash`)* | Reveal tokens stored as `sha256("sealkeeper-reveal-token:"+token)` only; pending rows dropped on upgrade (live links invalidated) |
+| 0017 | *(`audit_head.base_seq/base_hash`)* | Retention base of the audit chain: newest row deleted by `audit.Repo.Prune`, bound by `head_mac` |
 
 **Single-row tables (`branding`, `smtp_config`, `audit_head`)** use `CHECK (id = 1)`. The `branding` / `smtp_config` repos' `Get` auto-bootstraps the row on first call so the public surface never errors on a missing row; `audit_head` is seeded by its migration.
 
-**Keyed, hash-chained audit** (`audit_log` + `audit_head`): each row carries `entry_hash = hex(HMAC-SHA256(audit_chain_key, prev_hash || canonical_v2))`, where `canonical_v2` is a JSON array binding `sequence_no`, `occurred_at`, type, actor, target and details, and `audit_chain_key = audit.DeriveKey(SK_MASTER_SECRET)` (HKDF-SHA256). `audit_head` pins the newest row under its own MAC so tail truncation is detected; rows at or below `audit_head.legacy_until` (written before migration 0014) still verify as plain SHA-256 v1. The server seals the anchor at startup (`SealAnchor`). Anything that appends outside the server (CLI subcommands) must use `audit.NewRepo(db, key)` with the derived key, or the chain breaks. `audit.Repo.VerifyChain` returns the sequence number of the first broken row; the integrity badge on `/admin/audit` turns red on the next page load (and also when verification cannot run). See the package doc in `internal/audit/audit.go`.
+**Keyed, hash-chained audit** (`audit_log` + `audit_head`): each row carries `entry_hash = hex(HMAC-SHA256(audit_chain_key, prev_hash || canonical_v2))`, where `canonical_v2` is a JSON array binding `sequence_no`, `occurred_at`, type, actor, target and details, and `audit_chain_key = audit.DeriveKey(SK_MASTER_SECRET)` (HKDF-SHA256). `audit_head` pins the newest row under its own MAC so tail truncation is detected (an old, still MAC-valid anchor written back over a cut tail is only caught by the Repo's in-memory high-water mark, i.e. not across a restart — residual risk, see the package doc); rows at or below `audit_head.legacy_until` (written before migration 0014) still verify as plain SHA-256 v1. The server seals the anchor at startup (`SealAnchor`). Anything that appends outside the server (CLI subcommands) must use `audit.NewRepo(db, key)` with the derived key, or the chain breaks. `audit.Repo.VerifyChain` returns the sequence number of the first broken row; the integrity badge on `/admin/audit` turns red on the next page load (and also when verification cannot run). See the package doc in `internal/audit/audit.go`.
+
+**Retention purge** (`internal/retention`, RGPD FR-I.37): `serve` runs it at boot and then daily. It deletes ended sessions, old request tokens, captured mail, long-disabled admin accounts and audit rows past `SK_RETENTION_AUDIT_DAYS`, then appends `retention.purge_run` with per-category counts. Audit rows are only ever deleted whole from the old end (`audit.Repo.Prune`), never rewritten or pseudonymised in place — that would break every later MAC. `audit_head.base_seq/base_hash` (0017) record the last deleted row so the oldest survivor still chains; the anchor MAC switches to the `-head-v2` tag once a base exists. Prune refuses a chain that does not verify. Anything that wipes `audit_log` wholesale (the demo resetter) must reset the base with the rest of the anchor.
 
 **SQLite vs Postgres parity** is mandatory. Helpers in each repo translate `?` placeholders to `$N` when the driver is pgx (function `rebind`). Single statement upserts use the SQLite-portable probe + INSERT/UPDATE pattern (see `smtpconfig.Repo.Update`) rather than `ON CONFLICT`.
 
@@ -165,9 +170,9 @@ Two run modes, picked **at startup** by `SK_MODE` (`eval` or `production`), plus
 
 | Setting      | What flips                                                              |
 |--------------|-------------------------------------------------------------------------|
-| `SK_MODE=eval` | Auto-generated master secret + SQLite DSN if missing; in-memory `CaptureSender`; `/__captured_mail` + `/admin/captured-mail` expose the whole queue; admin cookies without `Secure` (plain-http localhost); plain `http://` SIEM sinks accepted; bootstrap admin password printed once on stdout; `debug_reveal_url` in `/api/v1/request` replies |
-| `SK_DEMO_MODE=true` | Capture sender forced (env-wired and `/admin/smtp` SMTP ignored); `/__captured_mail` scoped to the caller's own mail; 1/h IP and 1/h email request limits; admin console read-only outside the demo story (domains, policies, elevations, templates stay editable); integration enable + library upload refused; `internal/demo.Resetter` empties the editable tables every 24 h and restores accounts, branding, SMTP override and kv from the boot snapshot |
-| `SK_MODE=production` (default) | `SK_MASTER_SECRET` required (placeholder/weak refused); NopSender unless SMTP wired; full rate limits and lockout; no `/__captured_mail`; HTTP SIEM sinks must be `https://`; no banner |
+| `SK_MODE=eval` | Auto-generated master secret + SQLite DSN if missing; in-memory `CaptureSender`; `/__captured_mail` + `/admin/captured-mail` expose the whole queue; admin cookies without `Secure` (plain-http localhost); plain `http://` SIEM sinks accepted; bootstrap admin password printed once on stdout; `debug_reveal_url` in `/api/v1/request` replies; an empty domain allowlist admits every domain |
+| `SK_DEMO_MODE=true` | Capture sender forced (env-wired and `/admin/smtp` SMTP ignored); `/__captured_mail` scoped to the caller's own mail; 1/h IP and 1/h email request limits; an empty domain allowlist admits every domain (mail is captured, never relayed); admin console read-only outside the demo story (domains, policies, elevations, templates stay editable); integration enable + library upload refused; `internal/demo.Resetter` empties the editable tables every 24 h and restores accounts, branding, SMTP override and kv from the boot snapshot |
+| `SK_MODE=production` (default) | `SK_MASTER_SECRET` required (placeholder/weak refused); NopSender unless SMTP wired; full rate limits and lockout; no `/__captured_mail`; HTTP SIEM sinks must be `https://`; an empty domain allowlist refuses every request (fail closed, dashboard alert); no banner |
 
 The dashboard mode panel shows `eval` when `SK_MODE=eval` (even with the demo toggle on), else `demo` when `SK_DEMO_MODE=true`, else `production`; both banners render independently.
 
@@ -190,6 +195,7 @@ Key env vars:
 | `SK_MAIL_LANGUAGE`               | `en`                   | `en` / `fr`: language of every outbound mail. Never taken from the requester's Accept-Language |
 | `SK_BOOTSTRAP_ADMIN_PASSWORD`    | random 20-char         | **Eval-only** override; ≥ 12 chars                          |
 | `SK_RATE_LIMIT_*`                | 3/h email, 10/h IP     | Demo mode forces 1/1                                        |
+| `SK_RETENTION_*`                 | tokens 30 d, sessions +24 h, audit 365 d, captured mail 7 d, disabled admins 90 d | RGPD FR-I.29..34 periods of the daily purge (`internal/retention`); `_DAYS` (`_SESSION_GRACE_HOURS`), audit floor 180 d, no "keep forever" value |
 | `SK_SMTP_*`                      | unset                  | Env-wired sender; overridden at runtime by `/admin/smtp`    |
 | `SK_TRUSTED_PROXY_CIDRS`         | unset = trust nobody (Compose: `172.31.250.10/32`, the Caddy container; Helm/K8s: `""`) | XFF honoured only from these peers, walked right-to-left; validated at startup. Never a blanket RFC 1918 range |
 | `SK_LOG_FORMAT` / `SK_LOG_LEVEL` | `json` / `info`        | slog                                                        |
@@ -257,7 +263,7 @@ Race tolerance: if INSERT fails with a UNIQUE conflict (another worker just inse
 
 ### Anti-enumeration on public surface
 
-`POST /api/v1/request` always returns `202 accepted` — never 4xx — even when the email is denied, the domain isn't allowlisted, or the rate limit fired. The audit log is the operator's source of truth (FR-B.13). Eval mode adds `debug_reveal_url` to the response so smoke tests can exercise the consume path.
+`POST /api/v1/request` always returns `202 accepted` — never 4xx — even when the email is denied, the domain isn't allowlisted (including a production instance whose allowlist is still empty), or the rate limit fired. The audit log is the operator's source of truth (FR-B.13): `request.domain_blocked` carries `reason` = `not_listed` or `allowlist_empty`. Eval mode adds `debug_reveal_url` to the response so smoke tests can exercise the consume path.
 
 ### HTML templates
 
@@ -315,6 +321,7 @@ Vitest 4, 90% coverage threshold. Generator + entropy + transforms all have spec
 * **`a11y.spec.ts`** — axe-core checks. CI-optional.
 * **`nightly.spec.ts`** — extended public flow.
 * **`screenshots.spec.ts`** — manual: drives the public + admin flow and saves PNGs to `design/screenshots/`. Run with `SK_BOOTSTRAP_ADMIN_PASSWORD=…` so the spec can log in deterministically.
+* **`site/site.spec.ts`** — the static website in `design/` (own config: `npx playwright test -c playwright.site.config.ts`). `site/serve.mjs` serves the folder and applies `design/_headers` the way Cloudflare Workers static assets does; every page must render with zero CSP violations and zero console errors. The site CSP has `script-src 'self'`: never add an inline `<script>` or a CDN script to `design/` — put behaviour in `design/site.js`, third-party bundles under `design/vendor/` with a versioned file name and a `SHA256SUMS` line.
 
 Playwright launches the SealKeeper binary itself via `webServer:` in `playwright.config.ts`. `SEALKEEPER_BIN=/path/to/sk` shortcircuits the `go run` fallback when iterating against a pre-built binary.
 
@@ -405,7 +412,7 @@ A running list of things that have tripped Claude or a human in this codebase. *
 9. **Distroless has no shell.** `docker exec sealkeeper-local sh` fails. To run a CLI subcommand: `docker exec sealkeeper-local /usr/local/bin/sealkeeper admin list` (or `//usr/local/...` from Git Bash on Windows to dodge path mangling).
 10. **Goose migrations are checksummed.** Never edit a migration after it lands in `main` — write a new one. SQLite + Postgres files must both exist, both pass the same forward steps.
 11. **Alpine 3.22 is retired for Go 1.26.10.** Use `golang:1.26.10-alpine3.23` (3.21 went the same way at 1.26.3). Same trap will appear at the next Go minor.
-12. **The login error slug `bad_creds` covers three different failures** (unknown email, wrong password, wrong TOTP code) — that's anti-enumeration on purpose. A real internal failure surfaces as `internal`; a master-secret rotation surfaces as `totp_unrecoverable` now.
+12. **The login error slug `bad_creds` covers every credential failure** (unknown email, wrong password, wrong TOTP code, locked account, and a correct password with the TOTP field left blank) — that's anti-enumeration on purpose; the audit log keeps the real `reason`. There is no `totp_required` slug on the login form any more: it confirmed the password without the second factor. A real internal failure surfaces as `internal`; a master-secret rotation surfaces as `totp_unrecoverable` now. Accepted residual: an admin with WebAuthn keys who leaves the TOTP field blank is sent to `/admin/login/webauthn` only after the password matched, so for those accounts the redirect still confirms the password (the key itself is phishing-resistant). Closing it would need an always-on decoy step-up with password-independent assertion options.
 13. **gosec `Nosec: N, Issues: 0` is the success line.** Tools shipping a `// #nosec Gxxx -- rationale` exemption still register in the Nosec count.
 14. **Operator passwords are scored, not just length-checked.** `admin.ValidateAdminPassword` requires 16 chars + 3 classes *and* ≥ 100 bits of estimated guessing entropy (`EstimatePasswordEntropy`: dictionary/common words with leet and case variants, product/instance/email words, years, sequences, keyboard walks, repeats; only the first 72 bytes count). Test fixtures like `Strong-Admin-2026!` are refused — use random-looking strings. Generated passwords (`randomPassword`) redraw until they pass.
 15. **Last-active-admin guard must stay one atomic write.** `SetDisabled`/`Delete` carry the "another active admin exists" condition inside the UPDATE/DELETE, and on Postgres lock the active rows (`FOR UPDATE`) first — READ COMMITTED would otherwise let two cross-disables both pass. Recovery from zero active admins: `sealkeeper admin enable --email <e>`.
@@ -416,6 +423,7 @@ A running list of things that have tripped Claude or a human in this codebase. *
 20. **The audit chain is keyed.** Writing `audit_log` rows with a zero or wrong key (e.g. a CLI path built without `audit.DeriveKey`) turns the `/admin/audit` badge red — see §3.
 21. **CRLF checkouts on Windows.** With `core.autocrlf=true`, `gofmt -l` and `yamllint` flag every file for line endings even when the committed (LF) content is clean. Check a file with `tr -d '\r' < f | gofmt -l`; edit tools that write LF into a CRLF file are fine, git normalises on commit.
 22. **Mail templates are a token-exfiltration surface.** `mailtemplates/safety.go` enforces, at save time *and* on every render: `{{ .RevealURL }}` only as a bare action, the whole `href` of an `<a>` in HTML, standalone in text, never in the subject; no variables / `{{ . }}` / sub-templates. The rendered HTML is checked against an **allowlist** of elements/attributes (tokenizer + scripting-disabled `html.Parse`), never a denylist: x/net/html tokenizes `noscript`/`xmp`/`noembed`/`noframes`/`plaintext` as raw text while mail clients parse their content as markup, so a denylist was bypassed. Only `<title>`/`<style>` raw text is allowed, with no `<` inside; no CSS `url()`/at-rules but `@media`/escapes; `<img src>` only bitmap `data:` or `cid:`. Errors wrap `ErrParse` + `ErrUnsafe`. Sender identity, Message-ID and SPF/DKIM/DMARC: `docs/security/mail-authentication.md`.
+23. **An empty domain allowlist fails closed outside eval/demo.** `domains.NewRepo` refuses every domain while the table is empty (`Allows` → `false, ErrEmptyAllowlist`); `Server.SetDomains` re-opens it only for `IsEval() || IsDemo()`, where reveal mail is captured. A production instance therefore issues nothing until a domain is listed (SK-37) — the dashboard says so. Production-mode tests that expect a token must list their domain first (`allowDomain` in `internal/httpserver/allowlist_test.go`).
 
 ---
 

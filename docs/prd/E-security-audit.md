@@ -433,4 +433,4 @@ Une décision (l'ancienne 9.6, WAF) renvoie le **détail** au module H (déploie
 
 ---
 
-*Document maintenu dans le repo `sched75/sealkeeper` sous `docs/prd/E-security-audit.md`.*
+*Document maintenu dans le repo `SCHED75-ORG/SealKeeper` sous `docs/prd/E-security-audit.md`.*

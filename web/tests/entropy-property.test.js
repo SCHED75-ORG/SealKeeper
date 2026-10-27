@@ -106,6 +106,25 @@ const cases = [
     },
   ],
   [
+    "G2 words made of the separator",
+    {
+      generator: "G2",
+      parameters: {
+        library: ["-", "--", "---"],
+        numberOfWords: 3,
+        separatorOptions: ["-"],
+        numericGroups: [],
+      },
+    },
+  ],
+  [
+    "G1 citations differing by a space versus the separator",
+    {
+      generator: "G1",
+      parameters: { library: ["w w", "w-w"], separatorOptions: ["-"], numericGroups: [] },
+    },
+  ],
+  [
     "G1 case erased by a later alternating case",
     {
       generator: "G1",

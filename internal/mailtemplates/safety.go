@@ -474,7 +474,7 @@ func checkRawText(elem, text string) error {
 	return nil
 }
 
-const errCSS = "CSS may not use url(), @import, other at-rules than @media, or escapes"
+const errCSS = "CSS may not use url(), @import, other at-rules than @media, comments or escapes"
 
 // checkElement vets one element against the allowlist and returns 1 when
 // it is a link whose whole href is the reveal URL.
@@ -564,23 +564,19 @@ func inlineImage(v string) bool {
 
 // cssUnsafe refuses CSS that can fetch (url(), image-set(), @import,
 // @font-face), any at-rule but @media, and any backslash, which would let
-// an escape spell those out (u\72l()). Comments and whitespace are dropped
-// first so a lenient parser cannot be fed "ur/**/l (".
+// an escape spell those out (u\72l()). Any "/*" is refused outright:
+// stripping comments without tokenizing strings let `'/*'` ... `'*/'` hide
+// a url() or @import from this check while the client, which reads both
+// markers as string literals, applied it. With no comment possible,
+// whitespace is dropped so a lenient parser cannot be fed "url (", and the
+// needles are matched inside strings too, which only errs on refusing.
 func cssUnsafe(css string) bool {
 	l := strings.ToLower(css)
-	if strings.Contains(l, "\\") {
+	if strings.Contains(l, "\\") || strings.Contains(l, "/*") {
 		return true
 	}
 	var b strings.Builder
 	for i := 0; i < len(l); i++ {
-		if strings.HasPrefix(l[i:], "/*") {
-			end := strings.Index(l[i+2:], "*/")
-			if end < 0 {
-				break
-			}
-			i += end + 3
-			continue
-		}
 		if c := l[i]; c != ' ' && c != '\t' && c != '\n' && c != '\r' && c != '\f' {
 			b.WriteByte(c)
 		}

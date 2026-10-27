@@ -36,7 +36,7 @@ This Code of Conduct applies within all community spaces, and also applies when 
 
 Concretely, this Code applies to:
 
-- The GitHub repository `sched75/sealkeeper` and all its issues, pull requests, discussions, and reviews
+- The GitHub repository `SCHED75-ORG/SealKeeper` and all its issues, pull requests, discussions, and reviews
 - The project website at `https://sealkeeper.eu`
 - Any conference talk, podcast appearance, or public communication where the speaker represents SealKeeper
 - Direct private communications between contributors when discussing project matters

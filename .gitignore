@@ -14,6 +14,8 @@
 # PGP keys and certificates
 *.gpg
 *.asc
+# The security contact public key is served by the site (security.txt "Encryption:").
+!design/.well-known/pgp-key.asc
 !docs/pgp-key.asc.example
 revoke-*.asc
 secret-key*.asc
@@ -92,6 +94,9 @@ web/.pnpm-store/
 
 # Build output
 web/dist/
+# JS bundle copied in for go:embed (release build, make web-embed)
+internal/webbundle/dist/*
+!internal/webbundle/dist/.gitkeep
 web/.astro/
 web/.output/
 
