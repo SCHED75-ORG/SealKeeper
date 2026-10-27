@@ -128,9 +128,9 @@
 </p>
 
 <ul>
-  <li><strong>From</strong> — the address belongs to the SealKeeper instance, not to your IT department's general mailbox. The display name will say something like <em>SealKeeper · example.eu</em>.</li>
-  <li><strong>Subject</strong> — <em>Your SealKeeper password proposals</em>, translated into the language your browser was set to when the request was made.</li>
-  <li><strong>Body</strong> — a brief explanation, the validity window in minutes, and a single <em>See my proposals</em> button. The button points at <code>https://&lt;instance&gt;/reveal/&lt;token&gt;</code>.</li>
+  <li><strong>From</strong> — an address set up for the SealKeeper instance, not your IT department's general mailbox. Unless the operator has configured another sender, it reads <em>SealKeeper &lt;noreply@seal.example.eu&gt;</em>.</li>
+  <li><strong>Subject</strong> — <em>Your SealKeeper password proposals</em> (or <em>Vos propositions de mot de passe SealKeeper</em>). The language is chosen by the operator for the whole instance, English or French; it does not follow your browser settings. Operators may also customise the wording.</li>
+  <li><strong>Body</strong> — a brief explanation, the validity window in minutes, and a single <em>View my proposals</em> button (<em>Voir mes propositions</em> in French). The button points at <code>https://&lt;instance&gt;/reveal/&lt;token&gt;</code>.</li>
 </ul>
 
 <div class="callout">
@@ -145,28 +145,31 @@
 
 <p>
   Click the button or paste the URL into your browser. SealKeeper presents
-  a single page with a discrete <em>Decode</em> action. The password is
-  <strong>not</strong> shown until you press it — that gives you time to
-  check your surroundings (screen visible from the corridor, screen-sharing
-  still running, a colleague looking over your shoulder).
+  a single page with a discreet <em>Décoder</em> button (the reveal page
+  labels it in French). The password is <strong>not</strong> shown until
+  you press it — that gives you time to check your surroundings (screen
+  visible from the corridor, screen-sharing still running, a colleague
+  looking over your shoulder). Merely opening the page does not use up
+  the link; pressing the button does.
 </p>
 
 <figure class="screenshot">
-  <img src="/screenshots/reveal-ready.png" alt="The SealKeeper reveal page before the Decode button has been pressed — a short notice and a single blue button.">
+  <img src="/screenshots/reveal-ready.png" alt="The SealKeeper reveal page before the Décoder button has been pressed — a short notice and a single button in the instance's primary brand colour.">
   <figcaption>Figure 1 — the reveal page on first load. Nothing is shown until you press the button.</figcaption>
 </figure>
 
 <p>
-  Once you press <em>Decode</em>, the page reveals a small number of
-  candidate passwords — typically five. They all satisfy the same
+  Once you press <em>Décoder</em>, the page reveals a small number of
+  candidate passwords — five by default, as set by the operator's
+  policy. They all satisfy the same
   generation policy; pick the one that you find easiest to remember or to
   type. The choice has no security implication: each proposal carries the
   same level of strength.
 </p>
 
 <figure class="screenshot">
-  <img src="/screenshots/reveal-consumed.png" alt="The reveal page after decoding, with five candidate passwords listed alongside their entropy gauges and per-proposal Copy buttons.">
-  <figcaption>Figure 2 — five proposals, each with its entropy gauge and a one-click <em>Copy</em> button.</figcaption>
+  <img src="/screenshots/reveal-consumed.png" alt="The reveal page after decoding, with five candidate passwords listed alongside their entropy gauges and per-proposal Copier (copy) buttons.">
+  <figcaption>Figure 2 — five proposals, each with its entropy gauge and a one-click <em>Copier</em> (copy) button. The clipboard is cleared 30 seconds after a copy and when the page closes.</figcaption>
 </figure>
 
 <h3>2.1 — Why several proposals?</h3>
@@ -179,13 +182,20 @@
   weakening the cryptography behind it.
 </p>
 
-<h3>2.2 — The countdown</h3>
+<h3>2.2 — Two time limits</h3>
 
 <p>
-  At the top of the reveal page a small timer ticks down. When it reaches
-  zero, the page closes itself, the proposals disappear, and the link
-  cannot be opened again. The default lifetime is fifteen minutes from the
-  moment the email left the relay.
+  Two separate clocks apply, and they do not start at the same moment:
+</p>
+
+<ul>
+  <li><strong>The link</strong> is valid for fifteen minutes from the moment it was issued (the minute count is printed in the email). Past that, the reveal page says the link has expired.</li>
+  <li><strong>The reveal session</strong> starts only when you press <em>Décoder</em>. A timer (<em>Temps restant</em>) then appears under the proposals and counts down the session length set by the operator's policy — fifteen minutes by default. When it reaches zero, the proposals disappear and the clipboard is cleared. Leaving or closing the page ends the session the same way.</li>
+</ul>
+
+<p>
+  Pressing <em>Décoder</em> uses up the link, so it cannot be opened
+  again afterwards, whichever timer is still running.
 </p>
 
 <div class="callout callout--night">
@@ -220,16 +230,18 @@
 </p>
 
 <div class="callout">
-  <strong>One request per hour.</strong> The public form throttles
-  requests per email and per IP. A second submission within the same hour
-  is silently dropped — again, by design. Wait, or ask an operator to
-  raise the limit for your domain.
+  <strong>A few requests per hour.</strong> The public form throttles
+  requests per email address and per network address — by default three
+  per hour for one email and ten per hour from one IP address (a public
+  demo allows one of each). Submissions over the limit are silently
+  dropped — again, by design. Wait an hour, or ask your operator: the
+  limits apply to the whole instance.
 </div>
 
 <h2 id="afterwards">4 · What happens after you have used the link</h2>
 
 <p>
-  The token in the URL is consumed the moment the proposals are rendered.
+  The token in the URL is consumed the moment you press <em>Décoder</em>.
   Re-opening the same link — whether by you, by a colleague who saw the
   email, or by any program that follows links automatically — yields a
   short message saying that the link has already been used. The proposals
@@ -248,9 +260,13 @@
 
 <h3>5.1 — The page says the link has expired</h3>
 <p>
-  The validity window — fifteen minutes by default — has elapsed. Return
+  The link was not opened and decoded within its validity window —
+  fifteen minutes from when it was issued. Return
   to the request page and ask for a new link. The old one is now inert
-  and can be deleted from your inbox.
+  and can be deleted from your inbox. If instead the proposals vanished
+  with a <em>Session expirée</em> notice, the reveal-session timer ran
+  out after you pressed <em>Décoder</em>; the link is used up, so ask
+  for a new one the same way.
 </p>
 
 <h3>5.2 — The page says the link has already been used</h3>
@@ -263,18 +279,20 @@
 
 <h3>5.3 — I clicked but the page is blank</h3>
 <p>
-  SealKeeper relies on a small JavaScript bundle to decode and display
-  the proposals. If JavaScript is disabled in your browser, the reveal
+  SealKeeper relies on a small JavaScript bundle that generates the
+  proposals in your browser and displays them. If JavaScript is disabled in your browser, the reveal
   page cannot work. Re-enable it for the SealKeeper hostname only, or
   open the link in a browser where scripts are allowed.
 </p>
 
 <h3>5.4 — Is the password in the URL?</h3>
 <p>
-  No. The URL contains only an opaque, random token. The token is the
-  permission to <em>request</em> the password from the server — and
-  permission is granted exactly once. The password itself never appears
-  in a URL, in a query string, in a server log, or in a referrer header.
+  No. The URL contains only an opaque, random token. The token is a
+  one-time permission to fetch the generation rules (the policy) from
+  the server — granted exactly once; your browser then generates the
+  proposals locally with its cryptographic random generator. The server
+  never sees or stores a password, so it never appears in a URL, in a
+  query string, in a server log, or in a referrer header.
 </p>
 
 <h3>5.5 — Could someone intercept the link between SealKeeper and my inbox?</h3>
@@ -295,13 +313,16 @@
   new link addressed to them.
 </p>
 
-<h3>5.7 — What if my password manager grabbed the URL automatically?</h3>
+<h3>5.7 — What if a link scanner opened the URL before me?</h3>
 <p>
-  Some browser extensions follow links in your inbox to compute previews
-  or to detect phishing. If a preview engine consumed the token before
-  you saw the email, the page will report <em>already used</em>. Request
-  a new link and consider disabling automatic link preview for your
-  SealKeeper hostname.
+  Mail gateways, security scanners and preview engines often fetch the
+  links in incoming email. A plain fetch of the reveal page does
+  <strong>not</strong> use up the link: the token is consumed only when
+  the page's JavaScript sends it to the server, which happens when
+  someone presses <em>Décoder</em>. Only a scanner that runs the page's
+  JavaScript and clicks the button could burn it. If that happens, the
+  page will report <em>already used</em>; request a new link and ask
+  your IT team to exempt the SealKeeper hostname from such scanning.
 </p>
 
 <h2 id="privacy">6 · What SealKeeper sees and what it does not</h2>
@@ -319,7 +340,7 @@
   <tbody>
     <tr><td>Your email address</td><td>Yes, in the audit log</td><td>Configurable by the operator; typically 12 months</td></tr>
     <tr><td>The request timestamp</td><td>Yes</td><td>As above</td></tr>
-    <tr><td>A coarse hash of your IP / user-agent</td><td>Yes, for rate-limiting</td><td>Cleared with the audit retention window</td></tr>
+    <tr><td>A keyed pseudonym (HMAC) of your IP address / user-agent</td><td>Yes, in the audit log</td><td>Cleared with the audit retention window</td></tr>
     <tr><td>The proposals themselves</td><td><strong>No</strong></td><td>Generated in-browser, never sent to the server</td></tr>
     <tr><td>Your final choice</td><td><strong>No</strong></td><td>The server cannot tell which proposal you kept</td></tr>
     <tr><td>The target system the password is for</td><td><strong>No</strong></td><td>SealKeeper does not ask</td></tr>
@@ -330,8 +351,9 @@
   <strong>RGPD note.</strong> Under EU regulation 2016/679 you may ask the
   operator of the SealKeeper instance for a copy of the audit entries
   that mention you, or for their deletion. The operator must answer
-  within one month. The contact address is shown at the bottom of every
-  page of the SealKeeper instance you used.
+  within one month. If the operator has configured a contact address,
+  it appears at the bottom of the instance's request page and in the
+  emails it sends; otherwise, ask your IT department who runs it.
 </div>
 
 <h2 id="reporting">7 · Reporting a problem</h2>

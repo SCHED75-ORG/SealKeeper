@@ -120,42 +120,65 @@
 
 <h3>Prerequisites</h3>
 <ul>
-  <li>A Linux host with Docker 24+ or Podman 4+, exposed on port 443 (or behind a reverse proxy)</li>
+  <li>A Linux host with Docker 24+ or Podman 4+. The binary speaks plain HTTP on port 8443 and has no TLS listener of its own, so it must never be exposed directly</li>
   <li>A reachable SMTP relay (host, port, username, password) for sending recipient emails</li>
-  <li>A persistent volume of at least 1 GB for ciphertext storage and audit logs</li>
-  <li>A reverse proxy with valid TLS (nginx, Caddy, Traefik, or Cloudflare Tunnel)</li>
+  <li>A persistent volume (1 GB is plenty) mounted on <code>/data</code>, for uploaded libraries and, in eval mode, the SQLite database</li>
+  <li>A TLS-terminating reverse proxy in front of port 8443 (nginx, Caddy, Traefik, or Cloudflare Tunnel)</li>
+  <li>For production, a PostgreSQL database (SQLite is the zero-config eval default)</li>
 </ul>
 
 <h3>Pulling and running the container</h3>
-<pre><code># SealKeeper runs as a single Go binary in an OCI image
+<pre><code># Generate the master secret ONCE and store it safely (password vault,
+# secrets manager, sealed envelope). Every later run must reuse it.
+openssl rand -base64 32
+
+# Then export the stored value before each start:
+export SK_MASTER_SECRET="&lt;the stored base64 value&gt;"
+
+# SealKeeper runs as a single Go binary in an OCI image
 docker run -d \
   --name sealkeeper \
   --restart unless-stopped \
-  -p 8443:8443 \
+  -p 127.0.0.1:8443:8443 \
   -e SK_BASE_URL="https://seal.example.eu" \
   -e SK_DATABASE_URL="postgres://sk:secret@db:5432/sealkeeper?sslmode=require" \
-  -e SK_MASTER_SECRET="$(openssl rand -base64 32)" \
-  -v sealkeeper-data:/var/lib/sealkeeper \
+  -e SK_MASTER_SECRET="$SK_MASTER_SECRET" \
+  -v sealkeeper-data:/data \
   ghcr.io/sched75-org/sealkeeper:latest</code></pre>
 
+<div class="callout callout--gold">
+  <strong>Pin <code>SK_MASTER_SECRET</code>.</strong> TOTP secrets, the
+  SMTP relay password set in the console and integration credentials
+  are encrypted with this key, and the audit-chain and IP-pseudonym
+  keys are derived from it. Changing it — or letting a script mint a
+  fresh one on each start — makes those secrets unreadable (admins can
+  no longer sign in with TOTP) and breaks verification of the audit
+  log. Keep it identical across restarts, upgrades and rebuilds, and
+  keep a copy in escrow.
+</div>
+
 <div class="callout">
-  <strong>Bootstrap password.</strong> On first launch — when the
-  <code>admins</code> table is empty — SealKeeper auto-creates the
-  account <code>admin@localhost</code> with a random 20-character
-  password printed once to the binary's stdout. Capture it from the
-  container logs immediately: <code>docker logs sealkeeper | grep
-  "BOOTSTRAP ADMIN"</code>. The wizard will then force you to change
-  the password and enrol a TOTP authenticator before any other admin
-  page becomes reachable.
+  <strong>Bootstrap password.</strong> When <code>sealkeeper serve</code>
+  starts and the <code>admins</code> table is empty — in every run
+  mode — SealKeeper creates the account <code>admin@localhost</code>
+  with a random 20-character password and writes it once to the
+  server log on stdout. Capture it from the container logs immediately:
+  <code>docker logs sealkeeper | grep "BOOTSTRAP ADMIN"</code>. It is
+  never reprinted; if you lose it, run
+  <code>docker exec sealkeeper /usr/local/bin/sealkeeper admin
+  reset-password --email admin@localhost</code> to mint a new one. The wizard will then force you to change the
+  password and enrol a TOTP authenticator before any other admin page
+  becomes reachable.
 </div>
 
 <h2 id="admin-setup">2 · Admin console setup</h2>
 
 <p>
   Navigate to <code>https://your-host/admin/login</code>. The first user is
-  <code>admin@localhost</code> — its bootstrap password is printed on the
-  binary's stdout the first time the database is migrated and never
-  reprinted afterwards. Record it before doing anything else.
+  <code>admin@localhost</code> — its bootstrap password is written to
+  the server log by <code>sealkeeper serve</code> on the first start
+  that finds no admin account (in eval and production mode alike), and
+  never reprinted afterwards. Record it before doing anything else.
 </p>
 
 <figure class="screenshot">
@@ -176,8 +199,13 @@ docker run -d \
   bootstrap, setup wizard, later rotations on
   <code>/admin/account</code> — must reach <strong>at least 16
   characters and mix three of the four classes</strong> (lower-case,
-  upper-case, digits, symbols). The couple is equivalent to ≥ 100 bits
-  of entropy from any typable alphabet. The validator lives in
+  upper-case, digits, symbols) <em>and</em>, separately,
+  <strong>score at least 100 bits of estimated guessing entropy</strong>.
+  The estimate penalises dictionary and common words (including leet
+  and case variants), the product, instance and email names, years,
+  sequences, keyboard walks and repeats, so a long but predictable
+  password such as <code>Strong-Admin-2026!</code> is refused. Only the
+  first 72 bytes count (bcrypt limit). The validator lives in
   <code>internal/admin/password.go</code> and is hard-coded — it
   cannot be relaxed via configuration. PRD: FR-M.4..6.
 </div>
@@ -191,7 +219,9 @@ docker run -d \
 
 <p>
   Once setup completes, the dashboard summarises the running instance:
-  number of audit entries, current session expiry, last login timestamp.
+  run mode, active mail sender, number of audit entries, last login
+  timestamp and current session expiry — plus an alert while the
+  domain allowlist is empty.
   The header carries a navigation strip with links to every
   configuration surface.
 </p>
@@ -290,20 +320,30 @@ docker run -d \
 <h3>2.6 — Libraries (dictionaries and corpora)</h3>
 
 <p>
-  The G1 (citation) and G2 (Diceware) generators each read from a
-  library shipped with the binary. The Libraries page lets you upload
-  your own — a dictionary file is one word per line, 4-12 letters; a
-  corpus is one citation per line, 3-25 words. Files are stored
-  content-addressed by their SHA-256 hash so identical uploads
-  deduplicate.
+  The Libraries page stores dictionaries and corpora — a dictionary
+  file is one word per line, 4-12 letters; a corpus is one citation per
+  line, 3-25 words. Files are stored content-addressed by their SHA-256
+  hash so identical uploads deduplicate.
 </p>
 
+<div class="callout">
+  <strong>Not yet wired to the generators.</strong> In v0.1 the G1
+  (citation) and G2 (Diceware) generators read their word list only
+  from an inline <code>library</code> array in the policy's
+  <code>parameters</code> JSON; they do not look up an uploaded library
+  by id, and a G1/G2 policy without that array is refused by the policy
+  editor. The binary ships only a small test sample, used by the
+  zero-config default policy. Uploaded libraries are stored for a
+  future release; to use one today, paste its entries into the policy
+  parameters.
+</div>
+
 <figure class="screenshot">
-  <img src="/screenshots/admin-libraries.png" alt="The Libraries admin page with the system-shipped libraries and an upload form.">
-  <figcaption>Figure 9 — Libraries. System rows are read-only.</figcaption>
+  <img src="/screenshots/admin-libraries.png" alt="The Libraries admin page with the list of stored libraries and an upload form.">
+  <figcaption>Figure 9 — Libraries.</figcaption>
 </figure>
 
-<h3>2.7 — Email templates</h3>
+<h3 id="email-templates">2.7 — Email templates</h3>
 
 <p>
   The reveal-link and post-consultation emails are fully template-
@@ -338,10 +378,14 @@ docker run -d \
 <h3>2.9 — Branding</h3>
 
 <p>
-  The public landing page, the reveal page and the email body all
-  pick up the instance name, the three brand colours, the contact URL
-  and the inline logo (PNG or SVG, ≤ 256 KB) you configure here. Changes
-  apply on the next page load — no rebuild, no restart.
+  The public landing page and the reveal page pick up the instance
+  name, the three brand colours and the inline logo (PNG or SVG,
+  ≤ 256 KB) you configure here; the landing page footer also shows the
+  contact URL when one is set. The built-in email templates use only
+  the instance name and the contact URL: their colours are fixed and
+  they carry no logo (edit the templates under
+  <a href="#email-templates">Email templates</a> to change that).
+  Changes apply on the next page load — no rebuild, no restart.
 </p>
 
 <figure class="screenshot">
@@ -353,10 +397,12 @@ docker run -d \
 
 <p>
   Each admin can enrol one or more FIDO2 / WebAuthn authenticators —
-  hardware keys, platform passkeys — as an additional second factor.
-  At the moment of writing, TOTP remains the active second factor at
-  sign-in and WebAuthn substitution kicks in automatically when a key
-  is registered.
+  hardware keys, platform passkeys — as an alternative second factor.
+  TOTP stays enrolled and keeps working. At sign-in, an admin with at
+  least one registered key who enters the correct password and leaves
+  the TOTP field empty is taken to a WebAuthn step
+  (<code>/admin/login/webauthn</code>) and signs in by touching the
+  key; filling in the TOTP field signs in with TOTP as before.
 </p>
 
 <figure class="screenshot">
@@ -372,8 +418,17 @@ docker run -d \
   <li><strong>Host and port</strong> — typically <code>smtp.example.eu:587</code> for STARTTLS or <code>:465</code> for implicit TLS.</li>
   <li><strong>Authentication</strong> — username and password, or an app-specific token for Google Workspace / Microsoft 365.</li>
   <li><strong>From address</strong> — must match an allowed sender on the relay, e.g. <code>seals@example.eu</code>.</li>
-  <li><strong>TLS mode</strong> — <code>auto</code> picks STARTTLS when the server advertises it; <code>implicit</code> connects directly over TLS; <code>disable</code> is for local capture only.</li>
+  <li><strong>TLS mode</strong> — one of <code>auto</code>, <code>starttls</code>, <code>implicit</code> or <code>disable</code>. <code>auto</code> (the default) upgrades with STARTTLS and refuses a relay that does not offer it, except a loopback relay (a local MTA sidecar), which may stay plaintext; <code>starttls</code> always requires STARTTLS; <code>implicit</code> connects directly over TLS (port 465 style); <code>disable</code> forces plaintext and is only for a relay on a private network you trust.</li>
 </ul>
+
+<p>
+  The relay can be wired at startup with the <code>SK_SMTP_*</code>
+  environment variables (<code>SK_SMTP_TLS</code> takes the same four
+  values) or set at runtime on <code>/admin/smtp</code>, which overrides
+  the environment and stores the relay password encrypted under
+  <code>SK_MASTER_SECRET</code>. In production with neither, no mail is
+  sent at all.
+</p>
 
 <p>
   In eval mode and in public-demo mode the SMTP layer is replaced by an
@@ -427,23 +482,25 @@ docker run -d \
 <div class="callout callout--gold">
   <strong>RGPD reminder.</strong> The audit log contains personal data
   (email addresses, timestamps tied to individuals). It is subject to
-  Article 30 record-of-processing requirements. A pre-filled fiche de
-  traitement template lives at <code>docs/rgpd/</code> in the repository.
+  Article 30 record-of-processing requirements. The data inventory,
+  retention periods and record-of-processing guidance are in the RGPD
+  requirements module,
+  <a href="https://github.com/SCHED75-ORG/SealKeeper/blob/main/docs/prd/I-rgpd-compliance.md">docs/prd/I-rgpd-compliance.md</a>.
+  Audit rows older than <code>SK_RETENTION_AUDIT_DAYS</code> (default
+  365, minimum 180) are purged daily.
 </div>
 
 <h2 id="backup">5 · Backup and disaster recovery</h2>
 
-<p>The persistent volume contains:</p>
+<p>A SealKeeper instance keeps its state in three places, and a restore needs all three:</p>
 
 <ul>
-  <li>The admins table (bcrypt-hashed passwords, AES-256-GCM-wrapped TOTP secrets).</li>
-  <li>The audit log (SQLite by default, Postgres for production).</li>
-  <li>Branding overrides + logo blob (inline, ≤ 256 KB).</li>
-  <li>Admin-uploaded libraries (content-addressed on disk).</li>
-  <li>Email template overrides and outbound integrations metadata.</li>
+  <li><strong>The database</strong> — admins (bcrypt-hashed passwords, AES-256-GCM-wrapped TOTP secrets), the audit log, domains, policies, elevations, branding (logo included, ≤ 256 KB), email template overrides, integrations and the SMTP override. With PostgreSQL, back it up with <code>pg_dump</code> (or your managed-database snapshots); with SQLite (the eval default, <code>/data/sealkeeper.db</code>), copy the database file while the service is stopped.</li>
+  <li><strong>The <code>/data</code> volume</strong> — admin-uploaded libraries, stored content-addressed on disk (and the SQLite file when you use SQLite). Snapshot it with your existing tooling.</li>
+  <li><strong><code>SK_MASTER_SECRET</code></strong> — keep it in escrow, separately from the backups. Without the same key, a restored database loses its TOTP secrets, SMTP password and integration credentials, and its audit chain no longer verifies.</li>
 </ul>
 
-<p>For backup, snapshot the volume nightly using your existing tooling. The disaster-recovery procedure is documented in <a href="https://github.com/SCHED75-ORG/SealKeeper/blob/main/docs/disaster-recovery.md">docs/disaster-recovery.md</a>.</p>
+<p>Take the database dump and the volume snapshot at the same time, nightly, and test a restore on a scratch host before you need it.</p>
 
 <h2 id="upgrading">6 · Upgrading</h2>
 
