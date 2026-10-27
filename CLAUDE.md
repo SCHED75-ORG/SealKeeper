@@ -190,7 +190,7 @@ Key env vars:
 | `SK_BASE_URL`                    | `http://localhost:8443`| Drives reveal URLs + WebAuthn RPID derivation               |
 | `SK_HTTP_LISTEN`                 | `:8443`                | TCP address                                                 |
 | `SK_DATABASE_URL`                | sqlite in eval         | `postgres://…` or `sqlite://…`                              |
-| `SK_MASTER_SECRET`               | auto in eval only      | base64 32 bytes — **pin in production AND across rebuilds** |
+| `SK_MASTER_SECRET`               | auto in eval only      | base64 32 bytes — **pin in production AND across rebuilds**; hand-made values refused in production (see below) |
 | `SK_INSTANCE_DOMAIN`             | derived from BaseURL   | From-address host, WebAuthn RPID                            |
 | `SK_MAIL_LANGUAGE`               | `en`                   | `en` / `fr`: language of every outbound mail. Never taken from the requester's Accept-Language |
 | `SK_BOOTSTRAP_ADMIN_PASSWORD`    | random 20-char         | **Eval-only** override; ≥ 12 chars                          |
@@ -211,6 +211,8 @@ Key env vars:
 Parsing is strict: a malformed integer, boolean (`true/false/1/0/yes/no/on/off`) or seconds value is a startup error, not a silent fallback to the default (an empty value counts as unset). Unknown keys in the `SK_CONFIG_FILE` YAML are a startup error too (`KnownFields`); YAML durations take Go syntax (`30m`), a bare integer would be nanoseconds and fails the 60 s floor.
 
 **Pinning `SK_MASTER_SECRET` is critical.** TOTP secrets, SMTP relay passwords and integration credentials are AES-256-GCM-wrapped with this key, and the audit chain key and the IP pseudonym key are derived from it — rotating it breaks keyed audit verification as well. A rebuild without the env var minted a fresh key in earlier sessions, which left the wrapped TOTP blob unopenable — observed bug, surfaced as the new `admin.ErrTOTPUnrecoverable` (login slug `totp_unrecoverable`).
+
+**Production refuses a hand-made master secret** (`internal/config/mastersecret.go`). Hex and base64 values are decoded and the bytes must look uniformly random: distinct-value count, a value or block repeated at any offset, arithmetic or quadratic runs, printable and letter share, then the bytes read as text. Every value must then read as random characters: no repeated block, letter pairs that do not pair up like English or French words (`strength.LetterPairs`), and ≥ 64 bits from `strength.Estimate` with product and instance words as context. Each test refuses only what a random value shows with probability < 1e-10 (`randomFailBound`), so thresholds are computed, not tuned — e.g. a 32-byte key needs 19 distinct bytes, not 24, a floor that would refuse one random key in 76 000. Word passphrases, diceware included, are refused on purpose; existing installs using one fail at startup after upgrade, see the QUICKSTART upgrade note (no rotation before v0.2). The estimator lives in the leaf package `internal/strength` so `internal/config` does not import `internal/admin` and the storage layer.
 
 ---
 

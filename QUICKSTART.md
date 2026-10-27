@@ -62,6 +62,8 @@ docker compose up -d
 
 Upgrade note — migration 0017 stores reveal tokens as SHA-256 digests only, so a database dump or backup no longer contains usable reveal links. Links still pending when you upgrade (15-minute lifetime) stop working; their recipients request a new one. Upgrade during a quiet window if that matters.
 
+Upgrade note — production now refuses a hand-made `SK_MASTER_SECRET`, not only a placeholder or a short value. A value printed by `openssl rand -base64 32` or `openssl rand -hex 32`, or any other random value of 32+ characters, keeps working. Refused: a decoded key that is not random bytes (zeros, a pattern, a counter, an encoded phrase, even with a few bytes changed), and a passphrase made of words (English or French, invented or real — `correct horse battery staple` style included), of the product or instance name, or of a block typed several times. Eval mode, which mints its own key, is not affected. The new release exits at startup with `SK_MASTER_SECRET …; SK_MASTER_SECRET must be 32 random bytes, base64-encoded` before opening the database, so rolling back to the previous image is safe. There is no in-place rotation yet (`sealkeeper secrets rotate-master`, FR-E.66, is planned for v0.2): either stay on the previous release until then, or move to a fresh `openssl rand -base64 32` value knowing that everything sealed with the old one is lost — every admin goes through `sealkeeper admin reset-password --email <e>` (new password and TOTP), the SMTP relay password and each SIEM integration's credentials are entered again in the console, and audit rows written under the old key no longer verify (export `/admin/audit` first; the badge stays red for them).
+
 **Stop and remove everything**:
 
 ```bash
