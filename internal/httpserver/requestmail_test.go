@@ -50,7 +50,10 @@ func TestRequestLatencyDoesNotRevealTheOutcome(t *testing.T) {
 	t.Parallel()
 	s, _, db := newModeServer(t, config.ModeProduction, false)
 	const floor = 150 * time.Millisecond
-	const relay = 600 * time.Millisecond
+	// Far above the request floor and the issue path's own cost (token,
+	// keyed audit rows) on a loaded SQLite run, which reached ~650 ms: an
+	// inline send still shows up as >= relay, a slow disk does not.
+	const relay = 3 * time.Second
 	s.requestFloor = floor
 	relaySend := &relaySender{delay: relay, sent: make(chan string, 1)}
 	s.SetSender(relaySend)
