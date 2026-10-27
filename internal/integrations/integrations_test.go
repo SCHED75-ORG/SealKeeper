@@ -338,9 +338,10 @@ func TestDispatcherFansOutToEnabledOnly(t *testing.T) {
 
 	d.Push(integrations.NewEvent(1, "admin.login", "", "", nil, "", "", time.Now()))
 
-	// Allow workers to fan out.
-	for i := 0; i < 50; i++ {
-		if hits.Load() >= 2 {
+	// Allow workers to fan out. The handler counts a hit before the worker
+	// has read the reply and bumped Delivered, so wait for both.
+	for i := 0; i < 250; i++ {
+		if hits.Load() >= 2 && d.Stats().Delivered >= 2 {
 			break
 		}
 		time.Sleep(20 * time.Millisecond)
