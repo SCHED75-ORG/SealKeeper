@@ -127,7 +127,9 @@ services:
       backend: # to reach sealkeeper-backend:8443
         ipv4_address: 172.31.250.10 # == SK_TRUSTED_PROXY_CIDRS default
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:2019/config/"]
+      # Caddy's admin API binds 127.0.0.1 only; "localhost" resolves to
+      # ::1 first in the Alpine image, so it was always unhealthy.
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:2019/config/"]
       interval: 30s
       timeout: 5s
       retries: 3

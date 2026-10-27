@@ -87,6 +87,12 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" \
     go build -ldflags="-s -w" -o /out/healthcheck ./cmd/healthcheck
 
+# Writable data root. The runtime image is distroless (no mkdir) and the
+# root filesystem is read-only in every shipped deployment (FR-H.70), so
+# /data/libraries is created here and copied in owned by 65532: a fresh
+# named volume mounted on /data inherits that ownership.
+RUN mkdir -p /out/data/libraries
+
 # ---------- 2) Runtime ----------
 FROM gcr.io/distroless/static:nonroot
 
@@ -109,6 +115,11 @@ COPY --from=builder --chown=65532:65532 /out/healthcheck /usr/local/bin/healthch
 
 # JS generation bundle, built from source in the webbuild stage
 COPY --from=webbuild --chown=65532:65532 /web/dist /app/web
+
+# Uploaded libraries live on the /data volume, not under the read-only
+# WORKDIR (the config default "data/libraries" is relative to /app).
+COPY --from=builder --chown=65532:65532 /out/data /data
+ENV SK_LIBRARIES_DIR=/data/libraries
 
 EXPOSE 8443
 
