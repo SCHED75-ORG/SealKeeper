@@ -10,7 +10,7 @@
 ## TL;DR — verify everything
 
 ```bash
-TAG=v0.1.0   # ← the release you downloaded
+TAG=v0.1.1   # ← the release you downloaded
 
 # 1. GPG-signed checksums for the binaries
 gpg --import docs/security/release-signing-key.asc   # from this repository
@@ -87,12 +87,12 @@ Install cosign ≥ v2.4 (`brew install cosign` or
 
 ```bash
 cosign verify \
-  --certificate-identity 'https://github.com/SCHED75-ORG/SealKeeper/.github/workflows/release.yml@refs/tags/v0.1.0' \
+  --certificate-identity 'https://github.com/SCHED75-ORG/SealKeeper/.github/workflows/release.yml@refs/tags/v0.1.1' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  ghcr.io/sched75-org/sealkeeper:v0.1.0
+  ghcr.io/sched75-org/sealkeeper:v0.1.1
 ```
 
-Expected: `Verification for ghcr.io/sched75-org/sealkeeper:v0.1.0 — The
+Expected: `Verification for ghcr.io/sched75-org/sealkeeper:v0.1.1 — The
 following checks were performed: …`. Key fields to eyeball:
 
 - `Issuer: https://token.actions.githubusercontent.com`
@@ -110,10 +110,10 @@ SLSA Level 2 provenance attestation to the image. The GitHub CLI can verify
 it natively:
 
 ```bash
-gh attestation verify oci://ghcr.io/sched75-org/sealkeeper:v0.1.0 \
+gh attestation verify oci://ghcr.io/sched75-org/sealkeeper:v0.1.1 \
   --repo SCHED75-ORG/SealKeeper \
   --signer-workflow SCHED75-ORG/SealKeeper/.github/workflows/release.yml \
-  --source-ref refs/tags/v0.1.0
+  --source-ref refs/tags/v0.1.1
 ```
 
 Expected: `Loaded ... attestation(s) from ...; verified signed by ...; the
@@ -136,7 +136,7 @@ SBOMs are produced by `syft` (FR-L.66) and attached two ways:
   ```bash
   cosign download attestation \
     --predicate-type https://cyclonedx.org/bom \
-    ghcr.io/sched75-org/sealkeeper:v0.1.0 \
+    ghcr.io/sched75-org/sealkeeper:v0.1.1 \
     | jq -r '.payload | @base64d | fromjson | .predicate' \
     > image.sbom.cdx.json
 

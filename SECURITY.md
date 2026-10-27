@@ -6,8 +6,8 @@ SealKeeper handles cryptographic operations and credential transmission. We take
 
 | Version | Supported |
 |---|---|
-| 0.1.x | ✅ Supported |
-| < 0.1.0 | ❌ Please upgrade |
+| 0.1.1 | ✅ Supported |
+| ≤ 0.1.0 | ❌ Please upgrade |
 
 Until we reach v1.0.0, only the latest tagged release receives security updates.
 
@@ -116,7 +116,7 @@ SealKeeper is a community-funded open source project and does not currently offe
 
 ## Past Advisories
 
-75 advisories have been published, all affecting versions before 0.1.0 and all fixed in [v0.1.0](https://github.com/SCHED75-ORG/SealKeeper/releases/tag/v0.1.0):
+76 advisories have been published. One affects 0.1.0 and is fixed in [v0.1.1](https://github.com/SCHED75-ORG/SealKeeper/releases/tag/v0.1.1): production accepted a hand-made or degenerate `SK_MASTER_SECRET` (medium, [GHSA-f24m-cpmv-84h2](https://github.com/SCHED75-ORG/SealKeeper/security/advisories/GHSA-f24m-cpmv-84h2)). The other 75 affect versions before 0.1.0 and are fixed in [v0.1.0](https://github.com/SCHED75-ORG/SealKeeper/releases/tag/v0.1.0):
 
 | Severity | Advisories |
 |---|---|

@@ -107,6 +107,48 @@
 
 <div class="release">
   <div class="release__header">
+    <span class="release__version">0.1.1</span>
+    <span class="release__date">2026-10-27</span>
+    <span class="release__tag">security release</span>
+  </div>
+  <p>
+    Upgrade from 0.1.0, after checking how your <code>SK_MASTER_SECRET</code>
+    was produced (see the upgrade note below). Release page:
+    <a href="https://github.com/SCHED75-ORG/SealKeeper/releases/tag/v0.1.1">v0.1.1 on GitHub</a>.
+  </p>
+
+  <div class="change-group">
+    <h4>Security</h4>
+    <ul>
+      <li><strong>Hand-made master secrets are refused in production</strong>
+        (medium). 0.1.0 refused only placeholders and short values, so a
+        degenerate key (zeros, a counter, an encoded phrase) or a passphrase
+        of words was accepted, and every secret sealed or derived from it was
+        as guessable as the passphrase. Production now refuses at startup any
+        value that was not drawn at random
+        (<a href="https://github.com/SCHED75-ORG/SealKeeper/security/advisories/GHSA-f24m-cpmv-84h2">GHSA-f24m-cpmv-84h2</a>).</li>
+    </ul>
+  </div>
+
+  <div class="change-group">
+    <h4>Upgrade note</h4>
+    <ul>
+      <li>A secret printed by <code>openssl rand -base64 32</code> or another
+        random generator keeps working. A hand-made one stops the server at
+        startup, before the database is opened, so going back to 0.1.0 is
+        safe. Moving to a new secret loses what was sealed with the old one
+        (admin TOTP, SMTP and integration credentials, audit verification):
+        follow the upgrade note in
+        <a href="https://github.com/SCHED75-ORG/SealKeeper/blob/main/CHANGELOG.md">CHANGELOG.md</a>
+        before switching.</li>
+    </ul>
+  </div>
+</div>
+
+<hr>
+
+<div class="release">
+  <div class="release__header">
     <span class="release__version">0.1.0</span>
     <span class="release__date">2026-10-27</span>
     <span class="release__tag">first public release</span>
