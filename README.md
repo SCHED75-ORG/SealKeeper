@@ -158,6 +158,6 @@ SealKeeper is licensed under the **GNU Affero General Public License v3.0** ([LI
 
 <div align="center">
 
-Copyright © 2026 Pascal-Louis Tessier — [pgp 1E11 670E 11A0 4C0D 808F B94D CCC4 93CB A701 6D6E](https://sealkeeper.eu/.well-known/pgp-key.asc)
+Copyright © 2026 Pascal-Louis Darmon — [pgp 1E11 670E 11A0 4C0D 808F B94D CCC4 93CB A701 6D6E](https://sealkeeper.eu/.well-known/pgp-key.asc)
 
 </div>
