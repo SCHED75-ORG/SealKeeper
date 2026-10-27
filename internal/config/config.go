@@ -315,7 +315,7 @@ func (c Config) validate() error {
 		if c.MasterSecret == "" {
 			return errors.New("SK_MASTER_SECRET is required in production mode")
 		}
-		if err := checkMasterSecret(c.MasterSecret); err != nil {
+		if err := checkMasterSecret(c.MasterSecret, c.InstanceDomain, deriveInstanceDomain(c.BaseURL)); err != nil {
 			return err
 		}
 		if c.BaseURL == "" {
@@ -423,31 +423,6 @@ func (c Config) validateRetention() error {
 		if k.v < k.lo || k.v > k.hi {
 			return fmt.Errorf("%s must be between %d and %d, got %d", k.key, k.lo, k.hi, k.v)
 		}
-	}
-	return nil
-}
-
-// checkMasterSecret refuses master secrets that would make the at-rest
-// encryption (TOTP seeds, recovery codes, SMTP password) worthless: the
-// placeholders shipped in examples, and short values. Any string used to
-// be accepted and hashed into a key, so a copied example was a public key.
-// Passphrases of 32+ characters stay accepted: existing installs derived
-// their key from them and rejecting them would orphan the ciphertexts.
-func checkMasterSecret(secret string) error {
-	const hint = "SK_MASTER_SECRET must be 32 random bytes, base64-encoded (openssl rand -base64 32)"
-	lower := strings.ToLower(secret)
-	for _, placeholder := range []string{"replace_me", "replace-me", "changeme", "change_me", "change-me", "example"} {
-		if strings.Contains(lower, placeholder) {
-			return fmt.Errorf("SK_MASTER_SECRET looks like a placeholder; %s", hint)
-		}
-	}
-	for _, enc := range []*base64.Encoding{base64.StdEncoding, base64.RawStdEncoding, base64.URLEncoding, base64.RawURLEncoding} {
-		if raw, err := enc.DecodeString(secret); err == nil && len(raw) == 32 {
-			return nil
-		}
-	}
-	if len(secret) < 32 {
-		return errors.New(hint)
 	}
 	return nil
 }
