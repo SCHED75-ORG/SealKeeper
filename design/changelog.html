@@ -127,6 +127,9 @@
         as guessable as the passphrase. Production now refuses at startup any
         value that was not drawn at random
         (<a href="https://github.com/SCHED75-ORG/SealKeeper/security/advisories/GHSA-f24m-cpmv-84h2">GHSA-f24m-cpmv-84h2</a>).</li>
+      <li><code>golang.org/x/net</code> v0.62.0 fixes a quadratic-time path in
+        the HTML parser used to check mail templates (GO-2026-6860), and the
+        template forms are now capped at 1 MiB.</li>
     </ul>
   </div>
 

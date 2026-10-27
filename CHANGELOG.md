@@ -26,6 +26,12 @@ can confirm it: in that case nothing changes for you.
   value must read as random characters with at least 64 bits of estimated
   guessing entropy. Each test refuses a random value with probability below
   1e-10; eval mode is unchanged. GHSA-f24m-cpmv-84h2. Fixed in `4efd407`.
+- **`golang.org/x/net` v0.62.0** (GO-2026-6860, GO-2026-6866). GO-2026-6860, a
+  quadratic-time path in the HTML parser, was reachable from the mail-template
+  safety check, which parses every saved, previewed and rendered template.
+- **Template forms capped at 1 MiB.** The save and preview forms accepted 10 MB
+  bodies and parse them on every request; in demo mode any visitor may edit
+  templates, so a parser complexity bug became a remote CPU sink.
 
 ### Changed
 
