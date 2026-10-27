@@ -12,6 +12,9 @@
   "compatibility_date": "2026-10-01",
   "workers_dev": false,
   "preview_urls": true,
+  // Required by `wrangler preview`, the command Workers Builds runs for
+  // non-production branches; empty means previews inherit the top level.
+  "previews": {},
   "routes": [
     { "pattern": "sealkeeper.eu", "custom_domain": true },
     { "pattern": "www.sealkeeper.eu", "custom_domain": true }
