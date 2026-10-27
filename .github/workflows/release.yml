@@ -155,6 +155,10 @@ jobs:
         run: |
           set -euo pipefail
           ref="refs/tags/${TAG}"
+          # actions/checkout rewrites refs/tags/<tag> to point straight at
+          # the commit (`+<sha>:refs/tags/<tag>`), which turns an annotated
+          # tag into a lightweight one. Fetch the real tag object back.
+          git fetch --force --no-tags origin "${ref}:${ref}"
           # Reject lightweight tags (object type must be 'tag', not 'commit').
           if [ "$(git cat-file -t "$ref")" != "tag" ]; then
             echo "::error::Tag '$TAG' is lightweight; only annotated, signed tags are accepted"
