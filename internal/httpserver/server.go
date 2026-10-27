@@ -1245,7 +1245,7 @@ const revealHTML = `<!doctype html>
     --cream-deep:   #ECE5D5;
     --bg-elev:      #FBF7EE;
     --ink:          #1A1814;
-    --stone:        #7A7670;
+    --stone:        #69655F; /* WCAG AA: 5.05:1 on --cream (was #7A7670, 3.94:1) */
     --rule:         rgba(26, 24, 20, 0.12);
     --font-display: "Cormorant Garamond", "EB Garamond", Georgia, serif;
     --font-body:    "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
@@ -1465,7 +1465,7 @@ const landingHTML = `<!doctype html>
     --cream-deep:   #ECE5D5;
     --bg-elev:      #FBF7EE;
     --ink:          #1A1814;
-    --stone:        #7A7670;
+    --stone:        #69655F; /* WCAG AA: 5.05:1 on --cream (was #7A7670, 3.94:1) */
     --rule:         rgba(26, 24, 20, 0.12);
     --font-display: "Cormorant Garamond", "EB Garamond", Georgia, serif;
     --font-body:    "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;

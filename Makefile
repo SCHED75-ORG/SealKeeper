@@ -21,9 +21,9 @@ IMAGE_REPO     ?= ghcr.io/sched75-org/sealkeeper
 IMAGE          ?= $(IMAGE_REPO):$(VERSION)
 
 LDFLAGS         = -s -w \
-                   -X main.Version=$(VERSION) \
-                   -X main.Commit=$(COMMIT) \
-                   -X main.BuildDate=$(BUILD_DATE)
+                   -X github.com/sched75/sealkeeper/internal/version.Version=$(VERSION) \
+                   -X github.com/sched75/sealkeeper/internal/version.Commit=$(COMMIT) \
+                   -X github.com/sched75/sealkeeper/internal/version.BuildDate=$(BUILD_DATE)
 
 # ----- Help -----------------------------------------------------------------
 

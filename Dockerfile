@@ -74,9 +74,9 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" \
     go build \
         -ldflags="-s -w \
-          -X main.Version=${VERSION} \
-          -X main.Commit=${COMMIT} \
-          -X main.BuildDate=${BUILD_DATE}" \
+          -X github.com/sched75/sealkeeper/internal/version.Version=${VERSION} \
+          -X github.com/sched75/sealkeeper/internal/version.Commit=${COMMIT} \
+          -X github.com/sched75/sealkeeper/internal/version.BuildDate=${BUILD_DATE}" \
         -o /out/sealkeeper \
         ./cmd/sealkeeper
 

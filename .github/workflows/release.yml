@@ -155,6 +155,10 @@ jobs:
         run: |
           set -euo pipefail
           ref="refs/tags/${TAG}"
+          # actions/checkout rewrites refs/tags/<tag> to point straight at
+          # the commit (`+<sha>:refs/tags/<tag>`), which turns an annotated
+          # tag into a lightweight one. Fetch the real tag object back.
+          git fetch --force --no-tags origin "${ref}:${ref}"
           # Reject lightweight tags (object type must be 'tag', not 'commit').
           if [ "$(git cat-file -t "$ref")" != "tag" ]; then
             echo "::error::Tag '$TAG' is lightweight; only annotated, signed tags are accepted"
@@ -188,7 +192,9 @@ jobs:
   # ---------------------------------------------------------------------------
   test-full:
     name: Full test suite (E2E multi-browser + a11y)
-    runs-on: ubuntu-latest
+    # Pinned like ci.yml's e2e-subset: the pinned Playwright cannot install
+    # its browsers on ubuntu-latest (26.04).
+    runs-on: ubuntu-24.04
     needs: [verify-tag]
     timeout-minutes: 25
     permissions:
@@ -240,6 +246,16 @@ jobs:
           npm ci
           npx vitest run --coverage
 
+      - name: Build JS bundle and server binary for E2E
+        # playwright.config.ts serves SK_WEB_DIR=web/dist, and a prebuilt
+        # binary (SEALKEEPER_BIN) keeps `go run` compile time out of
+        # Playwright's 60 s webServer start budget.
+        run: |
+          set -euo pipefail
+          (cd web && npm run build)
+          test -s web/dist/sealkeeper-generation.umd.js
+          go build -o dist/sealkeeper-e2e ./cmd/sealkeeper
+
       - name: Install Playwright (Chromium, Firefox, WebKit)
         if: hashFiles('tests/e2e/package-lock.json') != ''
         run: |
@@ -249,7 +265,22 @@ jobs:
 
       - name: E2E full + axe-core
         if: hashFiles('tests/e2e/package-lock.json') != ''
-        run: cd tests/e2e && npx playwright test
+        env:
+          SEALKEEPER_BIN: ${{ github.workspace }}/dist/sealkeeper-e2e
+          # Headroom for CI retries; the per-email limit stays at its default
+          # because the FR-B.13 rate-limit test relies on it.
+          SK_RATE_LIMIT_IP_PER_HOUR: "1000"
+        # One run per browser: each run starts a fresh server, so the
+        # in-memory rate limiters do not carry over from one browser to the
+        # next. screenshots.spec.ts is a manual job (needs an admin password).
+        run: |
+          set -euo pipefail
+          cd tests/e2e
+          status=0
+          for project in chromium firefox webkit; do
+            npx playwright test --project="$project" --grep-invert @screenshots               --output="test-results/$project" || status=1
+          done
+          exit "$status"
 
       - name: Upload E2E artifacts on failure
         if: failure() && hashFiles('tests/e2e/package-lock.json') != ''
@@ -329,9 +360,13 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          # -trimpath + reproducible ldflags (FR-L.68, eyes on SLSA L3 v0.3)
+          # -trimpath + reproducible ldflags (FR-L.68, eyes on SLSA L3 v0.3):
+          # the build date is the commit date, not the wall clock.
+          pkg=github.com/sched75/sealkeeper/internal/version
+          commit="$(git rev-parse --short HEAD)"
+          date="$(TZ=UTC git show -s --format=%cd --date=format-local:%Y-%m-%dT%H:%M:%SZ HEAD)"
           go build -trimpath -buildvcs=true \
-            -ldflags "-s -w -X main.Version=${VERSION} -X main.BuildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            -ldflags "-s -w -X ${pkg}.Version=${VERSION} -X ${pkg}.Commit=${commit} -X ${pkg}.BuildDate=${date}" \
             -o "dist/sealkeeper-${GOOS}-${GOARCH}" \
             ./cmd/sealkeeper
 
@@ -381,6 +416,13 @@ jobs:
             exit 1
           fi
 
+      - name: Build metadata (commit date, not wall clock — FR-L.68)
+        id: meta
+        run: |
+          set -euo pipefail
+          echo "commit=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          echo "date=$(TZ=UTC git show -s --format=%cd --date=format-local:%Y-%m-%dT%H:%M:%SZ HEAD)" >> "$GITHUB_OUTPUT"
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
 
@@ -422,6 +464,8 @@ jobs:
             org.opencontainers.image.licenses=AGPL-3.0-or-later
           build-args: |
             VERSION=${{ needs.verify-tag.outputs.version }}
+            COMMIT=${{ steps.meta.outputs.commit }}
+            BUILD_DATE=${{ steps.meta.outputs.date }}
 
       - name: Expose image reference
         id: imgref
@@ -496,7 +540,7 @@ jobs:
           IMAGE_REF: ${{ steps.imgref.outputs.image_ref }}
         run: |
           set -euo pipefail
-          syft "$IMAGE_REF" -o cyclonedx-json=sbom-image.cdx.json
+          syft "$IMAGE_REF" -o cyclonedx-json@1.5=sbom-image.cdx.json
           # Sanity check: spec version must be 1.5 (FR-L.66)
           jq -e '.specVersion == "1.5"' sbom-image.cdx.json >/dev/null
 
@@ -571,11 +615,14 @@ jobs:
       - name: Generate SBOMs per binary
         run: |
           set -euo pipefail
-          mkdir -p sbom
+          # Under dist/ so the artifact keeps one root: binaries and
+          # SHA256SUMS at the top, SBOMs in sbom/ (upload-artifact strips
+          # the paths' least common ancestor).
+          mkdir -p dist/sbom
           for bin in dist/sealkeeper-*; do
             name="$(basename "$bin")"
-            syft "$bin" -o cyclonedx-json="sbom/${name}.cdx.json"
-            jq -e '.specVersion == "1.5"' "sbom/${name}.cdx.json" >/dev/null
+            syft "$bin" -o cyclonedx-json@1.5="dist/sbom/${name}.cdx.json"
+            jq -e '.specVersion == "1.5"' "dist/sbom/${name}.cdx.json" >/dev/null
           done
 
       - name: Compute SHA256SUMS
@@ -615,7 +662,7 @@ jobs:
             dist/sealkeeper-*
             dist/SHA256SUMS
             dist/SHA256SUMS.asc
-            sbom/
+            dist/sbom/
           retention-days: 30
 
   # ---------------------------------------------------------------------------
@@ -736,10 +783,12 @@ jobs:
           # Packaged Helm chart
           cp bundle/_in/helm/sealkeeper-*.tgz "$ROOT/helm/"
 
-          # Binaries + signed checksums
-          cp bundle/_in/binaries/sealkeeper-*       "$ROOT/binaries/" || true
-          cp bundle/_in/binaries/SHA256SUMS         "$ROOT/SHA256SUMS"
-          cp bundle/_in/binaries/SHA256SUMS.asc     "$ROOT/SHA256SUMS.asc"
+          # Binaries + signed checksums, side by side so that
+          # `sha256sum -c SHA256SUMS` works from binaries/.
+          cp bundle/_in/binaries/sealkeeper-*       "$ROOT/binaries/"
+          cp bundle/_in/binaries/SHA256SUMS         "$ROOT/binaries/SHA256SUMS"
+          cp bundle/_in/binaries/SHA256SUMS.asc     "$ROOT/binaries/SHA256SUMS.asc"
+          chmod +x "$ROOT"/binaries/sealkeeper-*
 
           # LICENSE + Changelog excerpt
           cp LICENSE "$ROOT/LICENSE" 2>/dev/null || echo "TODO: LICENSE missing at root" > "$ROOT/LICENSE"
@@ -1056,7 +1105,13 @@ jobs:
 
           1. **Docker Compose** — download \`sealkeeper-deploy-${VERSION#v}.tar.gz\`
              below, fill in \`.env\`, then \`docker compose up -d\`.
-          2. **Kubernetes / Helm** — \`helm install sealkeeper helm/sealkeeper-${VERSION#v}.tgz\`.
+          2. **Kubernetes / Helm** — \`helm install sealkeeper helm/sealkeeper-${VERSION#v}.tgz --set secret.masterSecret="\$(openssl rand -base64 32)"\`
+             (or point \`secret.existingSecret\` at a Secret managed out of band).
+
+          ## What's changed
+
+          Security fixes, upgrade notes and acknowledgements:
+          [CHANGELOG.md](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/blob/${VERSION}/CHANGELOG.md).
 
           ## Artifacts
 
@@ -1071,6 +1126,8 @@ jobs:
 
           See \`docs/security/verification.md\` for instructions on verifying GPG
           signatures (SHA256SUMS), cosign image signatures and SLSA provenance.
+          Release checksums and binary SBOMs are attached below; in the
+          deployment bundle they sit next to the binaries in \`binaries/\`.
           EOF
 
       - name: Create GitHub Release
@@ -1081,10 +1138,12 @@ jobs:
           body_path: release-notes.md
           draft: false
           prerelease: ${{ needs.verify-tag.outputs.prerelease == 'true' }}
+          fail_on_unmatched_files: true
           files: |
             release-assets/binaries/sealkeeper-*
             release-assets/binaries/SHA256SUMS
             release-assets/binaries/SHA256SUMS.asc
+            release-assets/binaries/sbom/sealkeeper-*.cdx.json
             release-assets/sbom/sbom-image.cdx.json
             release-assets/helm/sealkeeper-*.tgz
             release-assets/bundle/sealkeeper-deploy-*.tar.gz
