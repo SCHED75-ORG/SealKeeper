@@ -140,7 +140,7 @@ kubectl apply -k k8s/
 We sign everything. Before running a binary, verify the GPG signature on `SHA256SUMS`; before deploying an image, verify the cosign keyless signature and SLSA provenance. The full runbook is in [`docs/security/verification.md`](docs/security/verification.md).
 
 ```bash
-TAG=v0.1.0
+TAG=v0.1.1
 cosign verify \
   --certificate-identity "https://github.com/SCHED75-ORG/SealKeeper/.github/workflows/release.yml@refs/tags/${TAG}" \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \

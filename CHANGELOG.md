@@ -5,6 +5,67 @@ All notable changes to SealKeeper are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] - 2026-10-27
+
+Security release. Upgrade from 0.1.0 unless your `SK_MASTER_SECRET` was
+printed by `openssl rand -base64 32` (or another random generator) and you
+can confirm it: in that case nothing changes for you.
+
+### Security
+
+- **Production accepted a hand-made or degenerate `SK_MASTER_SECRET`**
+  (medium). 0.1.0 refused only placeholders and values shorter than 32
+  characters: it accepted any value that base64-decoded to 32 bytes whatever
+  their content (zeros, a counter, a repeated block, an encoded phrase) and
+  any passphrase of 32 or more characters. The master secret seals the TOTP
+  seeds, recovery codes, SMTP and integration credentials and derives the
+  audit-chain, IP-pseudonym and WebAuthn MAC keys, so a guessable value made
+  all of them guessable to anyone holding a copy of the database. Production
+  now refuses at startup any value that was not drawn at random: hex and
+  base64 values are decoded and their bytes tested for randomness, and every
+  value must read as random characters with at least 64 bits of estimated
+  guessing entropy. Each test refuses a random value with probability below
+  1e-10; eval mode is unchanged. GHSA-f24m-cpmv-84h2. Fixed in `4efd407`.
+- **`golang.org/x/net` v0.62.0** (GO-2026-6860, GO-2026-6866). GO-2026-6860, a
+  quadratic-time path in the HTML parser, was reachable from the mail-template
+  safety check, which parses every saved, previewed and rendered template.
+- **Template forms capped at 1 MiB.** The save and preview forms accepted 10 MB
+  bodies and parse them on every request; in demo mode any visitor may edit
+  templates, so a parser complexity bug became a remote CPU sink.
+
+### Changed
+
+- The guessing-entropy estimator moved from `internal/admin` to the leaf
+  package `internal/strength`, shared by the operator-password policy and the
+  master-secret check. Operator password scoring is unchanged.
+- `CONTRIBUTING.md` and `CLAUDE.md` describe the verification loop every
+  change goes through (quality chain, CVE analysis, attack-surface analysis
+  with reproduced findings), with rules for AI-assisted contributions (#16).
+
+### Fixed
+
+- Website and repository documents: about 85 errors found by a full proofread
+  (wrong author name, outdated threat model and crypto notes, stale
+  prerequisites, broken links) (#15).
+
+### Upgrade notes
+
+This reverses the 0.1.0 note that a passphrase of 32+ characters could be
+kept. Before upgrading, check how your `SK_MASTER_SECRET` was produced:
+
+- **Random value** (`openssl rand -base64 32`, `openssl rand -hex 32`, a
+  password manager's random generator, the Helm chart instructions): upgrade
+  as usual.
+- **Made by hand** (words, the product or instance name, a typed pattern):
+  0.1.1 exits at startup with `SK_MASTER_SECRET …; SK_MASTER_SECRET must be
+  32 random bytes, base64-encoded` before opening the database, so rolling
+  back to 0.1.0 is safe. There is no in-place rotation before 0.2
+  (`sealkeeper secrets rotate-master`, FR-E.66). Either stay on 0.1.0 until
+  then, or move to a fresh random value knowing that everything sealed with
+  the old one is lost: export `/admin/audit` first, then reset each admin
+  with `sealkeeper admin reset-password --email <e>`, and re-enter the SMTP
+  relay password and each integration's credentials. See QUICKSTART.md.
+
 ## [0.1.0] - 2026-10-27
 
 First public release. Nothing was released before this version, so every
@@ -562,4 +623,5 @@ GHSA-xr59-fxvh-vx8h (admin TOTP lockout bypass) and GHSA-h3vw-xg58-625j
 vulnerability reporting, with clear analyses and working proofs of concept
 that made both fixes straightforward to verify.
 
+[0.1.1]: https://github.com/SCHED75-ORG/SealKeeper/releases/tag/v0.1.1
 [0.1.0]: https://github.com/SCHED75-ORG/SealKeeper/releases/tag/v0.1.0
