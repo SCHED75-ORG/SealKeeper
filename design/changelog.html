@@ -97,10 +97,10 @@
 <div class="container">
 
 <div class="callout callout--gold">
-  <strong>Note.</strong> SealKeeper is currently in pre-release. No tagged
-  release is available yet. This page lists what is planned for the first
-  versions and acts as a roadmap. Once the first release is tagged, all
-  past versions will appear here.
+  <strong>Summary.</strong> This page highlights what matters to operators.
+  The complete, commit-level record is the
+  <a href="https://github.com/SCHED75-ORG/SealKeeper/blob/main/CHANGELOG.md">CHANGELOG</a>
+  in the repository.
 </div>
 
 <hr>
@@ -108,92 +108,158 @@
 <div class="release">
   <div class="release__header">
     <span class="release__version">0.1.0</span>
-    <span class="release__date">planned · 2026 Q3</span>
-    <span class="release__tag release__tag--planned">pre-alpha</span>
+    <span class="release__date">2026-10-27</span>
+    <span class="release__tag">first public release</span>
   </div>
   <p>
-    Initial pre-alpha release. Single-tenant Docker image, manual admin
-    configuration, no automated migrations. Intended for early adopters
-    willing to file issues against a young codebase.
+    First public release. Nothing was released before this version, so every
+    security issue listed below affects earlier commits only and none affects
+    a published release. Release page:
+    <a href="https://github.com/SCHED75-ORG/SealKeeper/releases/tag/v0.1.0">v0.1.0 on GitHub</a>.
   </p>
-
-  <div class="change-group">
-    <h4>Added</h4>
-    <ul>
-      <li>Single-binary Go service with embedded admin console at <code>/admin</code></li>
-      <li>Public generation page at <code>/</code> with recipient and reason fields</li>
-      <li>Three generation policies: <code>alphanumeric</code>, <code>symbolic</code>, <code>passphrase</code> (Diceware EFF wordlist)</li>
-      <li>AES-256-GCM ciphertext storage in Redis with TTL</li>
-      <li>SMTP delivery with STARTTLS and implicit TLS support</li>
-      <li>Audit log signed with HMAC-SHA-256 chained per entry</li>
-      <li>REST API for scripted link generation with bearer tokens</li>
-      <li>Argon2id admin password hashing</li>
-      <li>Health check endpoint at <code>/healthz</code></li>
-      <li>French and English UI translations</li>
-    </ul>
-  </div>
 
   <div class="change-group">
     <h4>Security</h4>
     <ul>
-      <li>Decryption keys generated server-side via <code>crypto/rand</code> and discarded from memory after email composition</li>
-      <li>URL fragment delivery of keys, never transmitted in HTTP requests by compliant browsers</li>
-      <li>Constant-time comparison for admin password verification</li>
-      <li>Rate limiting on admin login (10 attempts per 15 minutes per IP)</li>
-      <li>Content Security Policy headers on all responses</li>
-      <li>HSTS preload-ready response headers</li>
+      <li><strong>Two external reports, both medium:</strong> the admin TOTP
+        lockout counter was cleared before the second factor was checked, so the
+        TOTP code could be brute-forced
+        (<a href="https://github.com/SCHED75-ORG/SealKeeper/security/advisories/GHSA-xr59-fxvh-vx8h">GHSA-xr59-fxvh-vx8h</a>);
+        the reveal page replaced the configured generation policy with a
+        hard-coded one and misreported strength
+        (<a href="https://github.com/SCHED75-ORG/SealKeeper/security/advisories/GHSA-h3vw-xg58-625j">GHSA-h3vw-xg58-625j</a>).</li>
+      <li><strong>Internal security audits</strong> (three rounds) fixed,
+        among others: a silent downgrade to the weak built-in sample library;
+        admin CSRF tokens not bound to the session; lockout bypass under
+        concurrency; stolen sessions surviving credential changes; a placeholder
+        <code>SK_MASTER_SECRET</code> accepted in production; an SMTP STARTTLS
+        downgrade; default deployments pointing at an image namespace the
+        project does not own (critical); and release tags pushed before the
+        release gates ran.</li>
+      <li>Reveal tokens are no longer logged, audited or stored in clear: they
+        are consumed by <code>POST /api/v1/policy</code>, referenced by a
+        pseudonymous <code>tokenRef</code>, and kept only as a SHA-256 digest.</li>
+      <li>The audit log is now an HMAC-SHA256 chain keyed from
+        <code>SK_MASTER_SECRET</code>, with a sealed head anchor that detects
+        tail truncation.</li>
+      <li>Nonce-based Content-Security-Policy and security headers on every
+        response; single-use TOTP codes; WebAuthn requires user verification;
+        SIEM sinks cannot reach loopback, link-local or metadata addresses.</li>
     </ul>
   </div>
 
   <div class="change-group">
-    <h4>Known limitations at this release</h4>
+    <h4>Added</h4>
     <ul>
-      <li>Single-tenant only; no organisation or team scoping</li>
-      <li>No TOTP second factor on admin console (planned for 0.2.0)</li>
-      <li>No SAML or OIDC integration (planned for 0.3.0)</li>
-      <li>No mobile-optimised recipient view (planned for 0.2.0)</li>
-      <li>No reproducible build attestation (planned for 0.3.0)</li>
+      <li>Retention purge (RGPD): <code>serve</code> deletes ended sessions,
+        old request tokens, captured mail, long-disabled admins and expired
+        audit rows at boot and then daily, keeping the audit chain verifiable.
+        Periods are set with <code>SK_RETENTION_*</code>.</li>
+      <li><code>sealkeeper admin enable --email &lt;e&gt;</code> to recover
+        from a state with no active admin.</li>
+      <li>Configuration knobs <code>SK_MAIL_LANGUAGE</code> and
+        <code>SK_INTEGRATIONS_ALLOW_PRIVATE</code>; new audit events and
+        metrics for recovery codes, step-up failures, dropped SIEM events and
+        refused reveal-link openings.</li>
+      <li>Standalone release binaries embed the JS generation bundle.</li>
+      <li><code>docs/security/mail-authentication.md</code> (sender identity,
+        SPF, DKIM, DMARC) and an RFC 9116 <code>security.txt</code> on this
+        site.</li>
     </ul>
+  </div>
+
+  <div class="change-group">
+    <h4>Changed</h4>
+    <ul>
+      <li><code>POST /api/v1/request</code> requires
+        <code>application/json</code> and same-origin requests; token
+        consumption moves to <code>POST /api/v1/policy</code>. E-mailed
+        <code>/reveal/&lt;token&gt;</code> links are unchanged.</li>
+      <li>Policies: G1/G2 need an inline library, and saving requires the
+        guaranteed entropy to meet the level's floor (B1 ≥ 50, B2 ≥ 80,
+        B3 ≥ 100 bits). Entropy credits only what the generators draw.</li>
+      <li>Admin step-up: changing e-mail, password or security keys, and
+        managing other admins, requires the current password. Operator
+        passwords must reach an estimated 100 bits of guessing entropy.</li>
+      <li>In production, an empty domain allowlist refuses every request
+        (fail closed).</li>
+      <li>Mail templates are checked against an element/attribute allowlist;
+        mail language is the instance setting <code>SK_MAIL_LANGUAGE</code>,
+        no longer the requester's browser language.</li>
+      <li>Stricter configuration parsing: malformed values and unknown YAML
+        keys are startup errors; <code>SK_MODE=demo</code> is refused in
+        favour of <code>SK_DEMO_MODE=true</code>.</li>
+      <li>Release: tag push is the only trigger; the image is pushed by
+        digest, every gate runs on that digest, and tags are added last.</li>
+    </ul>
+  </div>
+
+  <div class="change-group">
+    <h4>Fixed</h4>
+    <ul>
+      <li>The Postgres backend now works (placeholders, booleans, audit chain
+        timestamps, the audit page query).</li>
+      <li>SQLite enforces foreign keys; WebAuthn logins after the first no
+        longer fail on SQLite.</li>
+      <li>The signed release image now ships the JS generation bundle.</li>
+      <li>The default Compose stack starts (library directory and
+        <code>/data</code> ownership, Caddy healthcheck).</li>
+      <li>Every mail now carries its own random Message-ID.</li>
+    </ul>
+  </div>
+
+  <div class="change-group">
+    <h4>Upgrade notes</h4>
+    <ul>
+      <li><strong>Pin <code>SK_MASTER_SECRET</code></strong> to a random
+        32-byte base64 value, identical across restarts and rebuilds. If the
+        shipped placeholder was ever used, rotate the SMTP relay password and
+        re-enrol every operator's TOTP.</li>
+      <li>Every admin session is invalidated: sign in again.</li>
+      <li>Reveal links issued before the upgrade stop working.</li>
+      <li>Set <code>SK_TRUSTED_PROXY_CIDRS</code> to the exact address of
+        your reverse proxy.</li>
+      <li>List at least one domain before going live in production.</li>
+      <li>Open each existing policy in the editor; ask users who received
+        passwords from a weak or ignored policy to rotate them.</li>
+      <li>Review custom mail templates, and set <code>SK_MAIL_LANGUAGE=fr</code>
+        for French deployments.</li>
+      <li>API clients send <code>Content-Type: application/json</code> and
+        consume tokens with <code>POST /api/v1/policy</code>.</li>
+      <li>Point images at <code>ghcr.io/sched75-org/sealkeeper</code> and
+        cosign verification at the <code>SCHED75-ORG/SealKeeper</code>
+        workflow identity.</li>
+      <li>Purge proxy, ingress and SIEM logs that contain reveal tokens.</li>
+    </ul>
+    <p>
+      The complete, numbered upgrade procedure is in the
+      <a href="https://github.com/SCHED75-ORG/SealKeeper/blob/main/CHANGELOG.md">CHANGELOG</a>.
+    </p>
+  </div>
+
+  <div class="change-group">
+    <h4>Acknowledgements</h4>
+    <p>
+      We thank <strong>Sri Charan Pedhiti</strong>
+      (<a href="https://github.com/Char0n1507" rel="external">@Char0n1507</a>)
+      for responsibly disclosing GHSA-xr59-fxvh-vx8h and GHSA-h3vw-xg58-625j
+      through GitHub private vulnerability reporting, with clear analyses and
+      working proofs of concept. See the <a href="/hall-of-thanks.html">hall
+      of thanks</a>.
+    </p>
   </div>
 </div>
 
 <hr>
 
-<h2 id="future">Roadmap</h2>
+<h2 id="next">Next</h2>
 
-<table>
-  <thead>
-    <tr><th>Version</th><th>Target</th><th>Highlights</th></tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td><code>0.2.0</code></td>
-      <td>2026 Q4</td>
-      <td>TOTP second factor, mobile-optimised recipient view, configurable email templates, German translation</td>
-    </tr>
-    <tr>
-      <td><code>0.3.0</code></td>
-      <td>2027 Q1</td>
-      <td>SAML/OIDC SSO for admin, reproducible builds with SLSA attestation, Helm chart, post-quantum hybrid encryption study</td>
-    </tr>
-    <tr>
-      <td><code>0.4.0</code></td>
-      <td>2027 Q2</td>
-      <td>Multi-tenant mode, team scoping, granular RBAC for requesters</td>
-    </tr>
-    <tr>
-      <td><code>1.0.0</code></td>
-      <td>2027 Q3-Q4</td>
-      <td>API stability commitment, third-party security audit, production deployment readiness</td>
-    </tr>
-  </tbody>
-</table>
-
-<div class="callout callout--night">
-  <strong>Subject to revision.</strong> Open-source roadmaps are written in
-  pencil. Priorities shift with contributor availability, real-world feedback,
-  and security findings. The dates above are intentions, not commitments.
-</div>
+<p>
+  Planned work is tracked in the
+  <a href="https://github.com/SCHED75-ORG/SealKeeper/blob/main/docs/prd/00-work-plan.md">roadmap</a>.
+  Releases are announced on the
+  <a href="https://github.com/SCHED75-ORG/SealKeeper/releases">GitHub releases page</a>.
+</p>
 
 <h2 id="versioning-policy">Versioning policy</h2>
 
@@ -212,9 +278,39 @@
 <h2 id="security-advisories">Security advisories</h2>
 
 <p>
-  Past security advisories will be listed here once any are issued. None have
-  been published at this date. The disclosure process is documented in
-  <a href="https://github.com/SCHED75-ORG/SealKeeper/blob/main/SECURITY.md">SECURITY.md</a>.
+  On 2026-10-27, 75 security advisories were published together with 0.1.0.
+  All of them affect versions earlier than 0.1.0 (unreleased commits) and are
+  fixed in 0.1.0.
+</p>
+
+<table>
+  <thead>
+    <tr><th>Severity</th><th>Advisories</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Critical</td><td>1</td></tr>
+    <tr><td>High</td><td>8</td></tr>
+    <tr><td>Medium</td><td>28</td></tr>
+    <tr><td>Low</td><td>38</td></tr>
+  </tbody>
+</table>
+
+<p>
+  Two were reported by Sri Charan Pedhiti
+  (<a href="https://github.com/Char0n1507" rel="external">@Char0n1507</a>):
+  <a href="https://github.com/SCHED75-ORG/SealKeeper/security/advisories/GHSA-xr59-fxvh-vx8h">GHSA-xr59-fxvh-vx8h</a>
+  (admin TOTP lockout bypass) and
+  <a href="https://github.com/SCHED75-ORG/SealKeeper/security/advisories/GHSA-h3vw-xg58-625j">GHSA-h3vw-xg58-625j</a>
+  (reveal flow ignored the configured generation policy). The others come from
+  internal security audits. Researchers are credited in the
+  <a href="/hall-of-thanks.html">hall of thanks</a>.
+</p>
+
+<p>
+  Every advisory is listed on the
+  <a href="https://github.com/SCHED75-ORG/SealKeeper/security/advisories">GitHub security advisories page</a>.
+  The disclosure process is documented in
+  <a href="/security.html">our security policy</a>.
 </p>
 
 <hr>
