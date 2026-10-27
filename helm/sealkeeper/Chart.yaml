@@ -4,8 +4,8 @@ description: ANSSI-compliant password distributor
 type: application
 # `version` is bumped automatically by the release workflow (`helm package
 # --version`) — keep this in sync manually for local installs.
-version: 0.1.0
-appVersion: "0.1.0"
+version: 0.1.1
+appVersion: "0.1.1"
 kubeVersion: ">=1.27.0-0"
 home: https://sealkeeper.eu
 sources:
