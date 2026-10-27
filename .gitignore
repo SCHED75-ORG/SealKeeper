@@ -16,6 +16,7 @@
 *.asc
 # The security contact public key is served by the site (security.txt "Encryption:").
 !design/.well-known/pgp-key.asc
+!docs/security/release-signing-key.asc
 !docs/pgp-key.asc.example
 revoke-*.asc
 secret-key*.asc

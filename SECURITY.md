@@ -35,6 +35,22 @@ Keyserver:   https://keys.openpgp.org/search?q=security@sealkeeper.eu
 
 The key will be published before the first tagged release. Until then, send reports unencrypted to the email address above; we will follow up by encrypted channel if needed.
 
+### Release signing key
+
+Release tags and the `SHA256SUMS` file attached to every release are signed
+with the maintainer's key, not with the security-contact key above:
+
+```
+Fingerprint: BB1F EC0B 3D83 B6F0 3CCF  2869 FA3F BAF2 05E4 48DA
+Algorithm:   ed25519 (signing/cert) + cv25519 (encryption)
+Created:     2026-07-26
+Expires:     2028-07-25
+User ID:     Pascal-Louis DARMON
+Full key:    docs/security/release-signing-key.asc (this repository)
+```
+
+`docs/security/verification.md` explains how to check a release with it.
+
 ## What to Include
 
 A useful security report typically contains:

@@ -13,9 +13,9 @@
 TAG=v0.1.0   # ← the release you downloaded
 
 # 1. GPG-signed checksums for the binaries
-gpg --import path/to/sealkeeper-maintainer.asc
+gpg --import docs/security/release-signing-key.asc   # from this repository
 gpg --verify SHA256SUMS.asc SHA256SUMS
-sha256sum -c SHA256SUMS
+sha256sum -c --ignore-missing SHA256SUMS
 
 # 2. Cosign keyless signature on the OCI image
 cosign verify \
@@ -31,7 +31,7 @@ gh attestation verify oci://ghcr.io/sched75-org/sealkeeper:${TAG} \
 
 # 4. SBOM (CycloneDX 1.5) for the image
 cosign download attestation \
-  --predicate-type https://cyclonedx.org/bom/v1.5 \
+  --predicate-type https://cyclonedx.org/bom \
   ghcr.io/sched75-org/sealkeeper:${TAG} > image.sbom.intoto.jsonl
 ```
 
@@ -43,24 +43,32 @@ provably came from this project's `release.yml` workflow.
 ## 1. Verify binaries (GPG)
 
 Each release attaches `SHA256SUMS` and `SHA256SUMS.asc`. The `.asc` is a
-detached, ASCII-armored GPG signature produced by the **maintainer key**
-documented in `SECURITY.md` (full fingerprint there). The signing key is
+detached, ASCII-armored GPG signature produced by the **release signing key**
+documented in `SECURITY.md` under "Release signing key" (fingerprint
+`BB1F EC0B 3D83 B6F0 3CCF  2869 FA3F BAF2 05E4 48DA`).
+It is not the security-contact key listed above it. The signing key is
 **never** the same as the cosign keyless identity — cosign signs the image,
 GPG signs the binary checksum file.
 
 1. Download both files from the GitHub Release page along with the binary you
    actually want (`sealkeeper-linux-amd64`, etc.).
-2. Import the maintainer public key (`SECURITY.md` includes the fingerprint and
-   the keyserver of record). Verify the imported fingerprint matches.
+2. Import the release signing key (`docs/security/release-signing-key.asc` in
+   this repository) and check that `gpg --fingerprint` shows the fingerprint
+   above.
 3. Verify the signature:
    ```bash
    gpg --verify SHA256SUMS.asc SHA256SUMS
    ```
-   Expected: `Good signature from "SealKeeper Maintainers <…>" [ultimate]`.
+   Expected: `Good signature from "Pascal-Louis DARMON <…>"`. gpg also warns
+   that the key is not certified with a trusted signature until you certify
+   it yourself; the fingerprint check in step 2 is what matters.
 4. Verify the binary against the signed checksums:
    ```bash
-   sha256sum -c SHA256SUMS
+   sha256sum -c --ignore-missing SHA256SUMS
    ```
+   `--ignore-missing` skips the platforms you did not download. In the
+   deployment bundle, `SHA256SUMS` and its signature sit next to the
+   binaries in `binaries/`.
    Expected: every line ends with `OK`.
 
 If the signature is `BAD` or the key fingerprint differs from the one pinned
@@ -127,7 +135,7 @@ SBOMs are produced by `syft` (FR-L.66) and attached two ways:
 
   ```bash
   cosign download attestation \
-    --predicate-type https://cyclonedx.org/bom/v1.5 \
+    --predicate-type https://cyclonedx.org/bom \
     ghcr.io/sched75-org/sealkeeper:v0.1.0 \
     | jq -r '.payload | @base64d | fromjson | .predicate' \
     > image.sbom.cdx.json
