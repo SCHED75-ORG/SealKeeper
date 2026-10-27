@@ -61,6 +61,12 @@ const (
 	adminWebauthnMaxBodyBytes = 64 << 10
 )
 
+// adminTemplateMaxBodyBytes caps the template save and preview forms. Both
+// parse the HTML body (x/net/html) on every request, and in demo mode any
+// visitor may edit templates; the defaults are a few KB, the cap leaves
+// room for an inline data: logo.
+const adminTemplateMaxBodyBytes = 1 << 20
+
 const (
 	cookieAdminSession = "sk_admin_session"
 	cookieAdminCSRF    = "sk_admin_csrf"
@@ -1650,6 +1656,7 @@ func (s *Server) handleAdminTemplateEdit(w http.ResponseWriter, r *http.Request)
 
 func (s *Server) handleAdminTemplateSave(w http.ResponseWriter, r *http.Request) {
 	a, _, _ := adminFromCtx(r)
+	r.Body = http.MaxBytesReader(w, r.Body, adminTemplateMaxBodyBytes)
 	if err := r.ParseForm(); err != nil || !s.checkSessionCSRF(r) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
@@ -1681,6 +1688,7 @@ func (s *Server) handleAdminTemplateSave(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) handleAdminTemplatePreview(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, adminTemplateMaxBodyBytes)
 	if err := r.ParseForm(); err != nil || !s.checkSessionCSRF(r) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
