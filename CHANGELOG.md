@@ -5,6 +5,19 @@ All notable changes to SealKeeper are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- `CONTRIBUTING.md` and `CLAUDE.md` describe the verification loop every
+  change goes through (quality chain, CVE analysis, attack-surface analysis
+  with reproduced findings), with rules for AI-assisted contributions (#16).
+
+### Fixed
+
+- Website: the Contributing page diagrams follow the page theme; message
+  labels and arrows were unreadable in light mode and after a theme toggle (#18).
+
 ## [0.1.1] - 2026-10-27
 
 Security release. Upgrade from 0.1.0 unless your `SK_MASTER_SECRET` was
@@ -38,9 +51,6 @@ can confirm it: in that case nothing changes for you.
 - The guessing-entropy estimator moved from `internal/admin` to the leaf
   package `internal/strength`, shared by the operator-password policy and the
   master-secret check. Operator password scoring is unchanged.
-- `CONTRIBUTING.md` and `CLAUDE.md` describe the verification loop every
-  change goes through (quality chain, CVE analysis, attack-surface analysis
-  with reproduced findings), with rules for AI-assisted contributions (#16).
 
 ### Fixed
 
@@ -623,5 +633,6 @@ GHSA-xr59-fxvh-vx8h (admin TOTP lockout bypass) and GHSA-h3vw-xg58-625j
 vulnerability reporting, with clear analyses and working proofs of concept
 that made both fixes straightforward to verify.
 
+[Unreleased]: https://github.com/SCHED75-ORG/SealKeeper/compare/v0.1.1...HEAD
 [0.1.1]: https://github.com/SCHED75-ORG/SealKeeper/releases/tag/v0.1.1
 [0.1.0]: https://github.com/SCHED75-ORG/SealKeeper/releases/tag/v0.1.0
