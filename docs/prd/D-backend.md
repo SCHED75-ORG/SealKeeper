@@ -1,8 +1,8 @@
 # Module D — Backend serveur
 
 **Statut** : validé
-**Version** : 1.0
-**Dernière mise à jour** : 2026-05-16
+**Version** : 1.1
+**Dernière mise à jour** : 2026-10-28
 **Auteur** : Pascal-Louis Darmon (assisté par Daneel / Claude)
 **Dépendances** : modules A (générateur), B (workflow), C (console admin) ; alimente G (API), E (sécurité), F (intégrations), H (déploiement)
 
@@ -120,6 +120,13 @@ Tables principales (modèle de référence : §5.1 du module C qui décrit le sc
 | FR-D.41 | DKIM externe : le serveur n'effectue **pas** de signature DKIM en v0.1 (cf. décision D-C.19 — délégué à l'infra mail) | MUST |
 | FR-D.42 | En mode eval (`SK_MODE=eval`), les emails ne sont **pas envoyés** au relais ; ils sont stockés dans `captured_mail` pour consultation via la console | MUST |
 | FR-D.43 | Liste des destinataires d'un envoi : **un seul destinataire** par email (le demandeur). Pas de CC, pas de BCC | MUST |
+| FR-D.82 | Transport **Microsoft Graph** (FR-C.100) : implémentation de l'interface d'envoi qui appelle `POST /users/{boîte d'envoi}/sendMail`. Le jeton OAuth 2.0 est obtenu par *client credentials* (assertion signée par le certificat, ou secret client) sur le point de terminaison d'identité du cloud configuré, et mis en cache jusqu'à son expiration moins une marge | 📋 v0.2 |
+| FR-D.83 | Le message est assemblé par le module mail existant (MIME, Message-ID aléatoire, contrôles de sécurité des templates) et transmis à Graph **en MIME brut** : le contenu envoyé est identique quel que soit le transport | 📋 v0.2 |
+| FR-D.84 | `saveToSentItems` est **toujours `false`** : une copie dans *Éléments envoyés* conserverait dans la boîte d'envoi des liens de révélation encore valides | 📋 v0.2 (MUST) |
+| FR-D.85 | Les appels sortants ne visent que les points de terminaison du cloud configuré (`login.microsoftonline.com` et `graph.microsoft.com` en global ; leurs équivalents US Gov ou Chine sur choix explicite), en HTTPS avec validation du certificat. Aucune URL n'est saisissable librement | 📋 v0.2 |
+| FR-D.86 | Erreurs Graph : `429` et `503` sont transitoires et retentés selon FR-D.39 en respectant `Retry-After` (borné) ; `401` et `403` sont définitifs (`EMAIL_FAILED`, raison `graph_auth` ou `graph_forbidden`). Le corps de réponse va dans le log serveur, jamais dans l'audit log ni dans l'UI | 📋 v0.2 |
+| FR-D.87 | Timeouts alignés sur FR-D.38 : 10 s pour l'obtention du jeton, 30 s pour l'envoi | 📋 v0.2 |
+| FR-D.88 | La configuration Graph peut aussi être fournie par variables d'environnement (`SK_GRAPH_TENANT_ID`, `SK_GRAPH_CLIENT_ID`, `SK_GRAPH_SENDER`, `SK_GRAPH_CLOUD`, et `SK_GRAPH_CERT_FILE` + `SK_GRAPH_KEY_FILE` ou `SK_GRAPH_CLIENT_SECRET`), comme `SK_SMTP_*` ; la configuration saisie en console prime | 📋 v0.2 |
 
 ### 3.6 Templating des emails
 
@@ -376,6 +383,7 @@ Les décisions techniques structurantes sont prises et liantes :
 | D-D.22 | **Limite upload bibliothèque : 10 MB par défaut**, configurable via `SK_MAX_LIBRARY_SIZE_MB` | EFF Diceware ~50 KB, corpus enrichis qq MB, marge confortable |
 | D-D.23 | **Endpoint export DPO RGPD** : décision renvoyée au module I (RGPD) ; position préliminaire : endpoint dédié `/admin/dpo-export` | Décision logique du module conformité |
 | D-D.24 | **Audit log : 1 table `audit_log` avec colonne JSON `details`** (pas plusieurs tables typées) | Code uniforme, index JSONB (PG) ou FTS5 (SQLite), requêtes flexibles |
+| D-D.26 | **Graph sans SDK Microsoft** (position préliminaire) : appels REST directs et assertion client signée localement | Surface de dépendances minimale et auditée (govulncheck) ; seuls deux points de terminaison sont utilisés |
 | D-D.25 | **Signature chaîne audit** : décision renvoyée au module E (sécurité) ; position préliminaire : HMAC-SHA256 en v0.1, Ed25519 en v0.2 pour vérification asymétrique tiers | Décision sécurité, détaillée dans le module dédié |
 
 ---
@@ -416,6 +424,7 @@ Les décisions techniques structurantes sont prises et liantes :
 
 | Version | Date | Auteur | Changements |
 |---|---|---|---|
+| 1.1 | 2026-10-28 | P.-L. Darmon (Claude) | Ajout du transport d'envoi **Microsoft Graph** pour v0.2 : FR-D.82 à FR-D.88, décision D-D.26 |
 | 1.0 | 2026-05-16 | P.-L. Darmon (Daneel) | **Version validée** — 10 décisions tranchées (D-D.16 à D-D.25) : chi confirmé, fichiers disque + hash DB pour bibliothèques, cache policies mémoire avec invalidation channel, master secret env base64, sessions en DB v0.1 + Redis v0.3, compression reverse proxy, limite upload 10 MB, audit log 1 table JSON. Deux questions renvoyées : DPO export en module I, signature audit en module E |
 | 0.1 | 2026-05-16 | P.-L. Darmon (Daneel) | Création initiale — stack technique Go entière, 81 FR répartis en 11 sous-sections, schéma packages Mermaid, séquence cycle de vie demande utilisateur, 15 décisions techniques tranchées, 10 questions ouvertes |
 
