@@ -1,8 +1,8 @@
 # Module C — Console admin
 
 **Statut** : validé
-**Version** : 1.0
-**Dernière mise à jour** : 2026-05-16
+**Version** : 1.1
+**Dernière mise à jour** : 2026-10-28
 **Auteur** : Pascal-Louis Darmon (assisté par Daneel / Claude)
 **Dépendances** : aucune (module central) ; alimente A, B, D, E, F, G, H, I
 
@@ -140,6 +140,12 @@ La console est accessible sous `/admin` de l'instance. Elle est destinée à un 
 | FR-C.60 | Configuration de l'expéditeur : email *From*, *Reply-To*, nom affiché | MUST |
 | FR-C.61 | Bouton *« Tester l'envoi »* : envoie un email de test à une adresse saisie ad-hoc, log le résultat | MUST |
 | FR-C.62 | Configuration DKIM : possibilité d'uploader une clé privée DKIM pour signature des emails sortants. **En v0.1** : le DKIM est attendu en amont (postfix, relai SMTP, MTA). Configuration native : 📋 v0.2 | 📋 v0.2 |
+| FR-C.100 | La section *SMTP* devient *Envoi des emails* : choix **exclusif** du transport actif, **relais SMTP** (FR-C.57) ou **Microsoft Graph** (FR-C.101). Un seul transport actif par instance (D-C.13) ; changer de transport est audité | 📋 v0.2 |
+| FR-C.101 | Configuration Microsoft Graph : identifiant du tenant (GUID), identifiant de l'application Entra ID (*client ID*), **boîte d'envoi** (adresse de la boîte qui expédie, qui sert aussi d'expéditeur *From*), cloud (`global` par défaut ; `usgov` et `china` uniquement sur choix explicite) | 📋 v0.2 |
+| FR-C.102 | Authentification Graph par *client credentials* : **certificat** (recommandé : clé privée + certificat X.509) ou **secret client**. La clé privée ou le secret sont stockés chiffrés côté serveur (clé dérivée du master secret, contexte dédié distinct de SMTP) et ne sont jamais réaffichés (mêmes règles que FR-C.58 et FR-C.59). La console affiche la date d'expiration du certificat ou du secret quand elle est connue et alerte 30 jours avant | 📋 v0.2 |
+| FR-C.103 | **Moindre privilège** : la console rappelle que la permission d'application `Mail.Send` autorise par défaut l'envoi au nom de **toutes** les boîtes du tenant et doit être restreinte à la seule boîte d'envoi (Exchange *RBAC for Applications*, à défaut *Application Access Policy*). Un bandeau d'avertissement reste affiché tant que l'administrateur n'a pas confirmé cette restriction | 📋 v0.2 |
+| FR-C.104 | Le bouton *« Tester l'envoi »* (FR-C.61) fonctionne pour les deux transports. Pour Graph, le résultat affiché se limite à l'étape (`jeton` ou `envoi`), au statut HTTP et au code d'erreur Graph ; la réponse brute de Microsoft n'est jamais affichée ni écrite dans l'audit log (elle va dans le log serveur) | 📋 v0.2 |
+| FR-C.105 | En mode démo (`SK_DEMO_MODE=true`), la configuration Graph est en lecture seule et les emails restent capturés, comme pour SMTP | 📋 v0.2 |
 | FR-C.63 | Section *Captured mail* (visible uniquement en mode eval) affiche les emails capturés au lieu d'être envoyés. Chaque entrée : timestamp, destinataire, sujet, corps brut + HTML | MUST si eval |
 
 ### 3.8 Branding
@@ -354,6 +360,7 @@ erDiagram
 | Élévations | `ELEVATION_ADDED`, `ELEVATION_REMOVED`, `ELEVATION_BULK_IMPORT` |
 | Bibliothèques | `LIBRARY_UPLOADED`, `LIBRARY_DELETED`, `LIBRARY_ACTIVATED`, `LIBRARY_DEACTIVATED` |
 | SMTP | `SMTP_CONFIG_UPDATED`, `SMTP_TEST_SENT`, `SMTP_TEST_FAILED` |
+| Microsoft Graph (v0.2) | `MAIL_TRANSPORT_CHANGED`, `GRAPH_CONFIG_UPDATED`, `GRAPH_TEST_SENT`, `GRAPH_TEST_FAILED` |
 | Branding & templates | `BRANDING_UPDATED`, `TEMPLATE_UPDATED` |
 | Intégrations | `INTEGRATION_ADDED`, `INTEGRATION_UPDATED`, `INTEGRATION_TESTED`, `INTEGRATION_REMOVED` |
 | Système | `MAINTENANCE_MODE_ON`, `MAINTENANCE_MODE_OFF`, `CONFIG_EXPORTED`, `CONFIG_IMPORTED`, `CONFIG_ROLLED_BACK` |
@@ -493,6 +500,7 @@ Les décisions suivantes sont prises et liantes pour cette version :
 | D-C.25 | **Dashboards Grafana JSON livrés en v0.1** (Ops + Sécurité, 2 fichiers prêts à importer) | Différenciant fort, peu de produits le font, démontre la posture observability-first |
 | D-C.26 | **LDAP / AD auto-élévation** reporté à **v0.3** (nécessite SSO/OIDC livré en parallèle) | Complexe, CSV bulk import (FR-C.42) couvre le besoin en v0.1/v0.2 |
 | D-C.27 | **Création de compte admin via UI dès v0.1** | Multi-admins impossible sans cela ; CLI = bootstrap initial uniquement |
+| D-C.28 | **Microsoft Graph comme second transport d'envoi en v0.2** (FR-C.100 à FR-C.105), à côté du relais SMTP | Les tenants Microsoft 365 désactivent l'authentification SMTP de base ; Graph `sendMail` en *client credentials* est la voie recommandée par Microsoft et évite un compte de service à mot de passe. SMTP AUTH en OAuth (XOAUTH2) non retenu : même gestion de jeton, sans les garanties de Graph (`saveToSentItems`, restriction par boîte) |
 
 ---
 
@@ -526,6 +534,7 @@ Les décisions suivantes sont prises et liantes pour cette version :
 
 | Version | Date | Auteur | Changements |
 |---|---|---|---|
+| 1.1 | 2026-10-28 | P.-L. Darmon (Claude) | Ajout du transport d'envoi **Microsoft Graph** pour v0.2 : FR-C.100 à FR-C.105, décision D-C.28, événements d'audit Graph (§5.2) |
 | 1.0 | 2026-05-16 | P.-L. Darmon (Daneel) | **Version validée** — 12 décisions tranchées (D-C.16 à D-C.27) : récupération CLI-only, 7 fonctionnalités reportées v0.2 (mode auditeur, versioning rollback, DKIM natif, comparaison policies, UI historique policy, aperçu branding, LDAP-v0.3), 5 fonctionnalités confirmées v0.1 (UI capture mail, mode maintenance, dashboards Grafana, UI création admin, CLI récupération). Scope v0.1 réduit ~30 % |
 | 0.1 | 2026-05-16 | P.-L. Darmon (Daneel) | Création initiale, 99 FR répartis en 13 sous-sections, 15 décisions tranchées, 12 questions ouvertes, schéma ER complet, 4 diagrammes Mermaid |
 

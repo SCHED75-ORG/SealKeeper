@@ -1,8 +1,8 @@
 # Module H — Déploiement
 
 **Statut** : validé
-**Version** : 1.0
-**Dernière mise à jour** : 2026-05-16
+**Version** : 1.1
+**Dernière mise à jour** : 2026-10-28
 **Auteur** : Pascal-Louis Darmon (assisté par Daneel / Claude)
 **Dépendances** : modules D (binaire et CLI), E (TLS, WAF), G (endpoints à exposer) ; alimente L (release process)
 
@@ -89,7 +89,7 @@ Trois modes de déploiement sont supportés :
 | FR-H.34 | Volume `emptyDir` ou PVC pour `/data` (PVC recommandé en production) | MUST |
 | FR-H.35 | Liveness probe : `httpGet /healthz`, initialDelaySeconds=10, periodSeconds=30. Readiness probe : `httpGet /readyz`, initialDelaySeconds=5, periodSeconds=10 | MUST |
 | FR-H.36 | **PodDisruptionBudget** : `minAvailable: 1` si la cible est haute disponibilité ; à ajuster selon réplicas | SHOULD |
-| FR-H.37 | **HorizontalPodAutoscaler** : 📋 v0.2 (nécessite sessions Redis multi-instance, cf. D-D.20) | 📋 v0.2 |
+| FR-H.37 | **HorizontalPodAutoscaler** : 📋 v0.3 (nécessite sessions Redis multi-instance, cf. D-D.20) | 📋 v0.3 |
 | FR-H.38 | **ServiceMonitor** ou **PodMonitor** Prometheus Operator détecte `/metrics` automatiquement si annoté | SHOULD |
 
 ### 3.5 Configuration via variables d'environnement
@@ -449,7 +449,7 @@ sequenceDiagram
 | D-H.10 | **Mode démo public disponible mais non-hébergé par les mainteneurs** | Préserve les ressources ; mainteneurs auto-hébergeurs encouragés |
 | D-H.11 | **Pas de mTLS DB / SMTP natif** ; délégation à la couche réseau (service mesh) | Restent simples ; complexité gérée par l'orchestrateur |
 | D-H.12 | **Reproducible builds** : objectif v0.3 (SLSA niveau 3) | Coût d'ingénierie non-trivial, livré en maturité |
-| D-H.13 | **HPA reporté v0.2** (nécessite Redis pour sessions, cf. D-D.20) | Multi-instance demande externalisation des sessions |
+| D-H.13 | **HPA reporté v0.3** (nécessite Redis pour sessions, livré en v0.3 selon D-D.20) | Multi-instance demande externalisation des sessions |
 | D-H.14 | **Helm chart sur repo dédié** (`https://sealkeeper.eu/charts`), pas Artifact Hub immédiatement | Maîtrise du flux ; Artifact Hub possible v0.2 |
 | D-H.15 | **Documentation des configurations reverse proxy** pour Caddy, Traefik, Nginx dans `examples/` | Réduit la friction d'adoption ; trois solutions principales du marché |
 | D-H.16 | **Image multi-arch amd64 + arm64 dès v0.1** | Build via `docker buildx`, couvre Raspberry Pi et Mac Apple Silicon, peu d'effort additionnel |
@@ -500,6 +500,7 @@ Trois fonctionnalités sont reportées sous condition de demande : chart OpenShi
 
 | Version | Date | Auteur | Changements |
 |---|---|---|---|
+| 1.1 | 2026-10-28 | P.-L. Darmon (Claude) | HPA (FR-H.37, D-H.13) reporté de v0.2 à **v0.3**, aligné sur Redis (D-D.20) |
 | 1.0 | 2026-05-16 | P.-L. Darmon (Daneel) | **Version validée** — 9 décisions tranchées (D-H.16 à D-H.24) : multi-arch dès v0.1, OpenShift doc séparée, opérateur K8s v0.4+, pas d'alpine, UBI v0.2 sur demande, healthcheck Docker externe, trusted_proxy_cidrs vide par défaut, pas de limite domaines hard, doc uninstall |
 | 0.1 | 2026-05-16 | P.-L. Darmon (Daneel) | Création initiale — 82 FR réparties en 11 sous-sections, 3 modes de déploiement (eval, Compose, K8s), Helm chart structuré, sécurité conteneur (distroless, non-root, read-only), backup/restore, mises à jour SemVer + expand-contract, 15 décisions tranchées, 9 questions ouvertes, 4 diagrammes Mermaid |
 
